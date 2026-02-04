@@ -83,4 +83,12 @@ std::vector<Backend> available_backends();
 /// Get a human-readable name for a backend.
 const char* backend_name(Backend b);
 
+/// Auto-detect the best available backend.
+/// Preference order: GPU_Metal > GPU_CUDA > CPU_Parallel > CPU_Sequential.
+Backend auto_detect();
+
+/// Set the backend on an existing config. Returns false if the backend
+/// is not available on this system.
+bool set_backend(Config& config, Backend b);
+
 }  // namespace evm::gpu
