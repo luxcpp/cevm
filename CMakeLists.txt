@@ -175,6 +175,9 @@ endif()
 if(TARGET evm-bench-block)
     list(APPEND install_targets evm-bench-block)
 endif()
+if(TARGET evm-bench-state)
+    list(APPEND install_targets evm-bench-state)
+endif()
 
 set_target_properties(
     ${install_targets} PROPERTIES
