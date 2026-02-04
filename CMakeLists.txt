@@ -1,4 +1,4 @@
-# evmone: Ethereum Virtual Machine
+# evm: Ethereum Virtual Machine
 # Copyright 2019 The evmone Authors.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -8,7 +8,7 @@ if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/evmc/.git)
     message(FATAL_ERROR "Git submodules not initialized, execute:\n  git submodule update --init")
 endif()
 
-option(BUILD_SHARED_LIBS "Build evmone as a shared library" ON)
+option(BUILD_SHARED_LIBS "Build evm as a shared library" ON)
 option(COVERAGE "Build with coverage instrumentation" OFF)
 option(ASSERTIONS "Force enable the assertions in the code ignoring the CMAKE_BUILD_TYPE default" OFF)
 option(EVMONE_TESTING "Build tests and test tools" OFF)
@@ -26,7 +26,7 @@ cable_set_build_type(DEFAULT Release CONFIGURATION_TYPES Release Debug)
 
 include(Hunter/init)
 
-project(evmone LANGUAGES CXX C)
+project(evm LANGUAGES CXX C)
 set(PROJECT_VERSION 0.19.0)
 
 string(REGEX MATCH "([0-9]+)\\.([0-9]+)" _ ${PROJECT_VERSION})
@@ -132,7 +132,7 @@ endif()
 include(GNUInstallDirs)
 
 if(EVMONE_FUZZING)
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build evmone as a shared library" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build evm as a shared library" FORCE)
     set(EVMONE_TESTING ON CACHE BOOL "Build tests and test tools" FORCE)
 
     if(NOT COVERAGE)
@@ -165,15 +165,15 @@ endif()
 
 # INSTALL
 
-set(install_targets evmone)
-if(TARGET evmone-standalone)
-    list(APPEND install_targets evmone-standalone)
+set(install_targets evm)
+if(TARGET evm-standalone)
+    list(APPEND install_targets evm-standalone)
 endif()
 if(TARGET evm-test)
     list(APPEND install_targets evm-test)
 endif()
-if(TARGET evmone-bench)
-    list(APPEND install_targets evmone-bench)
+if(TARGET evm-bench-block)
+    list(APPEND install_targets evm-bench-block)
 endif()
 
 set_target_properties(
@@ -183,7 +183,7 @@ set_target_properties(
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}
 )
 
-install(TARGETS ${install_targets} EXPORT evmoneTargets
+install(TARGETS ${install_targets} EXPORT evmTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

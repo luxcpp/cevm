@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace evmone::advanced
+namespace evm::advanced
 {
 struct Instruction;
 
@@ -159,4 +159,4 @@ EVMC_EXPORT AdvancedCodeAnalysis analyze(evmc_revision rev, bytes_view code) noe
 
 EVMC_EXPORT const OpTable& get_op_table(evmc_revision rev) noexcept;
 
-}  // namespace evmone::advanced
+}  // namespace evm::advanced

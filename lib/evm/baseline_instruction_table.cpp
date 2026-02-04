@@ -5,7 +5,7 @@
 #include "baseline_instruction_table.hpp"
 #include "instructions_traits.hpp"
 
-namespace evmone::baseline
+namespace evm::baseline
 {
 namespace
 {
@@ -32,4 +32,4 @@ const CostTable& get_baseline_cost_table(evmc_revision rev) noexcept
 {
     return COST_TABLES[rev];
 }
-}  // namespace evmone::baseline
+}  // namespace evm::baseline

@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace evmone
+namespace evm
 {
 namespace advanced
 {
@@ -203,4 +203,4 @@ public:
         return m_tx;
     }
 };
-}  // namespace evmone
+}  // namespace evm

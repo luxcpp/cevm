@@ -8,7 +8,7 @@
 #include <array>
 #include <optional>
 
-namespace evmone::instr
+namespace evm::instr
 {
 /// The special gas cost value marking an EVM instruction as "undefined".
 constexpr int16_t undefined = -1;
@@ -394,4 +394,4 @@ constexpr inline std::array<Traits, 256> traits = []() noexcept {
     return table;
 }();
 
-}  // namespace evmone::instr
+}  // namespace evm::instr

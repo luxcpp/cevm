@@ -7,7 +7,7 @@
 #include <evmc/evmc.hpp>
 #include <evmc/utils.h>
 
-namespace evmone
+namespace evm
 {
 using evmc::bytes_view;
 
@@ -25,4 +25,4 @@ constexpr bool is_code_delegated(bytes_view code) noexcept
 /// Get EIP-7702 delegate address from the code of addr, if it is delegated.
 EVMC_EXPORT std::optional<evmc::address> get_delegate_address(
     const evmc::HostInterface& host, const evmc::address& addr) noexcept;
-}  // namespace evmone
+}  // namespace evm

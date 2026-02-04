@@ -8,7 +8,7 @@
 #include <optional>
 #include <unordered_map>
 
-namespace evmone
+namespace evm
 {
 /// Least Recently Used (LRU) cache.
 ///
@@ -159,4 +159,4 @@ public:
     }
 };
 
-}  // namespace evmone
+}  // namespace evm

@@ -9,7 +9,7 @@
 #include <fstream>
 #include <stack>
 
-namespace evmone
+namespace evm
 {
 namespace
 {
@@ -197,4 +197,4 @@ std::unique_ptr<Tracer> create_instruction_tracer(std::ostream& out)
 {
     return std::make_unique<InstructionTracer>(out);
 }
-}  // namespace evmone
+}  // namespace evm

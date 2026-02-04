@@ -21,7 +21,7 @@
 #define ASM_COMMENT(COMMENT)
 #endif
 
-namespace evmone::baseline
+namespace evm::baseline
 {
 namespace
 {
@@ -314,4 +314,4 @@ evmc_result execute(evmc_vm* c_vm, const evmc_host_interface* host, evmc_host_co
     const auto code_analysis = analyze(container);
     return execute(*vm, *host, ctx, rev, *msg, code_analysis);
 }
-}  // namespace evmone::baseline
+}  // namespace evm::baseline

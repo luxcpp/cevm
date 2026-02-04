@@ -4,7 +4,7 @@
 
 #include "instructions.hpp"
 
-namespace evmone::instr::core
+namespace evm::instr::core
 {
 namespace
 {
@@ -140,4 +140,4 @@ Result sstore(StackTop stack, int64_t gas_left, ExecutionState& state) noexcept
     state.gas_refund += gas_refund;
     return {EVMC_SUCCESS, gas_left};
 }
-}  // namespace evmone::instr::core
+}  // namespace evm::instr::core

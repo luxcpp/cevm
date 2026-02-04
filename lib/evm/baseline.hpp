@@ -7,7 +7,7 @@
 #include <evmc/utils.h>
 #include <memory>
 
-namespace evmone
+namespace evm
 {
 using evmc::bytes_view;
 class ExecutionState;
@@ -106,4 +106,4 @@ EVMC_EXPORT evmc_result execute(VM&, const evmc_host_interface& host, evmc_host_
     evmc_revision rev, const evmc_message& msg, const CodeAnalysis& analysis) noexcept;
 
 }  // namespace baseline
-}  // namespace evmone
+}  // namespace evm

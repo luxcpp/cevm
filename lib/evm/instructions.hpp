@@ -9,7 +9,7 @@
 #include "instructions_xmacro.hpp"
 #include <evmone_precompiles/keccak.hpp>
 
-namespace evmone
+namespace evm
 {
 using code_iterator = const uint8_t*;
 
@@ -1023,4 +1023,4 @@ MAP_OPCODES
 #undef ON_OPCODE_IDENTIFIER
 #define ON_OPCODE_IDENTIFIER ON_OPCODE_IDENTIFIER_DEFAULT
 }  // namespace instr::core
-}  // namespace evmone
+}  // namespace evm

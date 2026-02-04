@@ -8,11 +8,11 @@
 #include "vm.hpp"
 #include "advanced_execution.hpp"
 #include "baseline.hpp"
-#include <evm/evmone.h>
+#include <evmone/evmone.h>
 #include <cassert>
 #include <iostream>
 
-namespace evmone
+namespace evm
 {
 namespace
 {
@@ -35,7 +35,7 @@ evmc_set_option_result set_option(evmc_vm* c_vm, char const* c_name, char const*
 
     if (name == "advanced")
     {
-        c_vm->execute = evmone::advanced::execute;
+        c_vm->execute = evm::advanced::execute;
         return EVMC_SET_OPTION_SUCCESS;
     }
     else if (name == "cgoto")
@@ -76,10 +76,10 @@ VM::VM() noexcept
         EVMC_ABI_VERSION,
         "evmone",
         PROJECT_VERSION,
-        evmone::destroy,
-        evmone::baseline::execute,
-        evmone::get_capabilities,
-        evmone::set_option,
+        evm::destroy,
+        evm::baseline::execute,
+        evm::get_capabilities,
+        evm::set_option,
     }
 {
     m_execution_states.reserve(1025);
@@ -96,11 +96,11 @@ ExecutionState& VM::get_execution_state(size_t depth) noexcept
     return m_execution_states[depth];
 }
 
-}  // namespace evmone
+}  // namespace evm
 
 extern "C" {
 EVMC_EXPORT evmc_vm* evmc_create_evmone() noexcept
 {
-    return new evmone::VM{};
+    return new evm::VM{};
 }
 }

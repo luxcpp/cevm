@@ -9,7 +9,7 @@
 constexpr int64_t CALL_VALUE_COST = 9000;
 constexpr int64_t ACCOUNT_CREATION_COST = 25000;
 
-namespace evmone::instr::core
+namespace evm::instr::core
 {
 namespace
 {
@@ -261,4 +261,4 @@ template Result create_impl<OP_CREATE>(
     StackTop stack, int64_t gas_left, ExecutionState& state) noexcept;
 template Result create_impl<OP_CREATE2>(
     StackTop stack, int64_t gas_left, ExecutionState& state) noexcept;
-}  // namespace evmone::instr::core
+}  // namespace evm::instr::core
