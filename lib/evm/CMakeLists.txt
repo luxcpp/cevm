@@ -70,10 +70,23 @@ set_source_files_properties(vm.cpp PROPERTIES COMPILE_DEFINITIONS PROJECT_VERSIO
 
 add_standalone_library(evm)
 
+# luxcpp/gpu: unified GPU acceleration library
+set(LUXCPP_GPU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../gpu" CACHE PATH "Path to luxcpp/gpu")
+if(EXISTS "${LUXCPP_GPU_DIR}/CMakeLists.txt")
+    set(LUX_GPU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(LUX_GPU_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${LUXCPP_GPU_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/luxcpp-gpu" EXCLUDE_FROM_ALL)
+    set(LUXCPP_GPU_FOUND TRUE)
+else()
+    message(STATUS "luxcpp/gpu not found at ${LUXCPP_GPU_DIR}, GPU state hashing disabled")
+    set(LUXCPP_GPU_FOUND FALSE)
+endif()
+
 # GPU / parallel execution sources (compiled into a static lib for the benchmark)
 add_library(evm-gpu STATIC
     gpu/gpu_dispatch.cpp
     gpu/gpu_dispatch.hpp
+    gpu/gpu_state_hasher.hpp
     gpu/mv_memory.cpp
     gpu/mv_memory.hpp
     gpu/parallel_engine.cpp
@@ -84,6 +97,9 @@ add_library(evm-gpu STATIC
 )
 target_compile_features(evm-gpu PUBLIC cxx_std_20)
 target_link_libraries(evm-gpu PUBLIC evm evmc::evmc intx::intx)
+if(LUXCPP_GPU_FOUND)
+    target_link_libraries(evm-gpu PUBLIC luxgpu_core_static)
+endif()
 target_include_directories(evm-gpu PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<BUILD_INTERFACE:${include_dir}>
@@ -93,3 +109,10 @@ target_include_directories(evm-gpu PUBLIC
 add_executable(evm-bench-block gpu/bench_block.cpp)
 target_compile_features(evm-bench-block PRIVATE cxx_std_20)
 target_link_libraries(evm-bench-block PRIVATE evm-gpu evm evmc::evmc)
+
+# GPU mode consistency test
+if(LUXCPP_GPU_FOUND)
+    add_executable(evm-test-modes gpu/test_modes.cpp)
+    target_compile_features(evm-test-modes PRIVATE cxx_std_20)
+    target_link_libraries(evm-test-modes PRIVATE evm-gpu evm evmc::evmc)
+endif()
