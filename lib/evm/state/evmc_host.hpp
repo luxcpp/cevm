@@ -73,13 +73,51 @@ public:
 
         db_.set_storage(addr, key, value);
 
-        // Determine storage status for gas accounting.
+        // EIP-2200 fine-grained status using original value (at tx start).
         const evmc::bytes32 zero{};
+
+        // Record original on first write per slot per transaction.
+        auto& slot_map = original_storage_[addr];
+        const auto orig_it = slot_map.find(key);
+        if (orig_it == slot_map.end())
+            slot_map[key] = current;
+        const auto& original = slot_map[key];
+
+        if (original == current)
+        {
+            // Clean slot: original == current, value != current.
+            if (original == zero)
+                return EVMC_STORAGE_ADDED;        // 0 -> 0 -> Z
+            if (value == zero)
+                return EVMC_STORAGE_DELETED;       // X -> X -> 0
+            return EVMC_STORAGE_MODIFIED;          // X -> X -> Z
+        }
+
+        // Dirty slot: original != current.
+        if (original == zero)
+        {
+            // Original is zero, current is dirty non-zero.
+            if (value == zero)
+                return EVMC_STORAGE_ADDED_DELETED;     // 0 -> Y -> 0
+            return EVMC_STORAGE_ASSIGNED;              // 0 -> Y -> Z
+        }
+
+        // Original is non-zero.
         if (current == zero)
-            return EVMC_STORAGE_ADDED;
+        {
+            // Dirty zero current: X -> 0 -> ...
+            if (value == original)
+                return EVMC_STORAGE_DELETED_RESTORED;  // X -> 0 -> X
+            return EVMC_STORAGE_DELETED_ADDED;         // X -> 0 -> Z
+        }
+
+        // Dirty non-zero current: X -> Y -> ...
         if (value == zero)
-            return EVMC_STORAGE_DELETED;
-        return EVMC_STORAGE_MODIFIED;
+            return EVMC_STORAGE_MODIFIED_DELETED;      // X -> Y -> 0
+        if (value == original)
+            return EVMC_STORAGE_MODIFIED_RESTORED;     // X -> Y -> X
+
+        return EVMC_STORAGE_ASSIGNED;                  // X -> Y -> Z (catch-all)
     }
 
     // --- Balance ---
@@ -179,18 +217,28 @@ public:
                 db_.sub_balance(msg.sender, value);
             }
 
-            // Compute create address (simplified).
+            // Compute create address: keccak256(RLP([sender, nonce]))[12:]
             evmc::address new_addr{};
             const auto sender_nonce = db_.get_nonce(msg.sender);
-            // Simple address derivation: keccak(sender || nonce)[12:]
-            uint8_t buf[28] = {};
-            std::memcpy(buf, msg.sender.bytes, 20);
-            for (int i = 0; i < 8; ++i)
-                buf[20 + i] = static_cast<uint8_t>(sender_nonce >> ((7 - i) * 8));
-            const auto h = ethash::keccak256(buf, 28);
+
+            // RLP-encode [sender_address(20 bytes), nonce].
+            std::vector<uint8_t> rlp_payload;
+            rlp_payload.reserve(64);
+            // RLP encode 20-byte address as a byte string.
+            rlp::encode_bytes(rlp_payload, msg.sender.bytes, 20);
+            // RLP encode nonce as uint64.
+            rlp::encode_uint64(rlp_payload, sender_nonce);
+            // Wrap in RLP list.
+            std::vector<uint8_t> rlp_list;
+            rlp_list.reserve(rlp_payload.size() + 4);
+            rlp::encode_list(rlp_list, rlp_payload);
+
+            const auto h = ethash::keccak256(rlp_list.data(), rlp_list.size());
             std::memcpy(new_addr.bytes, h.bytes + 12, 20);
 
             db_.create_account(new_addr);
+            // EIP-161: new contracts start with nonce=1.
+            db_.set_nonce(new_addr, 1);
             if (value > 0)
                 db_.add_balance(new_addr, value);
 
@@ -299,6 +347,11 @@ private:
     evmc_revision rev_;
     evmc_vm* vm_ = nullptr;
     std::vector<LogEntry> logs_;
+
+    /// EIP-2200: per-account original storage values at transaction start.
+    /// Populated lazily on first set_storage per (addr, key) per transaction.
+    std::unordered_map<evmc::address,
+        std::unordered_map<evmc::bytes32, evmc::bytes32>> original_storage_;
 };
 
 }  // namespace evm::state

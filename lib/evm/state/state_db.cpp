@@ -5,7 +5,7 @@
 
 #include <evmone_precompiles/keccak.hpp>
 #include <algorithm>
-#include <cassert>
+#include <stdexcept>
 
 namespace evm::state
 {
@@ -57,7 +57,8 @@ void StateDB::sub_balance(const evmc::address& addr, const uint256& amount)
     if (amount == 0)
         return;
     auto& acct = get_or_create(addr);
-    assert(acct.balance >= amount);
+    if (acct.balance < amount)
+        throw std::logic_error("balance underflow: " + intx::to_string(acct.balance) + " < " + intx::to_string(amount));
     journal_.append(JournalBalanceChange{addr, acct.balance});
     acct.balance -= amount;
 }
@@ -332,9 +333,33 @@ evmc::bytes32 StateDB::commit()
 
     for (const auto& addr : addrs)
     {
+        // Compute storage hash for this account before RLP encoding.
+        auto& acct = accounts_.at(addr);
+        if (auto sit = storage_.find(addr); sit != storage_.end() && !sit->second.empty())
+        {
+            // Sort storage keys for deterministic hashing.
+            std::vector<std::pair<evmc::bytes32, evmc::bytes32>> sorted(
+                sit->second.begin(), sit->second.end());
+            std::sort(sorted.begin(), sorted.end());
+
+            std::vector<uint8_t> storage_blob;
+            storage_blob.reserve(sorted.size() * 64);
+            for (const auto& [k, v] : sorted)
+            {
+                storage_blob.insert(storage_blob.end(), k.bytes, k.bytes + 32);
+                storage_blob.insert(storage_blob.end(), v.bytes, v.bytes + 32);
+            }
+            const auto sh = ethash::keccak256(storage_blob.data(), storage_blob.size());
+            __builtin_memcpy(acct.storage_root.bytes, sh.bytes, 32);
+        }
+        else
+        {
+            acct.storage_root = {};
+        }
+
         // Include address in the blob.
         blob.insert(blob.end(), addr.bytes, addr.bytes + 20);
-        const auto encoded = rlp_encode(accounts_.at(addr));
+        const auto encoded = rlp_encode(acct);
         blob.insert(blob.end(), encoded.begin(), encoded.end());
     }
 
