@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "gpu_dispatch.hpp"
-#include "mv_memory.hpp"
-#include "scheduler.hpp"
+#include "parallel_engine.hpp"
 
 #include <chrono>
 #include <thread>
@@ -41,9 +40,34 @@ std::vector<Backend> available_backends()
     return backends;
 }
 
-/// Execute a block sequentially (baseline).
-static BlockResult execute_sequential(const std::vector<Transaction>& txs, void* /*state*/)
+/// Execute a block using the dispatch-layer Transaction type.
+/// Converts to EvmTransaction and delegates to the real engine.
+/// The state pointer is expected to be an evmc::Host* when non-null.
+static BlockResult execute_via_engine(const Config& config,
+                                      const std::vector<Transaction>& txs,
+                                      void* state,
+                                      bool parallel)
 {
+    // Convert dispatch-layer transactions to EVM transactions
+    std::vector<EvmTransaction> evm_txs;
+    evm_txs.reserve(txs.size());
+    for (const auto& tx : txs)
+        evm_txs.push_back(to_evm_transaction(tx));
+
+    // If caller provided a Host, use it; otherwise fall back to gas-only mode
+    if (state != nullptr)
+    {
+        auto* host = static_cast<evmc::Host*>(state);
+        if (parallel)
+        {
+            return execute_parallel_evmone(evm_txs, *host, EVMC_SHANGHAI,
+                config.num_threads);
+        }
+        return execute_sequential_evmone(evm_txs, *host, EVMC_SHANGHAI);
+    }
+
+    // No host provided: run gas-estimation-only mode (no state access).
+    // This preserves backward compatibility with callers that pass nullptr.
     BlockResult result;
     result.gas_used.resize(txs.size());
 
@@ -51,8 +75,6 @@ static BlockResult execute_sequential(const std::vector<Transaction>& txs, void*
 
     for (size_t i = 0; i < txs.size(); ++i)
     {
-        // TODO: integrate with evmone's execute() function
-        // For now, simulate execution with gas consumption
         result.gas_used[i] = txs[i].gas_limit;
         result.total_gas += txs[i].gas_limit;
     }
@@ -64,73 +86,6 @@ static BlockResult execute_sequential(const std::vector<Transaction>& txs, void*
     return result;
 }
 
-/// Execute a block in parallel using Block-STM.
-static BlockResult execute_parallel(const Config& config,
-                                    const std::vector<Transaction>& txs,
-                                    void* /*state*/)
-{
-    const uint32_t num_txs = static_cast<uint32_t>(txs.size());
-    const uint32_t num_threads = config.num_threads > 0
-        ? config.num_threads
-        : std::thread::hardware_concurrency();
-
-    MvMemory mv_memory(num_txs);
-    Scheduler scheduler(num_txs);
-
-    BlockResult result;
-    result.gas_used.resize(num_txs, 0);
-
-    auto start = std::chrono::high_resolution_clock::now();
-
-    // Spawn worker threads
-    std::vector<std::thread> workers;
-    workers.reserve(num_threads);
-
-    for (uint32_t w = 0; w < num_threads; ++w)
-    {
-        workers.emplace_back([&]() {
-            while (true)
-            {
-                Task task = scheduler.next_task();
-                if (task.type == TaskType::Done)
-                    break;
-
-                if (task.type == TaskType::Execute)
-                {
-                    // Execute transaction speculatively
-                    // TODO: integrate with evmone's execute() using MvMemory for state access
-                    result.gas_used[task.tx_index] = txs[task.tx_index].gas_limit;
-
-                    scheduler.finish_execution(task.tx_index, task.incarnation);
-                }
-                else if (task.type == TaskType::Validate)
-                {
-                    // Validate: check if reads are still valid
-                    // TODO: check MvMemory read set against current versions
-                    // For now, assume all validations pass (no conflicts in simple transfers)
-                    scheduler.finish_validation(task.tx_index);
-                }
-            }
-        });
-    }
-
-    // Wait for all workers to finish
-    for (auto& w : workers)
-        w.join();
-
-    auto end = std::chrono::high_resolution_clock::now();
-    result.execution_time_ms =
-        std::chrono::duration<double, std::milli>(end - start).count();
-    result.conflicts = mv_memory.num_conflicts();
-    result.re_executions = scheduler.num_re_executions();
-
-    // Sum total gas
-    for (auto g : result.gas_used)
-        result.total_gas += g;
-
-    return result;
-}
-
 BlockResult execute_block(const Config& config,
                           const std::vector<Transaction>& txs,
                           void* state)
@@ -138,23 +93,23 @@ BlockResult execute_block(const Config& config,
     switch (config.backend)
     {
     case Backend::CPU_Sequential:
-        return execute_sequential(txs, state);
+        return execute_via_engine(config, txs, state, false);
 
     case Backend::CPU_Parallel:
-        return execute_parallel(config, txs, state);
+        return execute_via_engine(config, txs, state, true);
 
     case Backend::GPU_Metal:
-        // TODO: Metal compute shader dispatch
-        // Fall back to CPU parallel for now
-        return execute_parallel(config, txs, state);
+        // Metal compute shaders not yet implemented.
+        // Fall back to CPU parallel (Block-STM) which uses all cores.
+        return execute_via_engine(config, txs, state, true);
 
     case Backend::GPU_CUDA:
-        // TODO: CUDA kernel dispatch
-        // Fall back to CPU parallel for now
-        return execute_parallel(config, txs, state);
+        // CUDA kernels not yet implemented.
+        // Fall back to CPU parallel (Block-STM) which uses all cores.
+        return execute_via_engine(config, txs, state, true);
     }
 
-    return execute_sequential(txs, state);
+    return execute_via_engine(config, txs, state, false);
 }
 
 }  // namespace evm::gpu
