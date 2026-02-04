@@ -149,7 +149,27 @@ target_include_directories(evm-state PUBLIC
     $<BUILD_INTERFACE:${include_dir}>
 )
 
+# State layer: link luxgpu for GPU batch ecrecover when available
+if(LUXCPP_GPU_FOUND)
+    target_link_libraries(evm-state PUBLIC luxgpu_core_static)
+    target_compile_definitions(evm-state PRIVATE HAVE_LUX_GPU=1)
+endif()
+
 # State layer benchmark
 add_executable(evm-bench-state state/bench_state.cpp)
 target_compile_features(evm-bench-state PRIVATE cxx_std_20)
 target_link_libraries(evm-bench-state PRIVATE evm-state evm evmc::evmc)
+
+# cevm: C++ EVM Lux VM plugin binary (ZAP protocol)
+add_executable(cevm
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../bin/cevm/main.cpp
+)
+target_compile_features(cevm PRIVATE cxx_std_20)
+target_link_libraries(cevm PRIVATE evm-state evm-gpu evm evmc::evmc intx::intx)
+if(LUXCPP_GPU_FOUND)
+    target_link_libraries(cevm PRIVATE luxgpu_core_static)
+endif()
+target_include_directories(cevm PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${include_dir}>
+)
