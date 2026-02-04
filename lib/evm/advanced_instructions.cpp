@@ -9,11 +9,11 @@
 // TODO: This warning suppression may be lifted, but the situation in this file is complicated.
 // NOLINTBEGIN(misc-use-internal-linkage)
 
-namespace evmone::advanced
+namespace evm::advanced
 {
 namespace instr
 {
-using namespace evmone::instr;
+using namespace evm::instr;
 
 /// Instruction implementations - "core" instruction + stack height adjustment.
 /// @{
@@ -304,6 +304,6 @@ EVMC_EXPORT const OpTable& get_op_table(evmc_revision rev) noexcept
 
     return op_tables[rev];
 }
-}  // namespace evmone::advanced
+}  // namespace evm::advanced
 
 // NOLINTEND(misc-use-internal-linkage)

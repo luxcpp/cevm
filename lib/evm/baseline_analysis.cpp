@@ -6,7 +6,7 @@
 #include "instructions.hpp"
 #include <memory>
 
-namespace evmone::baseline
+namespace evm::baseline
 {
 static_assert(std::is_move_constructible_v<CodeAnalysis>);
 static_assert(std::is_move_assignable_v<CodeAnalysis>);
@@ -64,4 +64,4 @@ CodeAnalysis analyze(bytes_view code)
 {
     return analyze_legacy(code);
 }
-}  // namespace evmone::baseline
+}  // namespace evm::baseline

@@ -5,7 +5,7 @@
 #include "advanced_analysis.hpp"
 #include <cassert>
 
-namespace evmone::advanced
+namespace evm::advanced
 {
 /// Clamps x to the max value of To type.
 template <typename To, typename T>
@@ -225,4 +225,4 @@ AdvancedCodeAnalysis analyze(evmc_revision rev, bytes_view code) noexcept
     return analysis;
 }
 
-}  // namespace evmone::advanced
+}  // namespace evm::advanced

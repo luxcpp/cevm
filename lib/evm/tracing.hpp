@@ -11,7 +11,7 @@
 #include <ostream>
 #include <string_view>
 
-namespace evmone
+namespace evm
 {
 using evmc::bytes_view;
 class ExecutionState;
@@ -67,4 +67,4 @@ EVMC_EXPORT std::unique_ptr<Tracer> create_instruction_counter(std::string_view 
 
 EVMC_EXPORT std::unique_ptr<Tracer> create_instruction_tracer(std::ostream& out);
 
-}  // namespace evmone
+}  // namespace evm

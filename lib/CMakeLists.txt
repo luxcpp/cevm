@@ -4,4 +4,4 @@
 
 add_subdirectory(evmone_precompiles)
 add_subdirectory(evmmax)
-add_subdirectory(evmone)
+add_subdirectory(evm)

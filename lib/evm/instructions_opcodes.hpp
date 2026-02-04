@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace evmone
+namespace evm
 {
 
 /// The list of EVM opcodes from every EVM revision.
@@ -173,4 +173,4 @@ enum Opcode : uint8_t  // NOLINT(*-use-enum-class)
     OP_INVALID = 0xfe,
     OP_SELFDESTRUCT = 0xff
 };
-}  // namespace evmone
+}  // namespace evm

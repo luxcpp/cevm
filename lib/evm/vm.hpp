@@ -14,7 +14,7 @@
 #define EVMONE_CGOTO_SUPPORTED 1
 #endif
 
-namespace evmone
+namespace evm
 {
 /// The evmone EVMC instance.
 class VM : public evmc_vm
@@ -44,4 +44,4 @@ public:
 
     [[nodiscard]] Tracer* get_tracer() const noexcept { return m_first_tracer.get(); }
 };
-}  // namespace evmone
+}  // namespace evm

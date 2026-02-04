@@ -4,7 +4,7 @@
 #include "delegation.hpp"
 #include <cassert>
 
-namespace evmone
+namespace evm
 {
 std::optional<evmc::address> get_delegate_address(
     const evmc::HostInterface& host, const evmc::address& addr) noexcept
@@ -26,4 +26,4 @@ std::optional<evmc::address> get_delegate_address(
     std::ranges::copy(designation.substr(std::size(DELEGATION_MAGIC)), delegate_address.bytes);
     return delegate_address;
 }
-}  // namespace evmone
+}  // namespace evm
