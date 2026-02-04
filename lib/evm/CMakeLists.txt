@@ -116,3 +116,40 @@ if(LUXCPP_GPU_FOUND)
     target_compile_features(evm-test-modes PRIVATE cxx_std_20)
     target_link_libraries(evm-test-modes PRIVATE evm-gpu evm evmc::evmc)
 endif()
+
+# GPU EVM kernel interpreter (header-only library for CPU path)
+add_library(evm-kernel INTERFACE)
+target_include_directories(evm-kernel INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu/kernel>
+)
+
+# GPU EVM kernel benchmark (CPU path — always builds)
+add_executable(evm-bench-kernel gpu/kernel/bench_kernel.cpp)
+target_compile_features(evm-bench-kernel PRIVATE cxx_std_20)
+target_link_libraries(evm-bench-kernel PRIVATE evm-kernel)
+
+# Metal kernel host (macOS only)
+if(APPLE)
+    add_library(evm-kernel-metal STATIC gpu/kernel/evm_kernel_host.mm)
+    target_compile_features(evm-kernel-metal PUBLIC cxx_std_20)
+    target_link_libraries(evm-kernel-metal PUBLIC evm-kernel)
+    target_link_libraries(evm-kernel-metal PUBLIC "-framework Metal" "-framework Foundation")
+    target_link_libraries(evm-bench-kernel PRIVATE evm-kernel-metal)
+endif()
+
+# State layer: full Ethereum state (accounts, storage, journal) for evmone
+add_library(evm-state STATIC
+    state/state_db.cpp
+    state/processor.cpp
+)
+target_compile_features(evm-state PUBLIC cxx_std_20)
+target_link_libraries(evm-state PUBLIC evm evmc::evmc intx::intx evmone::precompiles)
+target_include_directories(evm-state PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${include_dir}>
+)
+
+# State layer benchmark
+add_executable(evm-bench-state state/bench_state.cpp)
+target_compile_features(evm-bench-state PRIVATE cxx_std_20)
+target_link_libraries(evm-bench-state PRIVATE evm-state evm evmc::evmc)
