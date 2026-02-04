@@ -4,12 +4,83 @@
 #include "processor.hpp"
 
 #include <chrono>
+#include <cstring>
 
 // Forward-declare evmone factory.
 extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
 
+// GPU batch ecrecover (from luxcpp/gpu).
+// Weak symbols: link succeeds even without luxgpu, falls back to no-op.
+#if __has_include(<lux/gpu.h>)
+#include <lux/gpu.h>
+#define HAVE_LUX_GPU 1
+#else
+#define HAVE_LUX_GPU 0
+#endif
+
 namespace evm::state
 {
+
+SenderCache batch_recover_senders(const std::vector<Transaction>& txs)
+{
+    SenderCache cache;
+
+#if HAVE_LUX_GPU
+    // Collect indices of transactions that need ecrecover.
+    std::vector<size_t> indices;
+    indices.reserve(txs.size());
+    for (size_t i = 0; i < txs.size(); ++i)
+    {
+        if (txs[i].has_signature)
+            indices.push_back(i);
+    }
+
+    if (indices.empty())
+        return cache;
+
+    // Build packed input array for GPU batch ecrecover.
+    std::vector<LuxEcrecoverInput> inputs(indices.size());
+    for (size_t j = 0; j < indices.size(); ++j)
+    {
+        const auto& tx = txs[indices[j]];
+        auto& inp = inputs[j];
+        std::memcpy(inp.r, tx.sig_r, 32);
+        std::memcpy(inp.s, tx.sig_s, 32);
+        inp.v = tx.sig_v;
+        std::memset(inp._pad, 0, sizeof(inp._pad));
+        std::memcpy(inp.msg_hash, tx.msg_hash, 32);
+        std::memset(inp._pad2, 0, sizeof(inp._pad2));
+    }
+
+    std::vector<LuxEcrecoverOutput> outputs(indices.size());
+
+    // Create GPU context (uses auto-detect: Metal on macOS, CUDA on Linux, CPU fallback).
+    LuxGPU* gpu = lux_gpu_create();
+    if (gpu == nullptr)
+        return cache;
+
+    const auto err = lux_gpu_ecrecover_batch(gpu, inputs.data(), outputs.data(), indices.size());
+    lux_gpu_destroy(gpu);
+
+    if (err != LUX_OK)
+        return cache;
+
+    // Populate sender cache from recovered addresses.
+    for (size_t j = 0; j < indices.size(); ++j)
+    {
+        if (outputs[j].valid)
+        {
+            evmc::address addr{};
+            std::memcpy(addr.bytes, outputs[j].address, 20);
+            cache[indices[j]] = addr;
+        }
+    }
+#else
+    (void)txs;
+#endif
+
+    return cache;
+}
 
 /// Intrinsic gas cost for a transaction (EIP-2028).
 static uint64_t intrinsic_gas(const Transaction& tx) noexcept
@@ -32,7 +103,8 @@ BlockResult process_block(
     const std::vector<Transaction>& txs,
     evmc_vm* vm,
     const TxContext& tx_ctx,
-    evmc_revision rev)
+    evmc_revision rev,
+    const SenderCache& senders)
 {
     BlockResult result;
     result.tx_results.resize(txs.size());
@@ -41,8 +113,13 @@ BlockResult process_block(
 
     for (size_t i = 0; i < txs.size(); ++i)
     {
-        const auto& tx = txs[i];
+        auto tx = txs[i];  // Copy so we can override sender from cache.
         auto& tx_result = result.tx_results[i];
+
+        // Use GPU-recovered sender if available.
+        const auto it = senders.find(i);
+        if (it != senders.end())
+            tx.sender = it->second;
 
         // --- Validation ---
 

@@ -178,6 +178,9 @@ endif()
 if(TARGET evm-bench-state)
     list(APPEND install_targets evm-bench-state)
 endif()
+if(TARGET cevm)
+    list(APPEND install_targets cevm)
+endif()
 
 set_target_properties(
     ${install_targets} PROPERTIES
