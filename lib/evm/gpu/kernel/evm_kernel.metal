@@ -287,8 +287,10 @@ constant ulong GAS_MID      = 8;
 constant ulong GAS_HIGH     = 10;
 constant ulong GAS_BASE     = 2;
 constant ulong GAS_JUMPDEST = 1;
-constant ulong GAS_SLOAD    = 2100;
-constant ulong GAS_SSTORE   = 20000;
+constant ulong GAS_SLOAD       = 2100;
+constant ulong GAS_SSTORE_SET  = 20000;
+constant ulong GAS_SSTORE_RESET = 2900;
+constant ulong GAS_SSTORE_REFUND = 4800;
 constant ulong GAS_MEMORY   = 3;
 constant ulong GAS_EXP_BASE = 10;
 constant ulong GAS_EXP_BYTE = 50;
@@ -296,6 +298,278 @@ constant ulong GAS_LOG_BASE = 375;
 constant ulong GAS_LOG_DATA = 8;
 constant ulong GAS_LOG_TOPIC = 375;
 constant ulong GAS_COPY     = 3;
+
+// -- JUMPDEST validation ------------------------------------------------------
+// Must scan bytecode from offset 0, skipping PUSH data bytes, to confirm the
+// target is an actual JUMPDEST opcode and not embedded inside PUSH data.
+
+static inline bool is_valid_jumpdest(device const uchar* code, uint code_size, uint target)
+{
+    if (target >= code_size || code[target] != 0x5b)
+        return false;
+    uint i = 0;
+    while (i < target)
+    {
+        uchar op = code[i];
+        if (op >= 0x60 && op <= 0x7f)  // PUSH1..PUSH32
+            i += (op - 0x60 + 2);      // skip opcode + data bytes
+        else
+            i++;
+    }
+    return i == target;  // must land exactly on the target
+}
+
+// -- uint256 division (binary long division) ----------------------------------
+
+struct divmod_result { uint256 quot; uint256 rem; };
+
+static inline uint clz64_metal(gpu_u64 x)
+{
+    if (x == 0) return 64;
+    uint n = 0;
+    if ((x & 0xFFFFFFFF00000000UL) == 0) { n += 32; x <<= 32; }
+    if ((x & 0xFFFF000000000000UL) == 0) { n += 16; x <<= 16; }
+    if ((x & 0xFF00000000000000UL) == 0) { n +=  8; x <<=  8; }
+    if ((x & 0xF000000000000000UL) == 0) { n +=  4; x <<=  4; }
+    if ((x & 0xC000000000000000UL) == 0) { n +=  2; x <<=  2; }
+    if ((x & 0x8000000000000000UL) == 0) { n +=  1; }
+    return n;
+}
+
+static inline uint clz256_metal(uint256 x)
+{
+    if (x.w[3]) return clz64_metal(x.w[3]);
+    if (x.w[2]) return 64 + clz64_metal(x.w[2]);
+    if (x.w[1]) return 128 + clz64_metal(x.w[1]);
+    return 192 + clz64_metal(x.w[0]);
+}
+
+static inline divmod_result u256_divmod(uint256 a, uint256 b)
+{
+    if (u256_iszero(b))
+        return {u256_zero(), u256_zero()};
+    if (u256_lt(a, b))
+        return {u256_zero(), a};
+    if (u256_eq(a, b))
+        return {u256_one(), u256_zero()};
+
+    uint shift = clz256_metal(b) - clz256_metal(a);
+    uint256 divisor = u256_shl(gpu_u64(shift), b);
+    uint256 quotient = u256_zero();
+    uint256 remainder = a;
+
+    for (uint i = 0; i <= shift; ++i)
+    {
+        quotient = u256_shl(1, quotient);
+        if (!u256_lt(remainder, divisor))
+        {
+            remainder = u256_sub(remainder, divisor);
+            quotient.w[0] |= 1;
+        }
+        divisor = u256_shr(1, divisor);
+    }
+    return {quotient, remainder};
+}
+
+static inline uint256 u256_div(uint256 a, uint256 b)
+{
+    return u256_divmod(a, b).quot;
+}
+
+static inline uint256 u256_mod(uint256 a, uint256 b)
+{
+    return u256_divmod(a, b).rem;
+}
+
+// -- Signed division/modulo ---------------------------------------------------
+
+static inline uint256 u256_negate(uint256 x)
+{
+    return u256_add(u256_bitwise_not(x), u256_one());
+}
+
+static inline uint256 u256_sdiv(uint256 a, uint256 b)
+{
+    if (u256_iszero(b)) return u256_zero();
+    bool a_neg = (a.w[3] >> 63) != 0;
+    bool b_neg = (b.w[3] >> 63) != 0;
+    uint256 abs_a = a_neg ? u256_negate(a) : a;
+    uint256 abs_b = b_neg ? u256_negate(b) : b;
+    uint256 q = u256_div(abs_a, abs_b);
+    if (a_neg != b_neg) q = u256_negate(q);
+    return q;
+}
+
+static inline uint256 u256_smod(uint256 a, uint256 b)
+{
+    if (u256_iszero(b)) return u256_zero();
+    bool a_neg = (a.w[3] >> 63) != 0;
+    bool b_neg = (b.w[3] >> 63) != 0;
+    uint256 abs_a = a_neg ? u256_negate(a) : a;
+    uint256 abs_b = b_neg ? u256_negate(b) : b;
+    uint256 r = u256_mod(abs_a, abs_b);
+    if (a_neg && !u256_iszero(r)) r = u256_negate(r);
+    return r;
+}
+
+// -- ADDMOD: (a + b) % m with 320-bit intermediate ---------------------------
+
+static inline uint256 u256_addmod(uint256 a, uint256 b, uint256 m)
+{
+    if (u256_iszero(m)) return u256_zero();
+
+    gpu_u64 s0 = a.w[0] + b.w[0];
+    gpu_u64 c0 = (s0 < a.w[0]) ? 1UL : 0UL;
+    gpu_u64 s1 = a.w[1] + b.w[1] + c0;
+    gpu_u64 c1 = (s1 < a.w[1] || (c0 && s1 == a.w[1])) ? 1UL : 0UL;
+    gpu_u64 s2 = a.w[2] + b.w[2] + c1;
+    gpu_u64 c2 = (s2 < a.w[2] || (c1 && s2 == a.w[2])) ? 1UL : 0UL;
+    gpu_u64 s3 = a.w[3] + b.w[3] + c2;
+    gpu_u64 c3 = (s3 < a.w[3] || (c2 && s3 == a.w[3])) ? 1UL : 0UL;
+
+    if (c3 == 0)
+    {
+        uint256 sum; sum.w[0] = s0; sum.w[1] = s1; sum.w[2] = s2; sum.w[3] = s3;
+        return u256_mod(sum, m);
+    }
+
+    uint256 sum; sum.w[0] = s0; sum.w[1] = s1; sum.w[2] = s2; sum.w[3] = s3;
+    uint256 neg_m = u256_negate(m);
+    sum = u256_add(sum, neg_m);
+    return u256_mod(sum, m);
+}
+
+// -- MULMOD: (a * b) % m with 512-bit intermediate ---------------------------
+
+static inline uint256 u256_mulmod(uint256 a, uint256 b, uint256 m)
+{
+    if (u256_iszero(m)) return u256_zero();
+
+    gpu_u64 r[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (uint i = 0; i < 4; ++i)
+    {
+        gpu_u64 carry = 0;
+        for (uint j = 0; j < 4; ++j)
+        {
+            pair64 p = mul_wide(a.w[i], b.w[j]);
+            gpu_u64 s = r[i + j] + p.lo;
+            gpu_u64 c = (s < r[i + j]) ? 1UL : 0UL;
+            s += carry;
+            c += (s < carry) ? 1UL : 0UL;
+            r[i + j] = s;
+            carry = p.hi + c;
+        }
+        if (i + 4 < 8) r[i + 4] += carry;
+    }
+
+    uint256 result = u256_zero();
+    for (int bit = 511; bit >= 0; --bit)
+    {
+        result = u256_shl(1, result);
+        uint limb = uint(bit) / 64;
+        uint pos  = uint(bit) % 64;
+        if ((r[limb] >> pos) & 1)
+            result.w[0] |= 1;
+        if (!u256_lt(result, m))
+            result = u256_sub(result, m);
+    }
+    return result;
+}
+
+// -- EXP: base^exponent mod 2^256 (square-and-multiply) ----------------------
+
+static inline uint256 u256_exp(uint256 base, uint256 exponent)
+{
+    if (u256_iszero(exponent)) return u256_one();
+    uint256 result = u256_one();
+    uint256 b = base;
+    uint256 e = exponent;
+    while (!u256_iszero(e))
+    {
+        if (e.w[0] & 1)
+            result = u256_mul(result, b);
+        e = u256_shr(1, e);
+        if (!u256_iszero(e))
+            b = u256_mul(b, b);
+    }
+    return result;
+}
+
+// -- SIGNEXTEND ---------------------------------------------------------------
+
+static inline uint256 u256_signextend(uint256 b_val, uint256 x)
+{
+    if (b_val.w[1] | b_val.w[2] | b_val.w[3]) return x;
+    gpu_u64 b = b_val.w[0];
+    if (b >= 31) return x;
+
+    gpu_u64 sign_bit = b * 8 + 7;
+    uint limb = uint(sign_bit / 64);
+    uint pos  = uint(sign_bit % 64);
+    bool negative = ((x.w[limb] >> pos) & 1) != 0;
+
+    uint256 one_shifted = u256_shl(sign_bit + 1, u256_one());
+    uint256 mask = u256_bitwise_not(u256_sub(one_shifted, u256_one()));
+
+    if (negative)
+        return u256_bitwise_or(x, mask);
+    else
+        return u256_bitwise_and(x, u256_bitwise_not(mask));
+}
+
+// -- Signed comparison --------------------------------------------------------
+
+static inline bool u256_slt(uint256 a, uint256 b)
+{
+    bool a_neg = (a.w[3] >> 63) != 0;
+    bool b_neg = (b.w[3] >> 63) != 0;
+    if (a_neg != b_neg) return a_neg;
+    return u256_lt(a, b);
+}
+
+static inline bool u256_sgt(uint256 a, uint256 b)
+{
+    return u256_slt(b, a);
+}
+
+// -- BYTE opcode: extract byte at position i (0 = MSB) -----------------------
+
+static inline uint256 u256_byte_at(uint256 val, uint256 pos)
+{
+    if (pos.w[1] | pos.w[2] | pos.w[3]) return u256_zero();
+    gpu_u64 i = pos.w[0];
+    if (i >= 32) return u256_zero();
+    uint byte_from_right = uint(31 - i);
+    uint limb = byte_from_right / 8;
+    uint shift = (byte_from_right % 8) * 8;
+    gpu_u64 b = (val.w[limb] >> shift) & 0xFFUL;
+    return u256_from(b);
+}
+
+// -- SAR: arithmetic shift right (sign-extending) ----------------------------
+
+static inline uint256 u256_sar(gpu_u64 n, uint256 val)
+{
+    bool negative = (val.w[3] >> 63) != 0;
+    if (n >= 256)
+        return negative ? u256_max() : u256_zero();
+    uint256 r = u256_shr(n, val);
+    if (negative && n > 0)
+    {
+        uint256 mask = u256_bitwise_not(u256_shr(n, u256_max()));
+        r = u256_bitwise_or(r, mask);
+    }
+    return r;
+}
+
+// -- EXP byte count helper ---------------------------------------------------
+
+static inline uint u256_byte_length(uint256 x)
+{
+    if (u256_iszero(x)) return 0;
+    uint bits = 256 - clz256_metal(x);
+    return (bits + 7) / 8;
+}
 
 // -- Minimal interpreter inline -----------------------------------------------
 // The full interpreter is in evm_interpreter.hpp (C++ host).
@@ -319,9 +593,9 @@ kernel void evm_execute(
     // Per-transaction buffers.
     device const TxInput& inp = inputs[tid];
     device TxOutput& out = outputs[tid];
-    device uchar* mem = mem_pool + uint(tid) * MAX_MEMORY_PER_TX;
-    device uchar* output = out_data + uint(tid) * MAX_OUTPUT_PER_TX;
-    device StorageEntry* storage = storage_pool + uint(tid) * MAX_STORAGE_PER_TX;
+    device uchar* mem = mem_pool + ulong(tid) * MAX_MEMORY_PER_TX;
+    device uchar* output = out_data + ulong(tid) * MAX_OUTPUT_PER_TX;
+    device StorageEntry* storage = storage_pool + ulong(tid) * MAX_STORAGE_PER_TX;
     device uint& stor_count = storage_counts[tid];
 
     device const uchar* code = blob + inp.code_offset;
@@ -466,6 +740,117 @@ kernel void evm_execute(
             continue;
         }
 
+        // DIV (0x04)
+        if (op == 0x04)
+        {
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_LOW;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 a = stack[--sp];
+            uint256 b = stack[--sp];
+            stack[sp++] = u256_div(a, b);
+            ++pc;
+            continue;
+        }
+
+        // SDIV (0x05)
+        if (op == 0x05)
+        {
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_LOW;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 a = stack[--sp];
+            uint256 b = stack[--sp];
+            stack[sp++] = u256_sdiv(a, b);
+            ++pc;
+            continue;
+        }
+
+        // MOD (0x06)
+        if (op == 0x06)
+        {
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_LOW;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 a = stack[--sp];
+            uint256 b = stack[--sp];
+            stack[sp++] = u256_mod(a, b);
+            ++pc;
+            continue;
+        }
+
+        // SMOD (0x07)
+        if (op == 0x07)
+        {
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_LOW;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 a = stack[--sp];
+            uint256 b = stack[--sp];
+            stack[sp++] = u256_smod(a, b);
+            ++pc;
+            continue;
+        }
+
+        // ADDMOD (0x08)
+        if (op == 0x08)
+        {
+            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_MID;
+            if (sp < 3) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 a = stack[--sp];
+            uint256 b = stack[--sp];
+            uint256 n = stack[--sp];
+            stack[sp++] = u256_addmod(a, b, n);
+            ++pc;
+            continue;
+        }
+
+        // MULMOD (0x09)
+        if (op == 0x09)
+        {
+            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_MID;
+            if (sp < 3) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 a = stack[--sp];
+            uint256 b = stack[--sp];
+            uint256 n = stack[--sp];
+            stack[sp++] = u256_mulmod(a, b, n);
+            ++pc;
+            continue;
+        }
+
+        // EXP (0x0a)
+        if (op == 0x0a)
+        {
+            if (gas < GAS_EXP_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_EXP_BASE;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 a = stack[--sp];
+            uint256 b = stack[--sp];
+            // Dynamic gas: 50 * (number of bytes in exponent)
+            uint exp_bytes = u256_byte_length(b);
+            ulong exp_gas = GAS_EXP_BYTE * ulong(exp_bytes);
+            if (gas < exp_gas) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= exp_gas;
+            stack[sp++] = u256_exp(a, b);
+            ++pc;
+            continue;
+        }
+
+        // SIGNEXTEND (0x0b)
+        if (op == 0x0b)
+        {
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_LOW;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 a = stack[--sp];
+            uint256 b = stack[--sp];
+            stack[sp++] = u256_signextend(a, b);
+            ++pc;
+            continue;
+        }
+
         // ISZERO
         if (op == 0x15)
         {
@@ -505,8 +890,8 @@ kernel void evm_execute(
             continue;
         }
 
-        // LT, GT, EQ
-        if (op == 0x10 || op == 0x11 || op == 0x14)
+        // LT, GT, SLT, SGT, EQ
+        if (op == 0x10 || op == 0x11 || op == 0x12 || op == 0x13 || op == 0x14)
         {
             if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
@@ -516,8 +901,72 @@ kernel void evm_execute(
             bool result = false;
             if (op == 0x10) result = u256_lt(a, b);
             else if (op == 0x11) result = u256_gt(a, b);
+            else if (op == 0x12) result = u256_slt(a, b);
+            else if (op == 0x13) result = u256_sgt(a, b);
             else result = u256_eq(a, b);
             stack[sp++] = result ? u256_one() : u256_zero();
+            ++pc;
+            continue;
+        }
+
+        // BYTE (0x1a): i=top, x=second -> byte at position i of x
+        if (op == 0x1a)
+        {
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_VERYLOW;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 i = stack[--sp];
+            uint256 x = stack[--sp];
+            stack[sp++] = u256_byte_at(x, i);
+            ++pc;
+            continue;
+        }
+
+        // SHL (0x1b): shift=top, value=second -> value << shift
+        if (op == 0x1b)
+        {
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_VERYLOW;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 shift_amt = stack[--sp];
+            uint256 val = stack[--sp];
+            if (shift_amt.w[1] | shift_amt.w[2] | shift_amt.w[3] || shift_amt.w[0] >= 256)
+                stack[sp++] = u256_zero();
+            else
+                stack[sp++] = u256_shl(shift_amt.w[0], val);
+            ++pc;
+            continue;
+        }
+
+        // SHR (0x1c): shift=top, value=second -> value >> shift
+        if (op == 0x1c)
+        {
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_VERYLOW;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 shift_amt = stack[--sp];
+            uint256 val = stack[--sp];
+            if (shift_amt.w[1] | shift_amt.w[2] | shift_amt.w[3] || shift_amt.w[0] >= 256)
+                stack[sp++] = u256_zero();
+            else
+                stack[sp++] = u256_shr(shift_amt.w[0], val);
+            ++pc;
+            continue;
+        }
+
+        // SAR (0x1d): shift=top, value=second -> arithmetic right shift
+        if (op == 0x1d)
+        {
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_VERYLOW;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 shift_amt = stack[--sp];
+            uint256 val = stack[--sp];
+            bool negative = (val.w[3] >> 63) != 0;
+            if (shift_amt.w[1] | shift_amt.w[2] | shift_amt.w[3] || shift_amt.w[0] >= 256)
+                stack[sp++] = negative ? u256_max() : u256_zero();
+            else
+                stack[sp++] = u256_sar(shift_amt.w[0], val);
             ++pc;
             continue;
         }
@@ -614,7 +1063,7 @@ kernel void evm_execute(
                 out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return;
             }
             uint dest = uint(dest_val.w[0]);
-            if (code[dest] != 0x5b)
+            if (!is_valid_jumpdest(code, code_size, dest))
             {
                 out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return;
             }
@@ -637,7 +1086,7 @@ kernel void evm_execute(
                     out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return;
                 }
                 uint dest = uint(dest_val.w[0]);
-                if (code[dest] != 0x5b)
+                if (!is_valid_jumpdest(code, code_size, dest))
                 {
                     out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return;
                 }
@@ -700,25 +1149,45 @@ kernel void evm_execute(
             continue;
         }
 
-        // SSTORE
+        // SSTORE — gas differentiation per EIP-2200
         if (op == 0x55)
         {
-            if (gas < GAS_SSTORE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
-            gas -= GAS_SSTORE;
             if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
             uint256 slot = stack[--sp];
             uint256 val = stack[--sp];
+
+            // Find current value.
+            uint256 current = u256_zero();
             bool found = false;
             for (uint i = stor_count; i > 0; --i)
             {
                 if (u256_eq(storage[i - 1].key, slot))
                 {
-                    storage[i - 1].value = val;
+                    current = storage[i - 1].value;
                     found = true;
                     break;
                 }
             }
-            if (!found && stor_count < MAX_STORAGE_PER_TX)
+
+            // Charge gas: 0->non-zero = SET (20000), non-zero->non-zero = RESET (2900),
+            // non-zero->0 = RESET (2900) + refund recorded separately.
+            ulong sstore_cost = u256_iszero(current) ? GAS_SSTORE_SET : GAS_SSTORE_RESET;
+            if (gas < sstore_cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= sstore_cost;
+
+            // Write value.
+            if (found)
+            {
+                for (uint i = stor_count; i > 0; --i)
+                {
+                    if (u256_eq(storage[i - 1].key, slot))
+                    {
+                        storage[i - 1].value = val;
+                        break;
+                    }
+                }
+            }
+            else if (stor_count < MAX_STORAGE_PER_TX)
             {
                 storage[stor_count].key = slot;
                 storage[stor_count].value = val;
@@ -736,8 +1205,30 @@ kernel void evm_execute(
             uint256 sz_val = stack[--sp];
             uint off = uint(off_val.w[0]);
             uint sz = uint(sz_val.w[0]);
+
+            // Memory expansion before copy.
+            if (sz > 0)
+            {
+                uint new_end = off + sz;
+                if (new_end < off || new_end > MAX_MEMORY_PER_TX)
+                    { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                if (new_end > mem_size)
+                {
+                    uint new_words = (new_end + 31) / 32;
+                    uint old_words = (mem_size + 31) / 32;
+                    ulong mem_cost = GAS_MEMORY * (new_words - old_words)
+                                   + (ulong(new_words) * new_words / 512)
+                                   - (ulong(old_words) * old_words / 512);
+                    if (gas < mem_cost)
+                        { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                    gas -= mem_cost;
+                    for (uint i = mem_size; i < new_words * 32; ++i) mem[i] = 0;
+                    mem_size = new_words * 32;
+                }
+            }
+
             uint copy_sz = (sz > MAX_OUTPUT_PER_TX) ? MAX_OUTPUT_PER_TX : sz;
-            for (uint i = 0; i < copy_sz && off + i < mem_size; ++i)
+            for (uint i = 0; i < copy_sz; ++i)
                 output[i] = mem[off + i];
             out.status = 1;  // Return
             out.gas_used = gas_start - gas;
@@ -753,8 +1244,30 @@ kernel void evm_execute(
             uint256 sz_val = stack[--sp];
             uint off = uint(off_val.w[0]);
             uint sz = uint(sz_val.w[0]);
+
+            // Memory expansion before copy.
+            if (sz > 0)
+            {
+                uint new_end = off + sz;
+                if (new_end < off || new_end > MAX_MEMORY_PER_TX)
+                    { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                if (new_end > mem_size)
+                {
+                    uint new_words = (new_end + 31) / 32;
+                    uint old_words = (mem_size + 31) / 32;
+                    ulong mem_cost = GAS_MEMORY * (new_words - old_words)
+                                   + (ulong(new_words) * new_words / 512)
+                                   - (ulong(old_words) * old_words / 512);
+                    if (gas < mem_cost)
+                        { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                    gas -= mem_cost;
+                    for (uint i = mem_size; i < new_words * 32; ++i) mem[i] = 0;
+                    mem_size = new_words * 32;
+                }
+            }
+
             uint copy_sz = (sz > MAX_OUTPUT_PER_TX) ? MAX_OUTPUT_PER_TX : sz;
-            for (uint i = 0; i < copy_sz && off + i < mem_size; ++i)
+            for (uint i = 0; i < copy_sz; ++i)
                 output[i] = mem[off + i];
             out.status = 2;  // Revert
             out.gas_used = gas_start - gas;

@@ -319,8 +319,12 @@ struct EvmInterpreter
             // -- Arithmetic (0x01 - 0x0b) -------------------------------------
             if (op >= 0x01 && op <= 0x0b)
             {
-                if (!consume_gas(op <= 0x09 ? GasCost::VERYLOW :
-                                 op == 0x0a ? GasCost::EXP_BASE : GasCost::LOW))
+                // Gas: ADD/SUB = VERYLOW (3), MUL/DIV/SDIV/MOD/SMOD/SIGNEXTEND = LOW (5),
+                //       ADDMOD/MULMOD = MID (8), EXP = EXP_BASE (10) + dynamic
+                gpu_u64 base_gas = (op == 0x01 || op == 0x03) ? GasCost::VERYLOW :
+                                   (op == 0x08 || op == 0x09) ? GasCost::MID :
+                                   (op == 0x0a) ? GasCost::EXP_BASE : GasCost::LOW;
+                if (!consume_gas(base_gas))
                     return {ExecStatus::OutOfGas, gas_start, 0, 0};
 
                 uint256 a, b;
@@ -349,32 +353,24 @@ struct EvmInterpreter
                     if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     break;
                 case 0x04: // DIV: a / b
-                    if (!consume_gas(GasCost::LOW - GasCost::VERYLOW)) // adjust to LOW total
-                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.push(div(a, b));
                     if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     break;
                 case 0x05: // SDIV: a / b (signed)
-                    if (!consume_gas(GasCost::LOW - GasCost::VERYLOW))
-                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.push(sdiv(a, b));
                     if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     break;
                 case 0x06: // MOD: a % b
-                    if (!consume_gas(GasCost::LOW - GasCost::VERYLOW))
-                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.push(mod(a, b));
                     if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     break;
                 case 0x07: // SMOD: a % b (signed)
-                    if (!consume_gas(GasCost::LOW - GasCost::VERYLOW))
-                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.push(smod(a, b));
@@ -386,8 +382,6 @@ struct EvmInterpreter
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(n); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
-                    if (!consume_gas(GasCost::MID - GasCost::VERYLOW))
-                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     s = stack.push(addmod(a, b, n));
                     if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     break;
@@ -398,8 +392,6 @@ struct EvmInterpreter
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(n); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
-                    if (!consume_gas(GasCost::MID - GasCost::VERYLOW))
-                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     s = stack.push(mulmod(a, b, n));
                     if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     break;
@@ -715,11 +707,14 @@ struct EvmInterpreter
                 }
                 else // SSTORE: key=top, value=second
                 {
-                    if (!consume_gas(GasCost::SSTORE_SET))  // pessimistic: charge SET cost
-                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
-                    sstore(a, b);  // sstore(key, value)
+                    // Gas: 0->non-zero = SET (20000), otherwise RESET (2900).
+                    uint256 current = sload(a);
+                    gpu_u64 cost = iszero(current) ? GasCost::SSTORE_SET : GasCost::SSTORE_RESET;
+                    if (!consume_gas(cost))
+                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
+                    sstore(a, b);
                 }
                 ++pc;
                 continue;
