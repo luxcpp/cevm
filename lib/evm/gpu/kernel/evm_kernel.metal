@@ -260,6 +260,7 @@ struct TxOutput
 {
     uint status;       // 0=stop, 1=return, 2=revert, 3=oog, 4=error, 5=call_not_supported
     ulong gas_used;
+    ulong gas_refund;  // EIP-2200/3529 refund counter
     uint output_size;
 };
 
@@ -641,21 +642,44 @@ static inline void original_value_record(
 
 /// Compute EIP-2200 SSTORE gas cost.
 /// original = value at start of tx, current = value in storage now, new_val = value being written.
-static inline ulong sstore_gas_eip2200(uint256 original, uint256 current, uint256 new_val)
+/// SSTORE gas cost + refund per EIP-2200/EIP-3529.
+/// Returns the gas to charge. Adds to refund_counter for clearing/restoring storage.
+static inline ulong sstore_gas_eip2200(uint256 original, uint256 current, uint256 new_val,
+                                        thread ulong& refund_counter)
 {
     // No-op: writing the same value that's already there.
     if (u256_eq(new_val, current))
-        return GAS_SSTORE_NOOP;
+        return GAS_SSTORE_NOOP;  // 100 (warm access cost)
 
     // First modification to this slot in the tx (current == original).
     if (u256_eq(original, current))
     {
         if (u256_iszero(original))
             return GAS_SSTORE_SET;    // 0 -> non-zero: 20000
-        return GAS_SSTORE_RESET;      // non-zero -> different non-zero (or -> zero): 2900
+
+        // non-zero -> different non-zero or zero
+        if (u256_iszero(new_val))
+            refund_counter += GAS_SSTORE_REFUND;  // 4800: clearing storage
+        return GAS_SSTORE_RESET;      // 2900
     }
 
     // Subsequent modification (current != original): cheap.
+    // EIP-2200 refund adjustments for restore/re-clear scenarios:
+    if (!u256_iszero(original))
+    {
+        if (u256_iszero(current))
+            refund_counter -= GAS_SSTORE_REFUND;  // undo clear refund (was going to 0, now changing again)
+        else if (u256_iszero(new_val))
+            refund_counter += GAS_SSTORE_REFUND;  // now clearing (non-zero -> 0)
+    }
+    if (u256_eq(new_val, original))
+    {
+        // Restoring to original value
+        if (u256_iszero(original))
+            refund_counter += GAS_SSTORE_SET - GAS_SSTORE_NOOP;  // 19900: undo SET cost
+        else
+            refund_counter += GAS_SSTORE_RESET - GAS_SSTORE_NOOP;  // 2800: undo RESET cost
+    }
     return GAS_SSTORE_NOOP;  // 100
 }
 
@@ -696,6 +720,7 @@ kernel void evm_execute(
     uint sp = 0;  // stack pointer (number of items)
 
     ulong gas = inp.gas_limit;
+    ulong refund_counter = 0;
     uint pc = 0;
     uint mem_size = 0;
     ulong gas_start = gas;
@@ -718,7 +743,7 @@ kernel void evm_execute(
         if (op == 0x00)
         {
             out.status = 0;  // Stop
-            out.gas_used = gas_start - gas;
+            out.gas_used = gas_start - gas; out.gas_refund = refund_counter;
             out.output_size = 0;
             return;
         }
@@ -726,9 +751,9 @@ kernel void evm_execute(
         // PUSH1..PUSH32
         if (op >= 0x60 && op <= 0x7f)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
 
             uint n = op - 0x60 + 1;
             uint256 val = u256_zero();
@@ -748,9 +773,9 @@ kernel void evm_execute(
         // PUSH0
         if (op == 0x5f)
         {
-            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_BASE;
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             stack[sp++] = u256_zero();
             ++pc;
             continue;
@@ -759,9 +784,9 @@ kernel void evm_execute(
         // POP
         if (op == 0x50)
         {
-            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_BASE;
-            if (sp == 0) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp == 0) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             --sp;
             ++pc;
             continue;
@@ -770,10 +795,10 @@ kernel void evm_execute(
         // DUP1..DUP16
         if (op >= 0x80 && op <= 0x8f)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
             uint n = op - 0x80 + 1;
-            if (n > sp || sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (n > sp || sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             stack[sp] = stack[sp - n];
             ++sp;
             ++pc;
@@ -783,10 +808,10 @@ kernel void evm_execute(
         // SWAP1..SWAP16
         if (op >= 0x90 && op <= 0x9f)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
             uint n = op - 0x90 + 1;
-            if (n >= sp) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (n >= sp) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint idx = sp - 1 - n;
             uint256 tmp = stack[sp - 1];
             stack[sp - 1] = stack[idx];
@@ -798,9 +823,9 @@ kernel void evm_execute(
         // ADD
         if (op == 0x01)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             stack[sp++] = u256_add(a, b);
@@ -811,9 +836,9 @@ kernel void evm_execute(
         // MUL
         if (op == 0x02)
         {
-            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_LOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             stack[sp++] = u256_mul(a, b);
@@ -824,9 +849,9 @@ kernel void evm_execute(
         // SUB
         if (op == 0x03)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             stack[sp++] = u256_sub(a, b);
@@ -837,9 +862,9 @@ kernel void evm_execute(
         // DIV (0x04)
         if (op == 0x04)
         {
-            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_LOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             stack[sp++] = u256_div(a, b);
@@ -850,9 +875,9 @@ kernel void evm_execute(
         // SDIV (0x05)
         if (op == 0x05)
         {
-            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_LOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             stack[sp++] = u256_sdiv(a, b);
@@ -863,9 +888,9 @@ kernel void evm_execute(
         // MOD (0x06)
         if (op == 0x06)
         {
-            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_LOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             stack[sp++] = u256_mod(a, b);
@@ -876,9 +901,9 @@ kernel void evm_execute(
         // SMOD (0x07)
         if (op == 0x07)
         {
-            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_LOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             stack[sp++] = u256_smod(a, b);
@@ -889,9 +914,9 @@ kernel void evm_execute(
         // ADDMOD (0x08)
         if (op == 0x08)
         {
-            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_MID;
-            if (sp < 3) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 3) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             uint256 n = stack[--sp];
@@ -903,9 +928,9 @@ kernel void evm_execute(
         // MULMOD (0x09)
         if (op == 0x09)
         {
-            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_MID;
-            if (sp < 3) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 3) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             uint256 n = stack[--sp];
@@ -917,15 +942,15 @@ kernel void evm_execute(
         // EXP (0x0a)
         if (op == 0x0a)
         {
-            if (gas < GAS_EXP_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_EXP_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_EXP_BASE;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             // Dynamic gas: 50 * (number of bytes in exponent)
             uint exp_bytes = u256_byte_length(b);
             ulong exp_gas = GAS_EXP_BYTE * ulong(exp_bytes);
-            if (gas < exp_gas) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < exp_gas) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= exp_gas;
             stack[sp++] = u256_exp(a, b);
             ++pc;
@@ -935,9 +960,9 @@ kernel void evm_execute(
         // SIGNEXTEND (0x0b)
         if (op == 0x0b)
         {
-            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_LOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_LOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             stack[sp++] = u256_signextend(a, b);
@@ -948,9 +973,9 @@ kernel void evm_execute(
         // ISZERO
         if (op == 0x15)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             stack[sp++] = u256_iszero(a) ? u256_one() : u256_zero();
             ++pc;
@@ -960,9 +985,9 @@ kernel void evm_execute(
         // AND, OR, XOR
         if (op >= 0x16 && op <= 0x18)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             if (op == 0x16) stack[sp++] = u256_bitwise_and(a, b);
@@ -975,9 +1000,9 @@ kernel void evm_execute(
         // NOT
         if (op == 0x19)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             stack[sp++] = u256_bitwise_not(a);
             ++pc;
@@ -987,9 +1012,9 @@ kernel void evm_execute(
         // LT, GT, SLT, SGT, EQ
         if (op == 0x10 || op == 0x11 || op == 0x12 || op == 0x13 || op == 0x14)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 a = stack[--sp];
             uint256 b = stack[--sp];
             bool result = false;
@@ -1006,9 +1031,9 @@ kernel void evm_execute(
         // BYTE (0x1a): i=top, x=second -> byte at position i of x
         if (op == 0x1a)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 i = stack[--sp];
             uint256 x = stack[--sp];
             stack[sp++] = u256_byte_at(x, i);
@@ -1019,9 +1044,9 @@ kernel void evm_execute(
         // SHL (0x1b): shift=top, value=second -> value << shift
         if (op == 0x1b)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 shift_amt = stack[--sp];
             uint256 val = stack[--sp];
             if (shift_amt.w[1] | shift_amt.w[2] | shift_amt.w[3] || shift_amt.w[0] >= 256)
@@ -1035,9 +1060,9 @@ kernel void evm_execute(
         // SHR (0x1c): shift=top, value=second -> value >> shift
         if (op == 0x1c)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 shift_amt = stack[--sp];
             uint256 val = stack[--sp];
             if (shift_amt.w[1] | shift_amt.w[2] | shift_amt.w[3] || shift_amt.w[0] >= 256)
@@ -1051,9 +1076,9 @@ kernel void evm_execute(
         // SAR (0x1d): shift=top, value=second -> arithmetic right shift
         if (op == 0x1d)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 shift_amt = stack[--sp];
             uint256 val = stack[--sp];
             bool negative = (val.w[3] >> 63) != 0;
@@ -1068,13 +1093,13 @@ kernel void evm_execute(
         // MLOAD
         if (op == 0x51)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 off_val = stack[--sp];
             if (off_val.w[1] | off_val.w[2] | off_val.w[3] || off_val.w[0] + 32 > MAX_MEMORY_PER_TX)
             {
-                out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return;
+                out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return;
             }
             uint off = uint(off_val.w[0]);
             // Expand memory if needed.
@@ -1085,7 +1110,7 @@ kernel void evm_execute(
                 uint old_words = mem_size / 32;
                 ulong cost = GAS_MEMORY * new_words + (ulong(new_words) * new_words) / 512
                            - GAS_MEMORY * old_words - (ulong(old_words) * old_words) / 512;
-                if (gas < cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                if (gas < cost) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
                 gas -= cost;
                 for (uint i = mem_size; i < new_words * 32; ++i) mem[i] = 0;
                 mem_size = new_words * 32;
@@ -1108,14 +1133,14 @@ kernel void evm_execute(
         // MSTORE
         if (op == 0x52)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 off_val = stack[--sp];
             uint256 val = stack[--sp];
             if (off_val.w[1] | off_val.w[2] | off_val.w[3] || off_val.w[0] + 32 > MAX_MEMORY_PER_TX)
             {
-                out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return;
+                out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return;
             }
             uint off = uint(off_val.w[0]);
             uint end = off + 32;
@@ -1125,7 +1150,7 @@ kernel void evm_execute(
                 uint old_words = mem_size / 32;
                 ulong cost = GAS_MEMORY * new_words + (ulong(new_words) * new_words) / 512
                            - GAS_MEMORY * old_words - (ulong(old_words) * old_words) / 512;
-                if (gas < cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                if (gas < cost) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
                 gas -= cost;
                 for (uint i = mem_size; i < new_words * 32; ++i) mem[i] = 0;
                 mem_size = new_words * 32;
@@ -1148,18 +1173,18 @@ kernel void evm_execute(
         // JUMP
         if (op == 0x56)
         {
-            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_MID;
-            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 dest_val = stack[--sp];
             if (dest_val.w[1] | dest_val.w[2] | dest_val.w[3] || dest_val.w[0] >= code_size)
             {
-                out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return;
+                out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return;
             }
             uint dest = uint(dest_val.w[0]);
             if (!is_valid_jumpdest(code, code_size, dest))
             {
-                out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return;
+                out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return;
             }
             pc = dest;
             continue;
@@ -1168,21 +1193,21 @@ kernel void evm_execute(
         // JUMPI
         if (op == 0x57)
         {
-            if (gas < GAS_HIGH) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_HIGH) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_HIGH;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 dest_val = stack[--sp];
             uint256 cond = stack[--sp];
             if (!u256_iszero(cond))
             {
                 if (dest_val.w[1] | dest_val.w[2] | dest_val.w[3] || dest_val.w[0] >= code_size)
                 {
-                    out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return;
+                    out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return;
                 }
                 uint dest = uint(dest_val.w[0]);
                 if (!is_valid_jumpdest(code, code_size, dest))
                 {
-                    out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return;
+                    out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return;
                 }
                 pc = dest;
                 continue;
@@ -1194,7 +1219,7 @@ kernel void evm_execute(
         // JUMPDEST
         if (op == 0x5b)
         {
-            if (gas < GAS_JUMPDEST) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_JUMPDEST) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_JUMPDEST;
             ++pc;
             continue;
@@ -1203,9 +1228,9 @@ kernel void evm_execute(
         // PC
         if (op == 0x58)
         {
-            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_BASE;
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             stack[sp++] = u256_from(gpu_u64(pc));
             ++pc;
             continue;
@@ -1214,9 +1239,9 @@ kernel void evm_execute(
         // GAS
         if (op == 0x5a)
         {
-            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_BASE;
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             stack[sp++] = u256_from(gas);
             ++pc;
             continue;
@@ -1225,9 +1250,9 @@ kernel void evm_execute(
         // SLOAD
         if (op == 0x54)
         {
-            if (gas < GAS_SLOAD) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_SLOAD) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_SLOAD;
-            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 slot = stack[--sp];
             uint256 val = u256_zero();
             for (uint i = stor_count; i > 0; --i)
@@ -1246,7 +1271,7 @@ kernel void evm_execute(
         // SSTORE — EIP-2200 gas with original-value tracking
         if (op == 0x55)
         {
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 slot = stack[--sp];
             uint256 val = stack[--sp];
 
@@ -1271,8 +1296,8 @@ kernel void evm_execute(
             original_value_lookup(orig_storage, orig_count, slot, original);
 
             // EIP-2200 gas metering.
-            ulong sstore_cost = sstore_gas_eip2200(original, current, val);
-            if (gas < sstore_cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            ulong sstore_cost = sstore_gas_eip2200(original, current, val, refund_counter);
+            if (gas < sstore_cost) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= sstore_cost;
 
             // Write value.
@@ -1300,7 +1325,7 @@ kernel void evm_execute(
         // RETURN
         if (op == 0xf3)
         {
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 off_val = stack[--sp];
             uint256 sz_val = stack[--sp];
             uint off = uint(off_val.w[0]);
@@ -1311,7 +1336,7 @@ kernel void evm_execute(
             {
                 uint new_end = off + sz;
                 if (new_end < off || new_end > MAX_MEMORY_PER_TX)
-                    { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                    { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
                 if (new_end > mem_size)
                 {
                     uint new_words = (new_end + 31) / 32;
@@ -1320,7 +1345,7 @@ kernel void evm_execute(
                                    + (ulong(new_words) * new_words / 512)
                                    - (ulong(old_words) * old_words / 512);
                     if (gas < mem_cost)
-                        { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                        { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
                     gas -= mem_cost;
                     for (uint i = mem_size; i < new_words * 32; ++i) mem[i] = 0;
                     mem_size = new_words * 32;
@@ -1332,6 +1357,7 @@ kernel void evm_execute(
                 output[i] = mem[off + i];
             out.status = 1;  // Return
             out.gas_used = gas_start - gas;
+            out.gas_refund = refund_counter;
             out.output_size = copy_sz;
             return;
         }
@@ -1339,7 +1365,7 @@ kernel void evm_execute(
         // REVERT
         if (op == 0xfd)
         {
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 off_val = stack[--sp];
             uint256 sz_val = stack[--sp];
             uint off = uint(off_val.w[0]);
@@ -1350,7 +1376,7 @@ kernel void evm_execute(
             {
                 uint new_end = off + sz;
                 if (new_end < off || new_end > MAX_MEMORY_PER_TX)
-                    { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                    { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
                 if (new_end > mem_size)
                 {
                     uint new_words = (new_end + 31) / 32;
@@ -1359,7 +1385,7 @@ kernel void evm_execute(
                                    + (ulong(new_words) * new_words / 512)
                                    - (ulong(old_words) * old_words / 512);
                     if (gas < mem_cost)
-                        { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                        { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
                     gas -= mem_cost;
                     for (uint i = mem_size; i < new_words * 32; ++i) mem[i] = 0;
                     mem_size = new_words * 32;
@@ -1371,6 +1397,7 @@ kernel void evm_execute(
                 output[i] = mem[off + i];
             out.status = 2;  // Revert
             out.gas_used = gas_start - gas;
+            out.gas_refund = refund_counter;
             out.output_size = copy_sz;
             return;
         }
@@ -1380,6 +1407,7 @@ kernel void evm_execute(
         {
             out.status = 4;
             out.gas_used = gas_start;
+            out.gas_refund = refund_counter;
             out.output_size = 0;
             return;
         }
@@ -1390,6 +1418,7 @@ kernel void evm_execute(
         {
             out.status = 5;  // CallNotSupported
             out.gas_used = gas_start - gas;
+            out.gas_refund = refund_counter;
             out.output_size = 0;
             return;
         }
@@ -1397,9 +1426,9 @@ kernel void evm_execute(
         // ADDRESS (0x30)
         if (op == 0x30)
         {
-            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_BASE;
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             stack[sp++] = inp.address;
             ++pc;
             continue;
@@ -1408,9 +1437,9 @@ kernel void evm_execute(
         // CALLER (0x33)
         if (op == 0x33)
         {
-            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_BASE;
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             stack[sp++] = inp.caller;
             ++pc;
             continue;
@@ -1419,9 +1448,9 @@ kernel void evm_execute(
         // CALLVALUE (0x34)
         if (op == 0x34)
         {
-            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_BASE;
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             stack[sp++] = inp.value;
             ++pc;
             continue;
@@ -1430,9 +1459,9 @@ kernel void evm_execute(
         // CALLDATASIZE (0x36)
         if (op == 0x36)
         {
-            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_BASE;
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             stack[sp++] = u256_from(gpu_u64(calldata_size));
             ++pc;
             continue;
@@ -1441,9 +1470,9 @@ kernel void evm_execute(
         // CALLDATALOAD (0x35)
         if (op == 0x35)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 off_val = stack[--sp];
             uint256 result = u256_zero();
             if (!off_val.w[1] && !off_val.w[2] && !off_val.w[3] && off_val.w[0] < calldata_size)
@@ -1467,9 +1496,9 @@ kernel void evm_execute(
         // MSIZE (0x59)
         if (op == 0x59)
         {
-            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_BASE;
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             stack[sp++] = u256_from(gpu_u64(mem_size));
             ++pc;
             continue;
@@ -1478,6 +1507,7 @@ kernel void evm_execute(
         // Unrecognized opcode — error.
         out.status = 4;
         out.gas_used = gas_start - gas;
+        out.gas_refund = refund_counter;
         out.output_size = 0;
         return;
     }
@@ -1485,6 +1515,7 @@ kernel void evm_execute(
     // Fell off end of code -> implicit STOP.
     out.status = 0;
     out.gas_used = gas_start - gas;
+    out.gas_refund = refund_counter;
     out.output_size = 0;
 }
 
@@ -1696,6 +1727,7 @@ kernel void evm_execute_stateful(
     uint sp = 0;
     uint pc = 0;
     ulong gas = inp.gas_limit;
+    ulong refund_counter = 0;
     ulong gas_start = gas;
     uint mem_size = 0;
 
@@ -1712,9 +1744,9 @@ kernel void evm_execute_stateful(
         // --- SLOAD: read from persistent global storage table ---
         if (op == 0x54)
         {
-            if (gas < GAS_SLOAD) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_SLOAD) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_SLOAD;
-            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 slot = stack[--sp];
 
             // First check the per-tx write-set (Block-STM local writes).
@@ -1744,7 +1776,7 @@ kernel void evm_execute_stateful(
         // to global state would bypass MvMemory conflict detection.
         if (op == 0x55)
         {
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 slot = stack[--sp];
             uint256 val = stack[--sp];
 
@@ -1770,8 +1802,8 @@ kernel void evm_execute_stateful(
             original_value_lookup(orig_storage, orig_count, slot, original);
 
             // EIP-2200 gas metering.
-            ulong sstore_cost = sstore_gas_eip2200(original, current, val);
-            if (gas < sstore_cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            ulong sstore_cost = sstore_gas_eip2200(original, current, val, refund_counter);
+            if (gas < sstore_cost) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= sstore_cost;
 
             // Record in per-tx write-set (Block-STM will validate before commit).
@@ -1795,14 +1827,14 @@ kernel void evm_execute_stateful(
 
         // All other opcodes: delegate to the same logic as evm_execute.
         // STOP
-        if (op == 0x00) { out.status = 0; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+        if (op == 0x00) { out.status = 0; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
 
         // PUSH1..PUSH32 (0x60..0x7f)
         if (op >= 0x60 && op <= 0x7f)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint n = uint(op) - 0x5f;
             uint256 val = u256_zero();
             for (uint i = 0; i < n && (pc + 1 + i) < code_size; ++i)
@@ -1820,11 +1852,11 @@ kernel void evm_execute_stateful(
         // DUP1..DUP16 (0x80..0x8f)
         if (op >= 0x80 && op <= 0x8f)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
             uint depth = uint(op) - 0x7f;
-            if (sp < depth) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
-            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < depth) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             stack[sp] = stack[sp - depth];
             sp++;
             ++pc;
@@ -1834,10 +1866,10 @@ kernel void evm_execute_stateful(
         // SWAP1..SWAP16 (0x90..0x9f)
         if (op >= 0x90 && op <= 0x9f)
         {
-            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_VERYLOW;
             uint depth = uint(op) - 0x8f;
-            if (sp < depth + 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < depth + 1) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 tmp = stack[sp - 1];
             stack[sp - 1] = stack[sp - 1 - depth];
             stack[sp - 1 - depth] = tmp;
@@ -1848,9 +1880,9 @@ kernel void evm_execute_stateful(
         // POP (0x50)
         if (op == 0x50)
         {
-            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_BASE;
-            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             --sp;
             ++pc;
             continue;
@@ -1859,13 +1891,13 @@ kernel void evm_execute_stateful(
         // JUMP (0x56)
         if (op == 0x56)
         {
-            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_MID;
-            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 dest = stack[--sp];
             uint target = uint(dest.w[0]);
             if (!is_valid_jumpdest(code, code_size, target))
-                { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+                { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             pc = target;
             continue;
         }
@@ -1873,15 +1905,15 @@ kernel void evm_execute_stateful(
         // JUMPI (0x57)
         if (op == 0x57)
         {
-            if (gas < GAS_HIGH) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_HIGH) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_HIGH;
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 dest = stack[--sp];
             uint256 cond = stack[--sp];
             if (!u256_iszero(cond)) {
                 uint target = uint(dest.w[0]);
                 if (!is_valid_jumpdest(code, code_size, target))
-                    { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+                    { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
                 pc = target;
             } else {
                 ++pc;
@@ -1892,7 +1924,7 @@ kernel void evm_execute_stateful(
         // JUMPDEST (0x5b)
         if (op == 0x5b)
         {
-            if (gas < GAS_JUMPDEST) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            if (gas < GAS_JUMPDEST) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
             gas -= GAS_JUMPDEST;
             ++pc;
             continue;
@@ -1907,7 +1939,7 @@ kernel void evm_execute_stateful(
 
         // RETURN (0xf3)
         if (op == 0xf3) {
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 off_val = stack[--sp];
             uint256 sz_val = stack[--sp];
             uint off = uint(off_val.w[0]);
@@ -1915,14 +1947,14 @@ kernel void evm_execute_stateful(
             if (sz > 0) {
                 uint new_end = off + sz;
                 if (new_end < off || new_end > MAX_MEMORY_PER_TX)
-                    { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                    { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
                 if (new_end > mem_size) {
                     uint new_words = (new_end + 31) / 32;
                     uint old_words = (mem_size + 31) / 32;
                     ulong mem_cost = GAS_MEMORY * (new_words - old_words)
                                    + (ulong(new_words) * new_words / 512)
                                    - (ulong(old_words) * old_words / 512);
-                    if (gas < mem_cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                    if (gas < mem_cost) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
                     gas -= mem_cost;
                     for (uint i = mem_size; i < new_words * 32; ++i) mem[i] = 0;
                     mem_size = new_words * 32;
@@ -1932,13 +1964,14 @@ kernel void evm_execute_stateful(
             for (uint i = 0; i < copy_sz; ++i) output[i] = mem[off + i];
             out.status = 1;
             out.gas_used = gas_start - gas;
+            out.gas_refund = refund_counter;
             out.output_size = copy_sz;
             return;
         }
 
         // REVERT (0xfd)
         if (op == 0xfd) {
-            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.gas_refund = refund_counter; out.output_size = 0; return; }
             uint256 off_val = stack[--sp];
             uint256 sz_val = stack[--sp];
             uint off = uint(off_val.w[0]);
@@ -1946,14 +1979,14 @@ kernel void evm_execute_stateful(
             if (sz > 0) {
                 uint new_end = off + sz;
                 if (new_end < off || new_end > MAX_MEMORY_PER_TX)
-                    { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                    { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
                 if (new_end > mem_size) {
                     uint new_words = (new_end + 31) / 32;
                     uint old_words = (mem_size + 31) / 32;
                     ulong mem_cost = GAS_MEMORY * (new_words - old_words)
                                    + (ulong(new_words) * new_words / 512)
                                    - (ulong(old_words) * old_words / 512);
-                    if (gas < mem_cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                    if (gas < mem_cost) { out.status = 3; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
                     gas -= mem_cost;
                     for (uint i = mem_size; i < new_words * 32; ++i) mem[i] = 0;
                     mem_size = new_words * 32;
@@ -1963,18 +1996,20 @@ kernel void evm_execute_stateful(
             for (uint i = 0; i < copy_sz; ++i) output[i] = mem[off + i];
             out.status = 2;
             out.gas_used = gas_start - gas;
+            out.gas_refund = refund_counter;
             out.output_size = copy_sz;
             return;
         }
 
         // INVALID (0xfe)
-        if (op == 0xfe) { out.status = 4; out.gas_used = gas_start; out.output_size = 0; return; }
+        if (op == 0xfe) { out.status = 4; out.gas_used = gas_start; out.gas_refund = refund_counter; out.output_size = 0; return; }
 
         // CALL/CREATE family -> CPU fallback
         if (op == 0xf0 || op == 0xf1 || op == 0xf2 || op == 0xf4 ||
             op == 0xf5 || op == 0xfa || op == 0xff) {
             out.status = 5;
             out.gas_used = gas_start - gas;
+            out.gas_refund = refund_counter;
             out.output_size = 0;
             return;
         }
@@ -1983,12 +2018,14 @@ kernel void evm_execute_stateful(
         // A production build would inline the full opcode table here.
         out.status = 5;
         out.gas_used = gas_start - gas;
+        out.gas_refund = refund_counter;
         out.output_size = 0;
         return;
     }
 
     out.status = 0;
     out.gas_used = gas_start - gas;
+    out.gas_refund = refund_counter;
     out.output_size = 0;
 }
 
