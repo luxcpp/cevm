@@ -153,6 +153,37 @@ if(APPLE)
     add_executable(evm-test-gpu-state state/test_gpu_state.cpp)
     target_compile_features(evm-test-gpu-state PRIVATE cxx_std_20)
     target_link_libraries(evm-test-gpu-state PRIVATE evm-gpu-state evm evmc::evmc intx::intx evmone::precompiles)
+
+    # Metal host dispatchers: tx_validate, bls, block_stm
+    add_library(evm-metal-hosts STATIC
+        gpu/metal/tx_validate_host.mm
+        gpu/metal/bls_host.mm
+        gpu/metal/block_stm_host.mm
+    )
+    target_compile_features(evm-metal-hosts PUBLIC cxx_std_20)
+    target_link_libraries(evm-metal-hosts PUBLIC evm-gpu "-framework Metal" "-framework Foundation")
+    target_include_directories(evm-metal-hosts PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
+    # End-to-end GPU pipeline test
+    add_executable(evm-test-pipeline gpu/test_pipeline.cpp)
+    target_compile_features(evm-test-pipeline PRIVATE cxx_std_20)
+    target_link_libraries(evm-test-pipeline PRIVATE
+        evm-metal-hosts evm-kernel-metal evm-gpu-state evm-gpu evm-state
+        evm evmc::evmc intx::intx evmone::precompiles
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(evm-test-pipeline PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+    if(LUXCPP_GPU_FOUND)
+        target_link_libraries(evm-test-pipeline PRIVATE luxgpu_core_static)
+    endif()
 endif()
 
 # State layer: full Ethereum state (accounts, storage, journal) for evmone

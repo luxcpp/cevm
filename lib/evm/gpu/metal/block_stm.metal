@@ -379,9 +379,17 @@ kernel void block_stm_execute(
     while (loops < MAX_SCHEDULER_LOOPS) {
         loops++;
 
-        // Check if all done
+        // Check if all done. Use done_count as a fast path, but verify
+        // all tx_states[i].validated == 1 to guard against stale counts
+        // from invalidation races.
         uint done = atomic_load_explicit(&sched_state[2], memory_order_relaxed);
-        if (done >= num_txs) break;
+        if (done >= num_txs) {
+            bool all_valid = true;
+            for (uint i = 0; i < num_txs; i++) {
+                if (tx_states[i].validated != 1) { all_valid = false; break; }
+            }
+            if (all_valid) break;
+        }
 
         // Check abort flag
         uint aborted = atomic_load_explicit(&sched_state[3], memory_order_relaxed);
@@ -554,9 +562,14 @@ kernel void block_stm_execute(
                         break;
                 }
 
-                // 4. Invalidate all later transactions
+                // 4. Invalidate all later transactions that were previously
+                //    validated. Decrement done_count for each so it stays
+                //    consistent -- prevents premature completion.
                 for (uint i = val_idx + 1; i < num_txs; i++) {
-                    tx_states[i].validated = 0;
+                    if (tx_states[i].validated == 1) {
+                        tx_states[i].validated = 0;
+                        atomic_fetch_sub_explicit(&sched_state[2], 1u, memory_order_relaxed);
+                    }
                 }
 
                 // 5. Reset validation_idx
@@ -572,9 +585,15 @@ kernel void block_stm_execute(
             continue;
         }
 
-        // No work available. Check if done.
+        // No work available. Check if done (same verified check).
         done = atomic_load_explicit(&sched_state[2], memory_order_relaxed);
-        if (done >= num_txs) break;
+        if (done >= num_txs) {
+            bool all_valid = true;
+            for (uint i = 0; i < num_txs; i++) {
+                if (tx_states[i].validated != 1) { all_valid = false; break; }
+            }
+            if (all_valid) break;
+        }
 
         // Spin-wait briefly. On GPU, threads are cheap -- just retry.
     }

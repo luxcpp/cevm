@@ -368,6 +368,66 @@ kernel void storage_insert_batch(
     }
 }
 
+// -- State root sorting (deterministic entry order for root hash) ---------------
+
+/// Compare 20-byte addresses lexicographically. Returns true if a < b.
+inline bool addr_less_than(const device uchar* a, const device uchar* b) {
+    for (uint i = 0; i < 20; ++i) {
+        if (a[i] < b[i]) return true;
+        if (a[i] > b[i]) return false;
+    }
+    return false;
+}
+
+/// Compact occupied entries to the front of the buffer.
+/// Writes compacted entries to out_buf and atomically increments counter.
+kernel void state_root_compact(
+    device const AccountEntry* table   [[buffer(0)]],
+    device AccountEntry*       out_buf [[buffer(1)]],
+    device atomic_uint*        counter [[buffer(2)]],
+    device const BatchParams*  params  [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint capacity = params->capacity;
+    if (tid >= capacity) return;
+
+    if (table[tid].key_valid != 0) {
+        uint idx = atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);
+        out_buf[idx] = table[tid];
+    }
+}
+
+/// One step of a bitonic sort network on compacted entries.
+/// Sorts occupied account entries by address for deterministic state root.
+/// params->count  = number of compacted entries.
+/// params->capacity encodes the bitonic pass parameters:
+///   bits [15:0]  = substep (partner XOR mask)
+///   bits [31:16] = direction mask (step << 1)
+kernel void state_root_sort(
+    device AccountEntry*       entries [[buffer(0)]],
+    device const BatchParams*  params  [[buffer(1)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint count = params->count;
+    if (tid >= count) return;
+
+    uint substep = params->capacity & 0xFFFFu;
+    uint dir_mask = (params->capacity >> 16) & 0xFFFFu;
+
+    uint partner = tid ^ substep;
+    if (partner <= tid || partner >= count) return;
+
+    bool ascending = ((tid & dir_mask) == 0);
+    bool a_lt_b = addr_less_than(entries[tid].key, entries[partner].key);
+
+    // Swap if order is wrong for the current direction.
+    if (ascending != a_lt_b) {
+        AccountEntry tmp = entries[tid];
+        entries[tid] = entries[partner];
+        entries[partner] = tmp;
+    }
+}
+
 // -- State root computation (parallel reduce + keccak) --------------------------
 
 /// Phase 1: Each thread hashes one occupied account entry into a 32-byte digest.

@@ -164,50 +164,36 @@ GPU_INLINE uint256 sub(const uint256& a, const uint256& b)
 }
 
 /// 256-bit multiplication (low 256 bits of 512-bit product).
-/// Schoolbook 4x4 limb multiply, keeping only the low 4 limbs.
+/// Uses the same proven accumulator loop as mulmod's 512-bit product,
+/// but only computes the low 4 limbs (i+j < 4). Products where i+j >= 4
+/// overflow past 256 bits and are discarded per EVM spec.
 GPU_INLINE uint256 mul(const uint256& a, const uint256& b)
 {
-    // We need: r[0..3] = sum of a[i]*b[j] where i+j <= 3.
-    // Products where i+j >= 4 overflow past 256 bits and are discarded.
+    gpu_u64 r[4] = {0, 0, 0, 0};
 
-    uint256 r;
-    gpu_u64 carry = 0;
+    for (gpu_u32 i = 0; i < 4; ++i)
+    {
+        gpu_u64 carry = 0;
+        for (gpu_u32 j = 0; j < 4; ++j)
+        {
+            if (i + j >= 4)
+            {
+                // This product contributes only to bits >= 256, discard.
+                break;
+            }
+            auto [lo, hi] = uint256::mul_wide(a.w[i], b.w[j]);
+            gpu_u64 s = r[i + j] + lo;
+            gpu_u64 c = (s < r[i + j]) ? gpu_u64(1) : gpu_u64(0);
+            s += carry;
+            c += (s < carry) ? gpu_u64(1) : gpu_u64(0);
+            r[i + j] = s;
+            carry = hi + c;
+        }
+        // carry propagates into r[i + j] where j = 4-i or beyond,
+        // but those limbs are past 256 bits and discarded.
+    }
 
-    // r[0] = lo(a0*b0)
-    auto p00 = uint256::mul_wide(a.w[0], b.w[0]);
-    r.w[0] = p00.lo;
-    carry = p00.hi;
-
-    // r[1] = lo(a0*b1 + a1*b0 + carry)
-    auto p01 = uint256::mul_wide(a.w[0], b.w[1]);
-    auto p10 = uint256::mul_wide(a.w[1], b.w[0]);
-    gpu_u64 s1 = p01.lo + p10.lo + carry;
-    // Compute carry into limb 2: sum of hi parts + overflow from lo additions
-    gpu_u64 c1 = p01.hi + p10.hi;
-    c1 += (s1 < p01.lo) ? gpu_u64(1) : gpu_u64(0);
-    // Check if p10.lo + carry overflowed before adding p01.lo
-    gpu_u64 tmp = p10.lo + carry;
-    c1 += (tmp < p10.lo) ? gpu_u64(1) : gpu_u64(0);
-    r.w[1] = s1;
-
-    // r[2] = lo(a0*b2 + a1*b1 + a2*b0 + carry)
-    auto p02 = uint256::mul_wide(a.w[0], b.w[2]);
-    auto p11 = uint256::mul_wide(a.w[1], b.w[1]);
-    auto p20 = uint256::mul_wide(a.w[2], b.w[0]);
-    gpu_u64 s2 = p02.lo + p11.lo;
-    gpu_u64 c2 = (s2 < p02.lo) ? gpu_u64(1) : gpu_u64(0);
-    gpu_u64 s2b = s2 + p20.lo;
-    c2 += (s2b < s2) ? gpu_u64(1) : gpu_u64(0);
-    gpu_u64 s2c = s2b + c1;
-    c2 += (s2c < s2b) ? gpu_u64(1) : gpu_u64(0);
-    c2 += p02.hi + p11.hi + p20.hi;
-    r.w[2] = s2c;
-
-    // r[3] = lo(a0*b3 + a1*b2 + a2*b1 + a3*b0 + carry)
-    // No need to track carry beyond this limb.
-    r.w[3] = a.w[0] * b.w[3] + a.w[1] * b.w[2] + a.w[2] * b.w[1] + a.w[3] * b.w[0] + c2;
-
-    return r;
+    return uint256{r[0], r[1], r[2], r[3]};
 }
 
 // -- Comparison ---------------------------------------------------------------
@@ -480,6 +466,11 @@ GPU_INLINE uint256 smod(const uint256& a, const uint256& b)
 }
 
 /// ADDMOD: (a + b) % m. Uses 320-bit intermediate to avoid overflow.
+///
+/// Computes the full 320-bit sum (5 limbs), then reduces mod m using
+/// bit-by-bit shift-subtract (same approach as mulmod uses for 512 bits).
+/// This avoids the double-carry bug where subtracting m via add(sum, negate(m))
+/// can overflow a second time, losing the carry.
 GPU_INLINE uint256 addmod(const uint256& a, const uint256& b, const uint256& m)
 {
     if (iszero(m))
@@ -492,24 +483,33 @@ GPU_INLINE uint256 addmod(const uint256& a, const uint256& b, const uint256& m)
     auto [s3, c3] = uint256::add_carry(a.w[3], b.w[3], c2);
     // c3 is the 5th limb (0 or 1).
 
-    // If no overflow (c3 == 0), just do regular mod.
+    // No overflow: standard 256-bit mod.
     if (c3 == 0)
     {
-        uint256 sum{s0, s1, s2, s3};
-        return mod(sum, m);
+        uint256 sum_val{s0, s1, s2, s3};
+        return mod(sum_val, m);
     }
 
-    // Overflow case: the sum is 2^256 + {s0,s1,s2,s3}.
-    // We reduce by subtracting m until we fit in 256 bits.
-    // Since a < 2^256 and b < 2^256, sum < 2^257, so sum - m < 2^256 + m.
-    // At most 2 subtractions needed.
-    uint256 sum{s0, s1, s2, s3};
-    // First subtract m from the conceptual 257-bit value.
-    // (2^256 + sum) - m = sum + (2^256 - m) = sum + (~m + 1)
-    uint256 neg_m = add(bitwise_not(m), uint256::one());
-    sum = add(sum, neg_m);
-    // Now the value fits in 256 bits. Do final mod.
-    return mod(sum, m);
+    // Overflow: reduce the 320-bit value {c3, s3, s2, s1, s0} mod m.
+    // Use bit-by-bit reduction: for each bit from MSB (bit 256) to LSB (bit 0),
+    // shift the accumulator left by 1, add the bit, subtract m if >= m.
+    // Since c3 is 0 or 1, the 320-bit value has at most 257 significant bits.
+    gpu_u64 r[5] = {s0, s1, s2, s3, c3};
+    uint256 result = uint256::zero();
+    for (int bit = 256; bit >= 0; --bit)
+    {
+        // Shift result left by 1.
+        result = shl(uint256{1}, result);
+        // Add the current bit of the 320-bit sum.
+        gpu_u32 limb = gpu_u32(bit) / 64;
+        gpu_u32 pos  = gpu_u32(bit) % 64;
+        if ((r[limb] >> pos) & 1)
+            result.w[0] |= 1;
+        // Reduce: if result >= m, subtract m.
+        if (!lt(result, m))
+            result = sub(result, m);
+    }
+    return result;
 }
 
 /// MULMOD: (a * b) % m. Uses 512-bit intermediate.
