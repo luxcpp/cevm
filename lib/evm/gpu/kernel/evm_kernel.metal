@@ -210,38 +210,36 @@ static inline pair64 mul_wide(gpu_u64 a, gpu_u64 b)
     return result;
 }
 
+/// 256-bit multiplication (low 256 bits of 512-bit product).
+/// Uses the same proven accumulator loop as mulmod's 512-bit product,
+/// but only computes the low 4 limbs (i+j < 4). Products where i+j >= 4
+/// overflow past 256 bits and are discarded per EVM spec.
 static inline uint256 u256_mul(uint256 a, uint256 b)
 {
-    uint256 r = u256_zero();
-    gpu_u64 carry = 0;
+    gpu_u64 r[4] = {0, 0, 0, 0};
 
-    pair64 p00 = mul_wide(a.w[0], b.w[0]);
-    r.w[0] = p00.lo;
-    carry = p00.hi;
+    for (uint i = 0; i < 4; ++i)
+    {
+        gpu_u64 carry = 0;
+        for (uint j = 0; j < 4; ++j)
+        {
+            if (i + j >= 4)
+                break;  // overflow past 256 bits, discard
+            pair64 p = mul_wide(a.w[i], b.w[j]);
+            gpu_u64 s = r[i + j] + p.lo;
+            gpu_u64 c = (s < r[i + j]) ? 1UL : 0UL;
+            s += carry;
+            c += (s < carry) ? 1UL : 0UL;
+            r[i + j] = s;
+            carry = p.hi + c;
+        }
+        // carry propagates into r[i + j] where j = 4-i or beyond,
+        // but those limbs are past 256 bits and discarded.
+    }
 
-    pair64 p01 = mul_wide(a.w[0], b.w[1]);
-    pair64 p10 = mul_wide(a.w[1], b.w[0]);
-    gpu_u64 s1 = p01.lo + p10.lo + carry;
-    gpu_u64 c1 = p01.hi + p10.hi;
-    c1 += (s1 < p01.lo) ? 1UL : 0UL;
-    gpu_u64 tmp = p10.lo + carry;
-    c1 += (tmp < p10.lo) ? 1UL : 0UL;
-    r.w[1] = s1;
-
-    pair64 p02 = mul_wide(a.w[0], b.w[2]);
-    pair64 p11 = mul_wide(a.w[1], b.w[1]);
-    pair64 p20 = mul_wide(a.w[2], b.w[0]);
-    gpu_u64 s2 = p02.lo + p11.lo;
-    gpu_u64 c2 = (s2 < p02.lo) ? 1UL : 0UL;
-    gpu_u64 s2b = s2 + p20.lo;
-    c2 += (s2b < s2) ? 1UL : 0UL;
-    gpu_u64 s2c = s2b + c1;
-    c2 += (s2c < s2b) ? 1UL : 0UL;
-    c2 += p02.hi + p11.hi + p20.hi;
-    r.w[2] = s2c;
-
-    r.w[3] = a.w[0] * b.w[3] + a.w[1] * b.w[2] + a.w[2] * b.w[1] + a.w[3] * b.w[0] + c2;
-    return r;
+    uint256 result;
+    result.w[0] = r[0]; result.w[1] = r[1]; result.w[2] = r[2]; result.w[3] = r[3];
+    return result;
 }
 
 // -- GPU buffer descriptors ---------------------------------------------------
@@ -288,8 +286,9 @@ constant ulong GAS_HIGH     = 10;
 constant ulong GAS_BASE     = 2;
 constant ulong GAS_JUMPDEST = 1;
 constant ulong GAS_SLOAD       = 2100;
-constant ulong GAS_SSTORE_SET  = 20000;
-constant ulong GAS_SSTORE_RESET = 2900;
+constant ulong GAS_SSTORE_SET    = 20000;
+constant ulong GAS_SSTORE_RESET  = 2900;
+constant ulong GAS_SSTORE_NOOP   = 100;   // EIP-2200: no-op write (same value)
 constant ulong GAS_SSTORE_REFUND = 4800;
 constant ulong GAS_MEMORY   = 3;
 constant ulong GAS_EXP_BASE = 10;
@@ -413,11 +412,17 @@ static inline uint256 u256_smod(uint256 a, uint256 b)
 }
 
 // -- ADDMOD: (a + b) % m with 320-bit intermediate ---------------------------
+//
+// Computes the full 320-bit sum (5 limbs), then reduces mod m using the same
+// bit-by-bit shift-subtract approach that MULMOD uses for 512 bits. This avoids
+// the double-carry bug where subtracting m via u256_add(sum, negate(m)) can
+// overflow a second time, losing the carry.
 
 static inline uint256 u256_addmod(uint256 a, uint256 b, uint256 m)
 {
     if (u256_iszero(m)) return u256_zero();
 
+    // Full 320-bit addition into 5 limbs.
     gpu_u64 s0 = a.w[0] + b.w[0];
     gpu_u64 c0 = (s0 < a.w[0]) ? 1UL : 0UL;
     gpu_u64 s1 = a.w[1] + b.w[1] + c0;
@@ -427,16 +432,33 @@ static inline uint256 u256_addmod(uint256 a, uint256 b, uint256 m)
     gpu_u64 s3 = a.w[3] + b.w[3] + c2;
     gpu_u64 c3 = (s3 < a.w[3] || (c2 && s3 == a.w[3])) ? 1UL : 0UL;
 
+    // No overflow: standard 256-bit mod.
     if (c3 == 0)
     {
         uint256 sum; sum.w[0] = s0; sum.w[1] = s1; sum.w[2] = s2; sum.w[3] = s3;
         return u256_mod(sum, m);
     }
 
-    uint256 sum; sum.w[0] = s0; sum.w[1] = s1; sum.w[2] = s2; sum.w[3] = s3;
-    uint256 neg_m = u256_negate(m);
-    sum = u256_add(sum, neg_m);
-    return u256_mod(sum, m);
+    // Overflow: reduce the 320-bit value {c3, s3, s2, s1, s0} mod m.
+    // Use bit-by-bit reduction: for each bit from MSB (bit 256) to LSB (bit 0),
+    // shift the accumulator left by 1, add the bit, subtract m if >= m.
+    // Since c3 is 0 or 1, the 320-bit value has at most 257 significant bits.
+    gpu_u64 r[5] = {s0, s1, s2, s3, c3};
+    uint256 result = u256_zero();
+    for (int bit = 256; bit >= 0; --bit)
+    {
+        // Shift result left by 1.
+        result = u256_shl(1, result);
+        // Add the current bit of the 320-bit sum.
+        uint limb = uint(bit) / 64;
+        uint pos  = uint(bit) % 64;
+        if ((r[limb] >> pos) & 1)
+            result.w[0] |= 1;
+        // Reduce: if result >= m, subtract m.
+        if (!u256_lt(result, m))
+            result = u256_sub(result, m);
+    }
+    return result;
 }
 
 // -- MULMOD: (a * b) % m with 512-bit intermediate ---------------------------
@@ -571,6 +593,72 @@ static inline uint u256_byte_length(uint256 x)
     return (bits + 7) / 8;
 }
 
+// -- EIP-2200 original-value tracking -----------------------------------------
+// Tracks the value each storage slot had at the start of the transaction.
+// Used by SSTORE to determine correct gas cost.
+// Thread-local: MAX_STORAGE_PER_TX entries per tx, linear scan (small N on GPU).
+
+struct OriginalEntry
+{
+    uint256 key;
+    uint256 value;
+    bool    valid;
+};
+
+/// Look up original value for a slot. Returns {value, found}.
+static inline bool original_value_lookup(
+    thread OriginalEntry* originals, uint orig_count, uint256 slot, thread uint256& out_value)
+{
+    for (uint i = 0; i < orig_count; ++i)
+    {
+        if (originals[i].valid && u256_eq(originals[i].key, slot))
+        {
+            out_value = originals[i].value;
+            return true;
+        }
+    }
+    out_value = u256_zero();
+    return false;
+}
+
+/// Record original value for a slot (only if not already recorded).
+static inline void original_value_record(
+    thread OriginalEntry* originals, thread uint& orig_count, uint256 slot, uint256 value)
+{
+    for (uint i = 0; i < orig_count; ++i)
+    {
+        if (originals[i].valid && u256_eq(originals[i].key, slot))
+            return;  // already recorded
+    }
+    if (orig_count < MAX_STORAGE_PER_TX)
+    {
+        originals[orig_count].key   = slot;
+        originals[orig_count].value = value;
+        originals[orig_count].valid = true;
+        orig_count++;
+    }
+}
+
+/// Compute EIP-2200 SSTORE gas cost.
+/// original = value at start of tx, current = value in storage now, new_val = value being written.
+static inline ulong sstore_gas_eip2200(uint256 original, uint256 current, uint256 new_val)
+{
+    // No-op: writing the same value that's already there.
+    if (u256_eq(new_val, current))
+        return GAS_SSTORE_NOOP;
+
+    // First modification to this slot in the tx (current == original).
+    if (u256_eq(original, current))
+    {
+        if (u256_iszero(original))
+            return GAS_SSTORE_SET;    // 0 -> non-zero: 20000
+        return GAS_SSTORE_RESET;      // non-zero -> different non-zero (or -> zero): 2900
+    }
+
+    // Subsequent modification (current != original): cheap.
+    return GAS_SSTORE_NOOP;  // 100
+}
+
 // -- Minimal interpreter inline -----------------------------------------------
 // The full interpreter is in evm_interpreter.hpp (C++ host).
 // This Metal version covers the core opcode subset for compute workloads.
@@ -611,6 +699,12 @@ kernel void evm_execute(
     uint pc = 0;
     uint mem_size = 0;
     ulong gas_start = gas;
+
+    // EIP-2200: track original values per storage slot for gas metering.
+    OriginalEntry orig_storage[MAX_STORAGE_PER_TX];
+    uint orig_count = 0;
+    for (uint i = 0; i < MAX_STORAGE_PER_TX; ++i)
+        orig_storage[i].valid = false;
 
     // Main interpreter loop. Each opcode is handled inline with early returns
     // on error. Status codes match ExecStatus: 0=stop, 1=return, 2=revert,
@@ -1149,7 +1243,7 @@ kernel void evm_execute(
             continue;
         }
 
-        // SSTORE — gas differentiation per EIP-2200
+        // SSTORE — EIP-2200 gas with original-value tracking
         if (op == 0x55)
         {
             if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
@@ -1169,9 +1263,15 @@ kernel void evm_execute(
                 }
             }
 
-            // Charge gas: 0->non-zero = SET (20000), non-zero->non-zero = RESET (2900),
-            // non-zero->0 = RESET (2900) + refund recorded separately.
-            ulong sstore_cost = u256_iszero(current) ? GAS_SSTORE_SET : GAS_SSTORE_RESET;
+            // Record original value on first access to this slot.
+            original_value_record(orig_storage, orig_count, slot, current);
+
+            // Look up the original value for EIP-2200 gas calculation.
+            uint256 original = u256_zero();
+            original_value_lookup(orig_storage, orig_count, slot, original);
+
+            // EIP-2200 gas metering.
+            ulong sstore_cost = sstore_gas_eip2200(original, current, val);
             if (gas < sstore_cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
             gas -= sstore_cost;
 
@@ -1550,7 +1650,8 @@ static inline void global_storage_store(
     }
 }
 
-/// Stateful EVM kernel: SLOAD/SSTORE go directly to persistent GPU state.
+/// Stateful EVM kernel: SLOAD reads write-set then persistent state;
+/// SSTORE writes to per-tx write-set only (committed after Block-STM validation).
 ///
 /// Buffer layout:
 ///   [0] TxInput*           — per-transaction input descriptors
@@ -1598,6 +1699,12 @@ kernel void evm_execute_stateful(
     ulong gas_start = gas;
     uint mem_size = 0;
 
+    // EIP-2200: track original values per storage slot for gas metering.
+    OriginalEntry orig_storage[MAX_STORAGE_PER_TX];
+    uint orig_count = 0;
+    for (uint i = 0; i < MAX_STORAGE_PER_TX; ++i)
+        orig_storage[i].valid = false;
+
     while (pc < code_size)
     {
         uchar op = code[pc];
@@ -1630,24 +1737,44 @@ kernel void evm_execute_stateful(
             continue;
         }
 
-        // --- SSTORE: write to persistent global storage table + local write-set ---
+        // --- SSTORE: write to per-tx write-set ONLY (Block-STM validated commit) ---
+        // Writes go to the per-tx write-set buffer, NOT the global table.
+        // After Block-STM validation confirms no conflicts, a separate commit
+        // kernel copies validated writes to the global table. Writing directly
+        // to global state would bypass MvMemory conflict detection.
         if (op == 0x55)
         {
             if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
             uint256 slot = stack[--sp];
             uint256 val = stack[--sp];
 
-            // Read current value from global table for gas metering.
-            uint256 current = global_storage_load(global_storage, global_capacity, inp.address, slot);
+            // Read current value for gas metering: check per-tx write-set first,
+            // then fall back to global table for the base state.
+            uint256 current = u256_zero();
+            bool found_current = false;
+            for (uint i = tx_stor_count; i > 0; --i) {
+                if (u256_eq(tx_storage[i - 1].key, slot)) {
+                    current = tx_storage[i - 1].value;
+                    found_current = true;
+                    break;
+                }
+            }
+            if (!found_current)
+                current = global_storage_load(global_storage, global_capacity, inp.address, slot);
 
-            ulong sstore_cost = u256_iszero(current) ? GAS_SSTORE_SET : GAS_SSTORE_RESET;
+            // Record original value on first access to this slot.
+            original_value_record(orig_storage, orig_count, slot, current);
+
+            // Look up the original value for EIP-2200 gas calculation.
+            uint256 original = u256_zero();
+            original_value_lookup(orig_storage, orig_count, slot, original);
+
+            // EIP-2200 gas metering.
+            ulong sstore_cost = sstore_gas_eip2200(original, current, val);
             if (gas < sstore_cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
             gas -= sstore_cost;
 
-            // Write to persistent global table (visible to all threads).
-            global_storage_store(global_storage, global_capacity, inp.address, slot, val);
-
-            // Also record in per-tx write-set for Block-STM conflict detection.
+            // Record in per-tx write-set (Block-STM will validate before commit).
             bool found = false;
             for (uint i = tx_stor_count; i > 0; --i) {
                 if (u256_eq(tx_storage[i - 1].key, slot)) {

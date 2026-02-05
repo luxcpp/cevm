@@ -112,7 +112,9 @@ public:
         id<MTLComputePipelineState> storage_lookup_pipeline,
         id<MTLComputePipelineState> storage_insert_pipeline,
         id<MTLComputePipelineState> state_root_hash_pipeline,
-        id<MTLComputePipelineState> state_root_reduce_pipeline)
+        id<MTLComputePipelineState> state_root_reduce_pipeline,
+        id<MTLComputePipelineState> state_root_compact_pipeline,
+        id<MTLComputePipelineState> state_root_sort_pipeline)
         : device_(device)
         , queue_(queue)
         , account_table_(account_table)
@@ -126,6 +128,8 @@ public:
         , storage_insert_pso_(storage_insert_pipeline)
         , state_root_hash_pso_(state_root_hash_pipeline)
         , state_root_reduce_pso_(state_root_reduce_pipeline)
+        , state_root_compact_pso_(state_root_compact_pipeline)
+        , state_root_sort_pso_(state_root_sort_pipeline)
     {}
 
     ~GpuHashTableMetal() override = default;
@@ -300,25 +304,29 @@ public:
     evmc::bytes32 compute_state_root() override
     {
         @autoreleasepool {
-            // Phase 1: Hash each occupied account entry.
-            size_t hash_buf_size = account_capacity_ * 32;
-            id<MTLBuffer> hash_buf = [device_ newBufferWithLength:hash_buf_size
-                                               options:MTLResourceStorageModeShared];
+            // Phase 0: Compact occupied entries to a contiguous buffer
+            // so we can sort them by address for deterministic ordering.
+            size_t compact_buf_size = account_capacity_ * sizeof(MetalAccountEntry);
+            id<MTLBuffer> compact_buf = [device_ newBufferWithLength:compact_buf_size
+                                                   options:MTLResourceStorageModeShared];
+            id<MTLBuffer> counter_buf = [device_ newBufferWithLength:sizeof(uint32_t)
+                                                   options:MTLResourceStorageModeShared];
+            std::memset([counter_buf contents], 0, sizeof(uint32_t));
 
-            MetalBatchParams p1{0, account_capacity_};
-            id<MTLBuffer> params1 = [device_ newBufferWithBytes:&p1
-                                              length:sizeof(p1)
-                                              options:MTLResourceStorageModeShared];
-
+            MetalBatchParams pc{0, account_capacity_};
+            id<MTLBuffer> compact_params = [device_ newBufferWithBytes:&pc
+                                                     length:sizeof(pc)
+                                                     options:MTLResourceStorageModeShared];
             {
                 id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
                 id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                [enc setComputePipelineState:state_root_hash_pso_];
+                [enc setComputePipelineState:state_root_compact_pso_];
                 [enc setBuffer:account_table_ offset:0 atIndex:0];
-                [enc setBuffer:hash_buf       offset:0 atIndex:1];
-                [enc setBuffer:params1        offset:0 atIndex:2];
+                [enc setBuffer:compact_buf    offset:0 atIndex:1];
+                [enc setBuffer:counter_buf    offset:0 atIndex:2];
+                [enc setBuffer:compact_params offset:0 atIndex:3];
 
-                NSUInteger tpg = state_root_hash_pso_.maxTotalThreadsPerThreadgroup;
+                NSUInteger tpg = state_root_compact_pso_.maxTotalThreadsPerThreadgroup;
                 NSUInteger n = account_capacity_;
                 if (tpg > n) tpg = n;
                 [enc dispatchThreads:MTLSizeMake(n, 1, 1)
@@ -328,8 +336,74 @@ public:
                 [cmd waitUntilCompleted];
             }
 
+            uint32_t num_occupied = 0;
+            std::memcpy(&num_occupied, [counter_buf contents], sizeof(uint32_t));
+
+            // Phase 0b: Bitonic sort the compacted entries by address.
+            // This ensures deterministic hash ordering across all nodes.
+            if (num_occupied > 1) {
+                for (uint32_t step = 1; step < num_occupied; step <<= 1) {
+                    for (uint32_t substep = step; substep > 0; substep >>= 1) {
+                        uint32_t dir_mask = step << 1;
+                        uint32_t encoded = (dir_mask << 16) | (substep & 0xFFFF);
+                        MetalBatchParams ps{num_occupied, encoded};
+                        id<MTLBuffer> sort_params = [device_ newBufferWithBytes:&ps
+                                                               length:sizeof(ps)
+                                                               options:MTLResourceStorageModeShared];
+
+                        id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
+                        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                        [enc setComputePipelineState:state_root_sort_pso_];
+                        [enc setBuffer:compact_buf offset:0 atIndex:0];
+                        [enc setBuffer:sort_params offset:0 atIndex:1];
+
+                        NSUInteger tpg = state_root_sort_pso_.maxTotalThreadsPerThreadgroup;
+                        if (tpg > num_occupied) tpg = num_occupied;
+                        [enc dispatchThreads:MTLSizeMake(num_occupied, 1, 1)
+                             threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+                        [enc endEncoding];
+                        [cmd commit];
+                        [cmd waitUntilCompleted];
+                    }
+                }
+            }
+
+            // Phase 1: Hash each sorted entry (use compact_buf, not original table).
+            size_t hash_buf_size = (num_occupied > 0 ? num_occupied : 1) * 32;
+            id<MTLBuffer> hash_buf = [device_ newBufferWithLength:hash_buf_size
+                                               options:MTLResourceStorageModeShared];
+
+            if (num_occupied == 0) {
+                // No accounts: return zero hash.
+                evmc::bytes32 root{};
+                return root;
+            }
+
+            MetalBatchParams p1{0, num_occupied};
+            id<MTLBuffer> params1 = [device_ newBufferWithBytes:&p1
+                                              length:sizeof(p1)
+                                              options:MTLResourceStorageModeShared];
+
+            {
+                id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
+                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                [enc setComputePipelineState:state_root_hash_pso_];
+                [enc setBuffer:compact_buf offset:0 atIndex:0];
+                [enc setBuffer:hash_buf    offset:0 atIndex:1];
+                [enc setBuffer:params1     offset:0 atIndex:2];
+
+                NSUInteger tpg = state_root_hash_pso_.maxTotalThreadsPerThreadgroup;
+                NSUInteger n = num_occupied;
+                if (tpg > n) tpg = n;
+                [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+                     threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+                [enc endEncoding];
+                [cmd commit];
+                [cmd waitUntilCompleted];
+            }
+
             // Phase 2: Parallel reduce via pairwise keccak256.
-            uint32_t active = account_capacity_;
+            uint32_t active = num_occupied;
             while (active > 1) {
                 MetalBatchParams p2{active, 0};
                 id<MTLBuffer> params2 = [device_ newBufferWithBytes:&p2
@@ -394,6 +468,8 @@ private:
     id<MTLComputePipelineState> storage_insert_pso_;
     id<MTLComputePipelineState> state_root_hash_pso_;
     id<MTLComputePipelineState> state_root_reduce_pso_;
+    id<MTLComputePipelineState> state_root_compact_pso_;
+    id<MTLComputePipelineState> state_root_sort_pso_;
 };
 
 // -- Factory ------------------------------------------------------------------
@@ -426,16 +502,18 @@ std::unique_ptr<GpuHashTable> GpuHashTable::create(uint32_t capacity, void* devi
         id<MTLLibrary> lib = load_state_table_library(device);
         if (!lib) return nullptr;
 
-        // Create pipelines for all 6 kernels.
-        auto acct_lookup  = make_pipeline(device, lib, @"account_lookup_batch");
-        auto acct_insert  = make_pipeline(device, lib, @"account_insert_batch");
-        auto stor_lookup  = make_pipeline(device, lib, @"storage_lookup_batch");
-        auto stor_insert  = make_pipeline(device, lib, @"storage_insert_batch");
-        auto root_hash    = make_pipeline(device, lib, @"state_root_hash_entries");
-        auto root_reduce  = make_pipeline(device, lib, @"state_root_reduce");
+        // Create pipelines for all 8 kernels.
+        auto acct_lookup   = make_pipeline(device, lib, @"account_lookup_batch");
+        auto acct_insert   = make_pipeline(device, lib, @"account_insert_batch");
+        auto stor_lookup   = make_pipeline(device, lib, @"storage_lookup_batch");
+        auto stor_insert   = make_pipeline(device, lib, @"storage_insert_batch");
+        auto root_hash     = make_pipeline(device, lib, @"state_root_hash_entries");
+        auto root_reduce   = make_pipeline(device, lib, @"state_root_reduce");
+        auto root_compact  = make_pipeline(device, lib, @"state_root_compact");
+        auto root_sort     = make_pipeline(device, lib, @"state_root_sort");
 
         if (!acct_lookup || !acct_insert || !stor_lookup || !stor_insert ||
-            !root_hash || !root_reduce)
+            !root_hash || !root_reduce || !root_compact || !root_sort)
             return nullptr;
 
         // Allocate persistent table buffers.
@@ -457,7 +535,8 @@ std::unique_ptr<GpuHashTable> GpuHashTable::create(uint32_t capacity, void* devi
             capacity, capacity, true,
             acct_lookup, acct_insert,
             stor_lookup, stor_insert,
-            root_hash, root_reduce);
+            root_hash, root_reduce,
+            root_compact, root_sort);
     }
 }
 
@@ -473,15 +552,17 @@ std::unique_ptr<GpuHashTable> GpuHashTable::create_with_buffer(
         id<MTLLibrary> lib = load_state_table_library(device);
         if (!lib) return nullptr;
 
-        auto acct_lookup  = make_pipeline(device, lib, @"account_lookup_batch");
-        auto acct_insert  = make_pipeline(device, lib, @"account_insert_batch");
-        auto stor_lookup  = make_pipeline(device, lib, @"storage_lookup_batch");
-        auto stor_insert  = make_pipeline(device, lib, @"storage_insert_batch");
-        auto root_hash    = make_pipeline(device, lib, @"state_root_hash_entries");
-        auto root_reduce  = make_pipeline(device, lib, @"state_root_reduce");
+        auto acct_lookup   = make_pipeline(device, lib, @"account_lookup_batch");
+        auto acct_insert   = make_pipeline(device, lib, @"account_insert_batch");
+        auto stor_lookup   = make_pipeline(device, lib, @"storage_lookup_batch");
+        auto stor_insert   = make_pipeline(device, lib, @"storage_insert_batch");
+        auto root_hash     = make_pipeline(device, lib, @"state_root_hash_entries");
+        auto root_reduce   = make_pipeline(device, lib, @"state_root_reduce");
+        auto root_compact  = make_pipeline(device, lib, @"state_root_compact");
+        auto root_sort     = make_pipeline(device, lib, @"state_root_sort");
 
         if (!acct_lookup || !acct_insert || !stor_lookup || !stor_insert ||
-            !root_hash || !root_reduce)
+            !root_hash || !root_reduce || !root_compact || !root_sort)
             return nullptr;
 
         // Use the same buffer for both account and storage (caller manages layout).
@@ -498,7 +579,8 @@ std::unique_ptr<GpuHashTable> GpuHashTable::create_with_buffer(
             capacity, capacity, false,
             acct_lookup, acct_insert,
             stor_lookup, stor_insert,
-            root_hash, root_reduce);
+            root_hash, root_reduce,
+            root_compact, root_sort);
     }
 }
 

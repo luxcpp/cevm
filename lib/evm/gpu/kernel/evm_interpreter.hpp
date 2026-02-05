@@ -37,8 +37,9 @@ struct GasCost
     static constexpr gpu_u64 HIGH       = 10;
     static constexpr gpu_u64 JUMPDEST   = 1;
     static constexpr gpu_u64 SLOAD      = 2100;  // cold
-    static constexpr gpu_u64 SSTORE_SET = 20000;
+    static constexpr gpu_u64 SSTORE_SET   = 20000;
     static constexpr gpu_u64 SSTORE_RESET = 2900;
+    static constexpr gpu_u64 SSTORE_NOOP  = 100;   // EIP-2200: no-op write (same value)
     static constexpr gpu_u64 EXP_BASE   = 10;
     static constexpr gpu_u64 EXP_BYTE   = 50;
     static constexpr gpu_u64 MEMORY     = 3;
@@ -150,6 +151,14 @@ struct EvmInterpreter
     uint256*  storage_values;
     gpu_u32*  storage_count;
     gpu_u32   storage_capacity;
+
+    // -- EIP-2200 original-value tracking -------------------------------------
+    // Tracks the value each storage slot had at the start of the transaction.
+    // Parallel arrays: orig_keys[i] / orig_values[i], orig_count entries.
+    // Set by host alongside storage buffers (same capacity).
+    uint256*  orig_keys;
+    uint256*  orig_values;
+    gpu_u32*  orig_count;
 
     // -- Log output -----------------------------------------------------------
     LogEntry* logs;
@@ -274,6 +283,56 @@ struct EvmInterpreter
                 return storage_values[i - 1];
         }
         return uint256::zero();
+    }
+
+    /// Look up the original (start-of-tx) value for a slot.
+    GPU_INLINE uint256 sload_original(const uint256& slot) const
+    {
+        gpu_u32 count = *orig_count;
+        for (gpu_u32 i = count; i > 0; --i)
+        {
+            if (eq(orig_keys[i - 1], slot))
+                return orig_values[i - 1];
+        }
+        return uint256::zero();
+    }
+
+    /// Record the original value for a slot (only on first access).
+    GPU_INLINE void record_original(const uint256& slot, const uint256& value)
+    {
+        gpu_u32 count = *orig_count;
+        for (gpu_u32 i = count; i > 0; --i)
+        {
+            if (eq(orig_keys[i - 1], slot))
+                return;  // already recorded
+        }
+        if (count < storage_capacity)
+        {
+            orig_keys[count] = slot;
+            orig_values[count] = value;
+            *orig_count = count + 1;
+        }
+    }
+
+    /// EIP-2200 SSTORE gas calculation.
+    GPU_INLINE gpu_u64 sstore_gas_eip2200(const uint256& original,
+                                           const uint256& current,
+                                           const uint256& new_val) const
+    {
+        // No-op: writing the same value that's already there.
+        if (eq(new_val, current))
+            return GasCost::SSTORE_NOOP;
+
+        // First modification to this slot in the tx (current == original).
+        if (eq(original, current))
+        {
+            if (iszero(original))
+                return GasCost::SSTORE_SET;    // 0 -> non-zero: 20000
+            return GasCost::SSTORE_RESET;      // non-zero -> different: 2900
+        }
+
+        // Subsequent modification (current != original): cheap.
+        return GasCost::SSTORE_NOOP;  // 100
     }
 
     /// SSTORE: write value for slot. Appends or updates.
@@ -705,13 +764,15 @@ struct EvmInterpreter
                     s = stack.push(sload(a));
                     if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                 }
-                else // SSTORE: key=top, value=second
+                else // SSTORE: key=top, value=second (EIP-2200 gas)
                 {
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
-                    // Gas: 0->non-zero = SET (20000), otherwise RESET (2900).
+                    // EIP-2200: gas depends on original, current, and new value.
                     uint256 current = sload(a);
-                    gpu_u64 cost = iszero(current) ? GasCost::SSTORE_SET : GasCost::SSTORE_RESET;
+                    record_original(a, current);
+                    uint256 original = sload_original(a);
+                    gpu_u64 cost = sstore_gas_eip2200(original, current, b);
                     if (!consume_gas(cost))
                         return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     sstore(a, b);
