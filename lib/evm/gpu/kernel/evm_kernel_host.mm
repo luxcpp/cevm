@@ -3,6 +3,7 @@
 
 /// @file evm_kernel_host.mm
 /// Objective-C++ implementation of the Metal EVM kernel host.
+/// Supports both V1 (1 thread/tx) and V2 (32 threads/tx SIMD-cooperative).
 ///
 /// Compile with:
 ///   clang++ -std=c++20 -framework Metal -framework Foundation evm_kernel_host.mm
@@ -26,11 +27,13 @@ class EvmKernelHostMetal final : public EvmKernelHost
 public:
     EvmKernelHostMetal(id<MTLDevice> device,
                        id<MTLCommandQueue> queue,
-                       id<MTLComputePipelineState> pipeline,
+                       id<MTLComputePipelineState> pipeline_v1,
+                       id<MTLComputePipelineState> pipeline_v2,
                        NSString* name)
         : device_(device)
         , queue_(queue)
-        , pipeline_(pipeline)
+        , pipeline_v1_(pipeline_v1)
+        , pipeline_v2_(pipeline_v2)
         , device_name_str_([name UTF8String])
     {}
 
@@ -39,6 +42,23 @@ public:
     const char* device_name() const override { return device_name_str_.c_str(); }
 
     std::vector<TxResult> execute(std::span<const HostTransaction> txs) override
+    {
+        return execute_impl(txs, pipeline_v1_, false);
+    }
+
+    std::vector<TxResult> execute_v2(std::span<const HostTransaction> txs) override
+    {
+        if (!pipeline_v2_)
+            return execute(txs);  // fallback to V1
+        return execute_impl(txs, pipeline_v2_, true);
+    }
+
+    bool has_v2() const override { return pipeline_v2_ != nil; }
+
+private:
+    std::vector<TxResult> execute_impl(std::span<const HostTransaction> txs,
+                                       id<MTLComputePipelineState> pipeline,
+                                       bool is_v2)
     {
         if (txs.empty())
             return {};
@@ -49,7 +69,6 @@ public:
         size_t total_blob = 0;
         for (const auto& tx : txs)
             total_blob += tx.code.size() + tx.calldata.size();
-        // Ensure at least 1 byte for the blob buffer.
         if (total_blob == 0)
             total_blob = 1;
 
@@ -120,7 +139,7 @@ public:
         id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
 
-        [enc setComputePipelineState:pipeline_];
+        [enc setComputePipelineState:pipeline];
         [enc setBuffer:buf_inputs   offset:0 atIndex:0];
         [enc setBuffer:buf_blob     offset:0 atIndex:1];
         [enc setBuffer:buf_outputs  offset:0 atIndex:2];
@@ -130,14 +149,14 @@ public:
         [enc setBuffer:buf_stor_cnt offset:0 atIndex:6];
         [enc setBuffer:buf_params   offset:0 atIndex:7];
 
-        NSUInteger tpg = pipeline_.maxTotalThreadsPerThreadgroup;
-        if (tpg > num_txs)
-            tpg = num_txs;
+        // Both V1 and V2 use 1 thread per tx.
+        NSUInteger tpg = pipeline.maxTotalThreadsPerThreadgroup;
+        if (tpg > num_txs) tpg = num_txs;
 
         MTLSize grid = MTLSizeMake(num_txs, 1, 1);
         MTLSize group = MTLSizeMake(tpg, 1, 1);
-
         [enc dispatchThreads:grid threadsPerThreadgroup:group];
+
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
@@ -179,39 +198,24 @@ public:
         return results;
     }
 
-private:
     id<MTLDevice> device_;
     id<MTLCommandQueue> queue_;
-    id<MTLComputePipelineState> pipeline_;
+    id<MTLComputePipelineState> pipeline_v1_;
+    id<MTLComputePipelineState> pipeline_v2_;
     std::string device_name_str_;
 };
 
 // -- Factory ------------------------------------------------------------------
 
-/// Search paths for the Metal shader source file.
-/// Returns the compiled library, or nil on failure.
-static id<MTLLibrary> load_evm_library(id<MTLDevice> device)
+/// Load and compile a Metal shader from source.
+static id<MTLLibrary> compile_metal_source(id<MTLDevice> device, const char* filename)
 {
     NSError* error = nil;
 
-    // Try metallib from app bundle.
-    NSBundle* bundle = [NSBundle mainBundle];
-    NSString* libPath = [bundle pathForResource:@"evm_kernel" ofType:@"metallib"];
-    if (libPath)
-    {
-        NSURL* url = [NSURL fileURLWithPath:libPath];
-        id<MTLLibrary> lib = [device newLibraryWithURL:url error:&error];
-        if (lib) return lib;
-    }
-
-    // Search for evm_kernel.metal in several locations.
     std::filesystem::path candidates[] = {
-        // Relative to this source file (works when building in-tree).
-        std::filesystem::path(__FILE__).parent_path() / "evm_kernel.metal",
-        // Current working directory.
-        std::filesystem::current_path() / "evm_kernel.metal",
-        // Relative to CWD in the typical CMake build layout.
-        std::filesystem::current_path() / "lib" / "evm" / "gpu" / "kernel" / "evm_kernel.metal",
+        std::filesystem::path(__FILE__).parent_path() / filename,
+        std::filesystem::current_path() / filename,
+        std::filesystem::current_path() / "lib" / "evm" / "gpu" / "kernel" / filename,
     };
 
     for (const auto& metal_path : candidates)
@@ -233,9 +237,50 @@ static id<MTLLibrary> load_evm_library(id<MTLDevice> device)
         id<MTLLibrary> lib = [device newLibraryWithSource:source options:opts error:&error];
         if (lib)
             return lib;
+
+        if (error) {
+            NSString* desc = [error localizedDescription];
+            fprintf(stderr, "Metal compile error for %s: %s\n",
+                    metal_path.c_str(), [desc UTF8String]);
+        }
     }
 
-    return nil;  // Shader not found — return nil, caller handles gracefully.
+    return nil;
+}
+
+/// Search paths for the Metal shader source file.
+/// Returns the compiled library, or nil on failure.
+static id<MTLLibrary> load_evm_library(id<MTLDevice> device)
+{
+    NSError* error = nil;
+
+    // Try metallib from app bundle.
+    NSBundle* bundle = [NSBundle mainBundle];
+    NSString* libPath = [bundle pathForResource:@"evm_kernel" ofType:@"metallib"];
+    if (libPath)
+    {
+        NSURL* url = [NSURL fileURLWithPath:libPath];
+        id<MTLLibrary> lib = [device newLibraryWithURL:url error:&error];
+        if (lib) return lib;
+    }
+
+    return compile_metal_source(device, "evm_kernel.metal");
+}
+
+static id<MTLLibrary> load_evm_v2_library(id<MTLDevice> device)
+{
+    NSError* error = nil;
+
+    NSBundle* bundle = [NSBundle mainBundle];
+    NSString* libPath = [bundle pathForResource:@"evm_kernel_v2" ofType:@"metallib"];
+    if (libPath)
+    {
+        NSURL* url = [NSURL fileURLWithPath:libPath];
+        id<MTLLibrary> lib = [device newLibraryWithURL:url error:&error];
+        if (lib) return lib;
+    }
+
+    return compile_metal_source(device, "evm_kernel_v2.metal");
 }
 
 std::unique_ptr<EvmKernelHost> EvmKernelHost::create()
@@ -250,21 +295,34 @@ std::unique_ptr<EvmKernelHost> EvmKernelHost::create()
         if (!queue)
             return nullptr;
 
-        id<MTLLibrary> lib = load_evm_library(device);
-        if (!lib)
-            return nullptr;  // Shader not found — GPU path unavailable.
+        // Load V1 kernel.
+        id<MTLLibrary> lib_v1 = load_evm_library(device);
+        if (!lib_v1)
+            return nullptr;
 
-        id<MTLFunction> func = [lib newFunctionWithName:@"evm_execute"];
-        if (!func)
-            return nullptr;  // Kernel function not found.
+        id<MTLFunction> func_v1 = [lib_v1 newFunctionWithName:@"evm_execute"];
+        if (!func_v1)
+            return nullptr;
 
         NSError* error = nil;
-        id<MTLComputePipelineState> pipeline =
-            [device newComputePipelineStateWithFunction:func error:&error];
-        if (!pipeline)
-            return nullptr;  // Pipeline creation failed.
+        id<MTLComputePipelineState> pipeline_v1 =
+            [device newComputePipelineStateWithFunction:func_v1 error:&error];
+        if (!pipeline_v1)
+            return nullptr;
 
-        return std::make_unique<EvmKernelHostMetal>(device, queue, pipeline, [device name]);
+        // Load V2 kernel (optional — gracefully degrade to V1).
+        id<MTLComputePipelineState> pipeline_v2 = nil;
+        id<MTLLibrary> lib_v2 = load_evm_v2_library(device);
+        if (lib_v2) {
+            id<MTLFunction> func_v2 = [lib_v2 newFunctionWithName:@"evm_execute_v2"];
+            if (func_v2) {
+                pipeline_v2 = [device newComputePipelineStateWithFunction:func_v2 error:&error];
+                // If pipeline creation fails, pipeline_v2 stays nil. V2 unavailable.
+            }
+        }
+
+        return std::make_unique<EvmKernelHostMetal>(
+            device, queue, pipeline_v1, pipeline_v2, [device name]);
     }
 }
 
