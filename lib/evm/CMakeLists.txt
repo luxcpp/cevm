@@ -222,3 +222,18 @@ target_include_directories(cevm PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<BUILD_INTERFACE:${include_dir}>
 )
+
+# Unified GPU pipeline test (consensus + EVM + FHE on same device)
+if(APPLE AND LUXCPP_GPU_FOUND)
+    add_executable(evm-test-unified gpu/test_unified.cpp)
+    target_compile_features(evm-test-unified PRIVATE cxx_std_20)
+    target_include_directories(evm-test-unified PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu
+    )
+    target_link_libraries(evm-test-unified PRIVATE
+        evm evm-gpu luxgpu_core_static
+        evm-kernel-metal
+        "-framework Metal" "-framework Foundation"
+    )
+endif()
