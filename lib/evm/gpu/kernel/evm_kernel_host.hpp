@@ -48,6 +48,7 @@ struct TxOutput
 {
     uint32_t status;      // 0=stop, 1=return, 2=revert, 3=oog, 4=error, 5=call_not_supported
     uint64_t gas_used;
+    uint64_t gas_refund;  // EIP-2200/3529 refund counter (must match Metal struct layout)
     uint32_t output_size;
 };
 
@@ -98,7 +99,7 @@ public:
     /// Create a Metal-backed kernel host. Returns nullptr if Metal is unavailable.
     static std::unique_ptr<EvmKernelHost> create();
 
-    /// Execute a batch of transactions on the GPU.
+    /// Execute a batch of transactions on the GPU (V1: 1 thread per tx).
     ///
     /// Transactions that use CALL/CREATE will have status == CallNotSupported.
     /// The caller is responsible for re-executing those on the CPU.
@@ -106,6 +107,13 @@ public:
     /// @param txs  Transactions to execute.
     /// @return     Per-transaction results.
     virtual std::vector<TxResult> execute(std::span<const HostTransaction> txs) = 0;
+
+    /// Execute a batch of transactions using V2 SIMD-cooperative kernel
+    /// (32 threads per tx). Falls back to V1 if V2 is not available.
+    virtual std::vector<TxResult> execute_v2(std::span<const HostTransaction> txs) = 0;
+
+    /// Check if V2 kernel is available.
+    virtual bool has_v2() const = 0;
 
     /// Get the GPU device name.
     virtual const char* device_name() const = 0;
