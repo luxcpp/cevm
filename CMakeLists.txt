@@ -26,7 +26,7 @@ cable_set_build_type(DEFAULT Release CONFIGURATION_TYPES Release Debug)
 
 include(Hunter/init)
 
-project(evm LANGUAGES CXX C)
+project(evm LANGUAGES CXX C OBJCXX)
 set(PROJECT_VERSION 0.19.0)
 
 string(REGEX MATCH "([0-9]+)\\.([0-9]+)" _ ${PROJECT_VERSION})
