@@ -1388,4 +1388,481 @@ kernel void evm_execute(
     out.output_size = 0;
 }
 
+// =============================================================================
+// GPU-native stateful kernel: SLOAD/SSTORE read/write the persistent hash table
+// =============================================================================
+//
+// This kernel variant accepts the GPU-resident state tables as additional
+// buffer arguments. SLOAD reads from the persistent storage hash table.
+// SSTORE writes to it. No CPU round-trip for state access.
+//
+// The per-tx storage buffer (buffer[5]) is still used as a write-set for
+// Block-STM conflict detection. The global table (buffer[8], buffer[9]) is
+// the persistent state.
+
+/// Storage entry in the persistent global hash table (matches state_table.metal).
+struct GlobalStorageEntry {
+    uchar key_addr[20];
+    uchar key_slot[32];
+    uint  key_valid;
+    uint  _pad;
+    uchar value[32];
+};
+
+/// Hash 20+32 bytes for storage table index.
+static inline uint hash_stor_key(uint256 addr256, uint256 slot256, uint capacity) {
+    // Extract the lower 20 bytes of address and all 32 bytes of slot.
+    // Address is right-aligned in uint256, so bytes [0..19] are in w[0..2].
+    uint h = 0x811c9dc5u;
+    // Hash address bytes (lower 20 bytes of uint256, little-endian words).
+    for (uint i = 0; i < 4; ++i) {
+        gpu_u64 word = addr256.w[i];
+        uint nbytes = (i < 2) ? 8 : ((i == 2) ? 4 : 0);
+        for (uint b = 0; b < nbytes; ++b) {
+            h ^= uint((word >> (b * 8)) & 0xFFUL);
+            h *= 0x01000193u;
+        }
+    }
+    // Hash slot bytes (all 32 bytes of uint256, little-endian).
+    for (uint i = 0; i < 4; ++i) {
+        gpu_u64 word = slot256.w[i];
+        for (uint b = 0; b < 8; ++b) {
+            h ^= uint((word >> (b * 8)) & 0xFFUL);
+            h *= 0x01000193u;
+        }
+    }
+    return h & (capacity - 1);
+}
+
+/// Lookup a storage value from the persistent global table.
+/// Returns the 32-byte value as a uint256. Returns zero if not found.
+static inline uint256 global_storage_load(
+    device GlobalStorageEntry* table,
+    uint capacity,
+    uint256 addr256,
+    uint256 slot256)
+{
+    uint idx = hash_stor_key(addr256, slot256, capacity);
+
+    // Extract raw bytes for comparison.
+    uchar addr_bytes[20];
+    for (uint i = 0; i < 4; ++i) {
+        gpu_u64 w = addr256.w[i];
+        uint nbytes = (i < 2) ? 8 : ((i == 2) ? 4 : 0);
+        for (uint b = 0; b < nbytes; ++b)
+            addr_bytes[i * 8 + b] = uchar((w >> (b * 8)) & 0xFF);
+    }
+
+    uchar slot_bytes[32];
+    for (uint i = 0; i < 4; ++i) {
+        gpu_u64 w = slot256.w[i];
+        for (uint b = 0; b < 8; ++b)
+            slot_bytes[i * 8 + b] = uchar((w >> (b * 8)) & 0xFF);
+    }
+
+    for (uint probe = 0; probe < capacity; ++probe) {
+        uint s = (idx + probe) & (capacity - 1);
+        if (table[s].key_valid == 0)
+            return u256_zero();
+
+        bool match = true;
+        for (uint i = 0; i < 20 && match; ++i)
+            match = (table[s].key_addr[i] == addr_bytes[i]);
+        for (uint i = 0; i < 32 && match; ++i)
+            match = (table[s].key_slot[i] == slot_bytes[i]);
+
+        if (match) {
+            // Reconstruct uint256 from little-endian bytes.
+            uint256 val = u256_zero();
+            for (uint i = 0; i < 4; ++i) {
+                gpu_u64 w = 0;
+                for (uint b = 0; b < 8; ++b)
+                    w |= gpu_u64(table[s].value[i * 8 + b]) << (b * 8);
+                val.w[i] = w;
+            }
+            return val;
+        }
+    }
+    return u256_zero();
+}
+
+/// Store a value into the persistent global storage table.
+static inline void global_storage_store(
+    device GlobalStorageEntry* table,
+    uint capacity,
+    uint256 addr256,
+    uint256 slot256,
+    uint256 val)
+{
+    uint idx = hash_stor_key(addr256, slot256, capacity);
+
+    uchar addr_bytes[20];
+    for (uint i = 0; i < 4; ++i) {
+        gpu_u64 w = addr256.w[i];
+        uint nbytes = (i < 2) ? 8 : ((i == 2) ? 4 : 0);
+        for (uint b = 0; b < nbytes; ++b)
+            addr_bytes[i * 8 + b] = uchar((w >> (b * 8)) & 0xFF);
+    }
+
+    uchar slot_bytes[32];
+    for (uint i = 0; i < 4; ++i) {
+        gpu_u64 w = slot256.w[i];
+        for (uint b = 0; b < 8; ++b)
+            slot_bytes[i * 8 + b] = uchar((w >> (b * 8)) & 0xFF);
+    }
+
+    uchar val_bytes[32];
+    for (uint i = 0; i < 4; ++i) {
+        gpu_u64 w = val.w[i];
+        for (uint b = 0; b < 8; ++b)
+            val_bytes[i * 8 + b] = uchar((w >> (b * 8)) & 0xFF);
+    }
+
+    for (uint probe = 0; probe < capacity; ++probe) {
+        uint s = (idx + probe) & (capacity - 1);
+
+        // Try to claim empty slot via atomic CAS.
+        device atomic_uint* valid_ptr =
+            reinterpret_cast<device atomic_uint*>(&table[s].key_valid);
+
+        uint expected = 0;
+        if (atomic_compare_exchange_weak_explicit(
+                valid_ptr, &expected, 1u,
+                memory_order_relaxed, memory_order_relaxed))
+        {
+            for (uint i = 0; i < 20; ++i) table[s].key_addr[i] = addr_bytes[i];
+            for (uint i = 0; i < 32; ++i) table[s].key_slot[i] = slot_bytes[i];
+            for (uint i = 0; i < 32; ++i) table[s].value[i] = val_bytes[i];
+            return;
+        }
+
+        // Check if occupied by our key.
+        bool match = true;
+        for (uint i = 0; i < 20 && match; ++i)
+            match = (table[s].key_addr[i] == addr_bytes[i]);
+        for (uint i = 0; i < 32 && match; ++i)
+            match = (table[s].key_slot[i] == slot_bytes[i]);
+
+        if (match) {
+            for (uint i = 0; i < 32; ++i) table[s].value[i] = val_bytes[i];
+            return;
+        }
+    }
+}
+
+/// Stateful EVM kernel: SLOAD/SSTORE go directly to persistent GPU state.
+///
+/// Buffer layout:
+///   [0] TxInput*           — per-transaction input descriptors
+///   [1] uchar*             — contiguous bytecode + calldata blob
+///   [2] TxOutput*          — per-transaction output descriptors
+///   [3] uchar*             — per-transaction output data
+///   [4] uchar*             — per-transaction memory
+///   [5] StorageEntry*      — per-transaction write-set (for Block-STM)
+///   [6] uint*              — per-transaction storage counts
+///   [7] uint*              — params: [0]=num_txs, [1]=global_storage_capacity
+///   [8] GlobalStorageEntry* — persistent global storage hash table
+kernel void evm_execute_stateful(
+    device const TxInput*          inputs         [[buffer(0)]],
+    device const uchar*            blob           [[buffer(1)]],
+    device TxOutput*               outputs        [[buffer(2)]],
+    device uchar*                  out_data       [[buffer(3)]],
+    device uchar*                  mem_pool       [[buffer(4)]],
+    device StorageEntry*           storage_pool   [[buffer(5)]],
+    device uint*                   storage_counts [[buffer(6)]],
+    device const uint*             params         [[buffer(7)]],
+    device GlobalStorageEntry*     global_storage [[buffer(8)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint num_txs = params[0];
+    uint global_capacity = params[1];
+    if (tid >= num_txs)
+        return;
+
+    device const TxInput& inp = inputs[tid];
+    device TxOutput& out = outputs[tid];
+    device uchar* mem = mem_pool + ulong(tid) * MAX_MEMORY_PER_TX;
+    device uchar* output = out_data + ulong(tid) * MAX_OUTPUT_PER_TX;
+    device StorageEntry* tx_storage = storage_pool + ulong(tid) * MAX_STORAGE_PER_TX;
+    device uint& tx_stor_count = storage_counts[tid];
+
+    device const uchar* code = blob + inp.code_offset;
+    uint code_size = inp.code_size;
+    device const uchar* calldata = blob + inp.calldata_offset;
+    uint calldata_size = inp.calldata_size;
+
+    uint256 stack[STACK_LIMIT];
+    uint sp = 0;
+    uint pc = 0;
+    ulong gas = inp.gas_limit;
+    ulong gas_start = gas;
+    uint mem_size = 0;
+
+    while (pc < code_size)
+    {
+        uchar op = code[pc];
+
+        // --- SLOAD: read from persistent global storage table ---
+        if (op == 0x54)
+        {
+            if (gas < GAS_SLOAD) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_SLOAD;
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 slot = stack[--sp];
+
+            // First check the per-tx write-set (Block-STM local writes).
+            uint256 val = u256_zero();
+            bool found_local = false;
+            for (uint i = tx_stor_count; i > 0; --i) {
+                if (u256_eq(tx_storage[i - 1].key, slot)) {
+                    val = tx_storage[i - 1].value;
+                    found_local = true;
+                    break;
+                }
+            }
+
+            // If not in write-set, read from persistent global table.
+            if (!found_local)
+                val = global_storage_load(global_storage, global_capacity, inp.address, slot);
+
+            stack[sp++] = val;
+            ++pc;
+            continue;
+        }
+
+        // --- SSTORE: write to persistent global storage table + local write-set ---
+        if (op == 0x55)
+        {
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 slot = stack[--sp];
+            uint256 val = stack[--sp];
+
+            // Read current value from global table for gas metering.
+            uint256 current = global_storage_load(global_storage, global_capacity, inp.address, slot);
+
+            ulong sstore_cost = u256_iszero(current) ? GAS_SSTORE_SET : GAS_SSTORE_RESET;
+            if (gas < sstore_cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= sstore_cost;
+
+            // Write to persistent global table (visible to all threads).
+            global_storage_store(global_storage, global_capacity, inp.address, slot, val);
+
+            // Also record in per-tx write-set for Block-STM conflict detection.
+            bool found = false;
+            for (uint i = tx_stor_count; i > 0; --i) {
+                if (u256_eq(tx_storage[i - 1].key, slot)) {
+                    tx_storage[i - 1].value = val;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && tx_stor_count < MAX_STORAGE_PER_TX) {
+                tx_storage[tx_stor_count].key = slot;
+                tx_storage[tx_stor_count].value = val;
+                tx_stor_count++;
+            }
+
+            ++pc;
+            continue;
+        }
+
+        // All other opcodes: delegate to the same logic as evm_execute.
+        // STOP
+        if (op == 0x00) { out.status = 0; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+
+        // PUSH1..PUSH32 (0x60..0x7f)
+        if (op >= 0x60 && op <= 0x7f)
+        {
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_VERYLOW;
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint n = uint(op) - 0x5f;
+            uint256 val = u256_zero();
+            for (uint i = 0; i < n && (pc + 1 + i) < code_size; ++i)
+            {
+                uint byte_pos = n - 1 - i;
+                uint limb = byte_pos / 8;
+                uint shift = (byte_pos % 8) * 8;
+                val.w[limb] |= gpu_u64(code[pc + 1 + i]) << shift;
+            }
+            stack[sp++] = val;
+            pc += 1 + n;
+            continue;
+        }
+
+        // DUP1..DUP16 (0x80..0x8f)
+        if (op >= 0x80 && op <= 0x8f)
+        {
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_VERYLOW;
+            uint depth = uint(op) - 0x7f;
+            if (sp < depth) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            if (sp >= STACK_LIMIT) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            stack[sp] = stack[sp - depth];
+            sp++;
+            ++pc;
+            continue;
+        }
+
+        // SWAP1..SWAP16 (0x90..0x9f)
+        if (op >= 0x90 && op <= 0x9f)
+        {
+            if (gas < GAS_VERYLOW) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_VERYLOW;
+            uint depth = uint(op) - 0x8f;
+            if (sp < depth + 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 tmp = stack[sp - 1];
+            stack[sp - 1] = stack[sp - 1 - depth];
+            stack[sp - 1 - depth] = tmp;
+            ++pc;
+            continue;
+        }
+
+        // POP (0x50)
+        if (op == 0x50)
+        {
+            if (gas < GAS_BASE) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_BASE;
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            --sp;
+            ++pc;
+            continue;
+        }
+
+        // JUMP (0x56)
+        if (op == 0x56)
+        {
+            if (gas < GAS_MID) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_MID;
+            if (sp < 1) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 dest = stack[--sp];
+            uint target = uint(dest.w[0]);
+            if (!is_valid_jumpdest(code, code_size, target))
+                { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            pc = target;
+            continue;
+        }
+
+        // JUMPI (0x57)
+        if (op == 0x57)
+        {
+            if (gas < GAS_HIGH) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_HIGH;
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 dest = stack[--sp];
+            uint256 cond = stack[--sp];
+            if (!u256_iszero(cond)) {
+                uint target = uint(dest.w[0]);
+                if (!is_valid_jumpdest(code, code_size, target))
+                    { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+                pc = target;
+            } else {
+                ++pc;
+            }
+            continue;
+        }
+
+        // JUMPDEST (0x5b)
+        if (op == 0x5b)
+        {
+            if (gas < GAS_JUMPDEST) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+            gas -= GAS_JUMPDEST;
+            ++pc;
+            continue;
+        }
+
+        // ADD..XOR, NOT, arithmetic, comparison, MLOAD, MSTORE, RETURN, REVERT
+        // -- Delegate to same opcode handling as evm_execute.
+        // For brevity, the stateful kernel handles only the state-touching
+        // opcodes differently. All other opcodes use the identical logic.
+        // In production, this would be a shared function. Here we mark
+        // unhandled opcodes as needing CPU fallback.
+
+        // RETURN (0xf3)
+        if (op == 0xf3) {
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 off_val = stack[--sp];
+            uint256 sz_val = stack[--sp];
+            uint off = uint(off_val.w[0]);
+            uint sz = uint(sz_val.w[0]);
+            if (sz > 0) {
+                uint new_end = off + sz;
+                if (new_end < off || new_end > MAX_MEMORY_PER_TX)
+                    { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                if (new_end > mem_size) {
+                    uint new_words = (new_end + 31) / 32;
+                    uint old_words = (mem_size + 31) / 32;
+                    ulong mem_cost = GAS_MEMORY * (new_words - old_words)
+                                   + (ulong(new_words) * new_words / 512)
+                                   - (ulong(old_words) * old_words / 512);
+                    if (gas < mem_cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                    gas -= mem_cost;
+                    for (uint i = mem_size; i < new_words * 32; ++i) mem[i] = 0;
+                    mem_size = new_words * 32;
+                }
+            }
+            uint copy_sz = (sz > MAX_OUTPUT_PER_TX) ? MAX_OUTPUT_PER_TX : sz;
+            for (uint i = 0; i < copy_sz; ++i) output[i] = mem[off + i];
+            out.status = 1;
+            out.gas_used = gas_start - gas;
+            out.output_size = copy_sz;
+            return;
+        }
+
+        // REVERT (0xfd)
+        if (op == 0xfd) {
+            if (sp < 2) { out.status = 4; out.gas_used = gas_start - gas; out.output_size = 0; return; }
+            uint256 off_val = stack[--sp];
+            uint256 sz_val = stack[--sp];
+            uint off = uint(off_val.w[0]);
+            uint sz = uint(sz_val.w[0]);
+            if (sz > 0) {
+                uint new_end = off + sz;
+                if (new_end < off || new_end > MAX_MEMORY_PER_TX)
+                    { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                if (new_end > mem_size) {
+                    uint new_words = (new_end + 31) / 32;
+                    uint old_words = (mem_size + 31) / 32;
+                    ulong mem_cost = GAS_MEMORY * (new_words - old_words)
+                                   + (ulong(new_words) * new_words / 512)
+                                   - (ulong(old_words) * old_words / 512);
+                    if (gas < mem_cost) { out.status = 3; out.gas_used = gas_start; out.output_size = 0; return; }
+                    gas -= mem_cost;
+                    for (uint i = mem_size; i < new_words * 32; ++i) mem[i] = 0;
+                    mem_size = new_words * 32;
+                }
+            }
+            uint copy_sz = (sz > MAX_OUTPUT_PER_TX) ? MAX_OUTPUT_PER_TX : sz;
+            for (uint i = 0; i < copy_sz; ++i) output[i] = mem[off + i];
+            out.status = 2;
+            out.gas_used = gas_start - gas;
+            out.output_size = copy_sz;
+            return;
+        }
+
+        // INVALID (0xfe)
+        if (op == 0xfe) { out.status = 4; out.gas_used = gas_start; out.output_size = 0; return; }
+
+        // CALL/CREATE family -> CPU fallback
+        if (op == 0xf0 || op == 0xf1 || op == 0xf2 || op == 0xf4 ||
+            op == 0xf5 || op == 0xfa || op == 0xff) {
+            out.status = 5;
+            out.gas_used = gas_start - gas;
+            out.output_size = 0;
+            return;
+        }
+
+        // For all other opcodes, signal CPU fallback.
+        // A production build would inline the full opcode table here.
+        out.status = 5;
+        out.gas_used = gas_start - gas;
+        out.output_size = 0;
+        return;
+    }
+
+    out.status = 0;
+    out.gas_used = gas_start - gas;
+    out.output_size = 0;
+}
+
 #pragma clang diagnostic pop

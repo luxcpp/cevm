@@ -135,6 +135,24 @@ if(APPLE)
     target_link_libraries(evm-kernel-metal PUBLIC evm-kernel)
     target_link_libraries(evm-kernel-metal PUBLIC "-framework Metal" "-framework Foundation")
     target_link_libraries(evm-bench-kernel PRIVATE evm-kernel-metal)
+
+    # GPU-native state: persistent buffer pool + hash table
+    add_library(evm-gpu-state STATIC
+        gpu/persistent_pool.mm
+        state/gpu_hashtable.mm
+    )
+    target_compile_features(evm-gpu-state PUBLIC cxx_std_20)
+    target_link_libraries(evm-gpu-state PUBLIC evm evmc::evmc intx::intx evmone::precompiles)
+    target_link_libraries(evm-gpu-state PUBLIC "-framework Metal" "-framework Foundation")
+    target_include_directories(evm-gpu-state PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
+    # GPU state tests
+    add_executable(evm-test-gpu-state state/test_gpu_state.cpp)
+    target_compile_features(evm-test-gpu-state PRIVATE cxx_std_20)
+    target_link_libraries(evm-test-gpu-state PRIVATE evm-gpu-state evm evmc::evmc intx::intx evmone::precompiles)
 endif()
 
 # State layer: full Ethereum state (accounts, storage, journal) for evmone
