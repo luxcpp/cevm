@@ -109,6 +109,28 @@ struct TxResult
     std::vector<HostLog> logs;
 };
 
+/// Future returned by EvmKernelHost::execute_async(). The kernel host has
+/// already enqueued the GPU work and registered a completion handler; the
+/// caller can do other work and call await() when ready for the results.
+///
+/// The future blocks the calling thread inside await() until the GPU
+/// completion handler fires. ready() is a non-blocking poll. Each future
+/// owns its own staging buffers and command buffer so the dispatcher can
+/// pipeline batch N+1's host prep with batch N's GPU run.
+class TxResultFuture
+{
+public:
+    virtual ~TxResultFuture() = default;
+
+    /// Block until the GPU completes this batch and return per-tx results.
+    /// May be called only once; calling twice throws.
+    virtual std::vector<TxResult> await() = 0;
+
+    /// Non-blocking check: true if the GPU has signalled completion. The
+    /// caller must still call await() to retrieve results.
+    virtual bool ready() const = 0;
+};
+
 class EvmKernelHost
 {
 public:
@@ -116,6 +138,9 @@ public:
 
     static std::unique_ptr<EvmKernelHost> create();
 
+    /// Synchronous execute: enqueues work, blocks until GPU completes, then
+    /// returns the per-tx results. Implemented as a thin wrapper around
+    /// execute_async()→await() for backward compatibility.
     virtual std::vector<TxResult> execute(std::span<const HostTransaction> txs) = 0;
 
     /// Execute with explicit block context.
@@ -123,6 +148,24 @@ public:
                                           const BlockContext& ctx) = 0;
 
     virtual std::vector<TxResult> execute_v2(std::span<const HostTransaction> txs) = 0;
+
+    /// Asynchronous execute. Enqueues the kernel on the GPU and returns a
+    /// future immediately so the caller can interleave host work (preparing
+    /// the next batch, building results from the previous batch, etc.) with
+    /// the in-flight GPU run. The dispatcher MUST call await() on the
+    /// returned future before the EvmKernelHost is destroyed.
+    ///
+    /// Concurrency: the host's internal buffer cache is locked from
+    /// enqueue-time through await(), so multiple in-flight futures from the
+    /// same EvmKernelHost serialize through the cache. Use multiple
+    /// EvmKernelHost instances for true overlap on the same device.
+    virtual std::unique_ptr<TxResultFuture> execute_async(
+        std::span<const HostTransaction> txs,
+        const BlockContext& ctx) = 0;
+
+    /// Convenience overload with an empty BlockContext.
+    virtual std::unique_ptr<TxResultFuture> execute_async(
+        std::span<const HostTransaction> txs) = 0;
 
     virtual bool has_v2() const = 0;
 

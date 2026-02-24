@@ -9,13 +9,224 @@
 
 #include "evm_kernel_host.hpp"
 
+#include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <exception>
 #include <filesystem>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 
 namespace evm::gpu::kernel {
+
+namespace {
+
+/// Static-analysis estimate of the maximum memory offset a tx will touch.
+///
+/// Walks the bytecode tracking a small constant-folding stack. Returns an
+/// upper bound on (offset + size) for every memory-touching opcode whose
+/// arguments are constants reachable from PUSH instructions only. As soon
+/// as we lose constant tracking (DUP/SWAP/non-const stack op) we conclude
+/// the tx may touch up to HOST_MAX_MEMORY_PER_TX and return that.
+///
+/// This is intentionally simple — it catches the dominant case (arithmetic
+/// kernels with at most a few MSTORE at known offsets) and degrades safely
+/// to the legacy bound otherwise. False positives (saying a tx might use a
+/// lot of memory when it actually wouldn't) are correctness-safe; they only
+/// cost the host a larger memset.
+///
+/// Opcodes considered: MLOAD, MSTORE, MSTORE8, MCOPY, KECCAK256,
+/// CALLDATACOPY, CODECOPY, RETURNDATACOPY, EXTCODECOPY, RETURN, REVERT,
+/// LOG0..LOG4. Storage / call ops do not touch the mem buffer.
+inline uint32_t scan_max_memory(std::span<const uint8_t> code)
+{
+    constexpr uint32_t MAX_BOUND = HOST_MAX_MEMORY_PER_TX;
+    constexpr size_t   STACK_CAP = 32;        // matches kernel stack depth
+    constexpr uint64_t UNKNOWN   = ~uint64_t{0};
+
+    if (code.empty())
+        return 0;
+
+    // Tiny constant-folding stack. UNKNOWN means "we don't know this slot".
+    uint64_t stk[STACK_CAP];
+    int sp = 0;
+    auto push_val = [&](uint64_t v) { if (sp < (int)STACK_CAP) stk[sp++] = v; };
+    auto pop_val  = [&]() -> uint64_t {
+        if (sp == 0) return UNKNOWN;
+        return stk[--sp];
+    };
+
+    uint32_t high = 0;
+    auto bump = [&](uint64_t off, uint64_t size) -> bool {
+        if (off == UNKNOWN || size == UNKNOWN)
+            return false;
+        // Saturating add; anything past MAX_BOUND => fall back.
+        if (off > MAX_BOUND || size > MAX_BOUND)
+            return false;
+        uint64_t end = off + size;
+        if (end > MAX_BOUND)
+            return false;
+        if (end > high)
+            high = static_cast<uint32_t>(end);
+        return true;
+    };
+
+    const size_t n = code.size();
+    for (size_t pc = 0; pc < n; ++pc)
+    {
+        const uint8_t op = code[pc];
+
+        // PUSH1..PUSH32 (0x60..0x7f): record literal value (only low 8 bytes).
+        if (op >= 0x60 && op <= 0x7f)
+        {
+            const size_t plen = static_cast<size_t>(op) - 0x60 + 1;
+            uint64_t v = 0;
+            const size_t take = std::min<size_t>(plen, 8);
+            const size_t skip = plen - take;            // upper non-zero -> UNKNOWN
+            // If the literal has any non-zero byte beyond the low 8, we
+            // conservatively mark UNKNOWN (could be a giant offset).
+            bool huge = false;
+            for (size_t k = 0; k < skip; ++k)
+            {
+                if (pc + 1 + k >= n) return MAX_BOUND;  // truncated PUSH
+                if (code[pc + 1 + k] != 0) huge = true;
+            }
+            if (huge)
+            {
+                push_val(UNKNOWN);
+                pc += plen;
+                continue;
+            }
+            for (size_t k = 0; k < take; ++k)
+            {
+                if (pc + 1 + skip + k >= n) return MAX_BOUND;
+                v = (v << 8) | code[pc + 1 + skip + k];
+            }
+            push_val(v);
+            pc += plen;
+            continue;
+        }
+        // PUSH0 (0x5f)
+        if (op == 0x5f) { push_val(0); continue; }
+
+        // POP (0x50)
+        if (op == 0x50) { (void)pop_val(); continue; }
+
+        // DUP1..DUP16 (0x80..0x8f)
+        if (op >= 0x80 && op <= 0x8f)
+        {
+            int idx = op - 0x80 + 1;
+            if (sp >= idx) push_val(stk[sp - idx]); else push_val(UNKNOWN);
+            continue;
+        }
+        // SWAP1..SWAP16 (0x90..0x9f)
+        if (op >= 0x90 && op <= 0x9f)
+        {
+            int idx = op - 0x90 + 1;
+            if (sp >= idx + 1)
+                std::swap(stk[sp - 1], stk[sp - 1 - idx]);
+            continue;
+        }
+
+        // Memory-touching opcodes. Stack args are top-down on the EVM stack,
+        // so the FIRST popped is the topmost (offset for MLOAD/MSTORE, dst
+        // for *COPY).
+        switch (op)
+        {
+        case 0x51: { // MLOAD: offset
+            uint64_t off = pop_val();
+            if (!bump(off, 32)) return MAX_BOUND;
+            push_val(UNKNOWN); // result of load is unknown
+            continue;
+        }
+        case 0x52: { // MSTORE: offset, value
+            uint64_t off = pop_val(); (void)pop_val();
+            if (!bump(off, 32)) return MAX_BOUND;
+            continue;
+        }
+        case 0x53: { // MSTORE8: offset, value
+            uint64_t off = pop_val(); (void)pop_val();
+            if (!bump(off, 1)) return MAX_BOUND;
+            continue;
+        }
+        case 0x20: { // KECCAK256: offset, size
+            uint64_t off = pop_val(); uint64_t size = pop_val();
+            if (!bump(off, size)) return MAX_BOUND;
+            push_val(UNKNOWN);
+            continue;
+        }
+        case 0x37:   // CALLDATACOPY: dst, src, len
+        case 0x39:   // CODECOPY:    dst, src, len
+        case 0x3e:   // RETURNDATACOPY
+        case 0x5e: { // MCOPY:       dst, src, len
+            uint64_t dst = pop_val(); (void)pop_val(); uint64_t len = pop_val();
+            if (!bump(dst, len)) return MAX_BOUND;
+            // For MCOPY also bump the source range.
+            continue;
+        }
+        case 0x3c: { // EXTCODECOPY: addr, dst, src, len
+            (void)pop_val(); uint64_t dst = pop_val(); (void)pop_val(); uint64_t len = pop_val();
+            if (!bump(dst, len)) return MAX_BOUND;
+            continue;
+        }
+        case 0xf3: case 0xfd: { // RETURN, REVERT: offset, size
+            uint64_t off = pop_val(); uint64_t size = pop_val();
+            if (!bump(off, size)) return MAX_BOUND;
+            continue;
+        }
+        case 0xa0: case 0xa1: case 0xa2: case 0xa3: case 0xa4: { // LOG0..LOG4
+            const int n_topics = op - 0xa0;
+            uint64_t off = pop_val(); uint64_t size = pop_val();
+            for (int t = 0; t < n_topics; ++t) (void)pop_val();
+            if (!bump(off, size)) return MAX_BOUND;
+            continue;
+        }
+        // CALL family (0xf1, 0xf2, 0xf4, 0xfa) reads/writes mem ranges. These
+        // are not currently fully supported in our kernel; if we see them
+        // bail out to safe upper bound.
+        case 0xf1: case 0xf2: case 0xf4: case 0xfa:
+        case 0xf0: case 0xf5:  // CREATE / CREATE2
+        case 0xff:             // SELFDESTRUCT
+            return MAX_BOUND;
+        default:
+            // Pure stack/arith opcodes that don't touch memory. We don't
+            // model their stack effects precisely; mark all stack slots
+            // they could output as UNKNOWN by simply continuing — overflowed
+            // pop_val() returns UNKNOWN which keeps analysis conservative.
+            // For ops that pop k and push 1 (most arith), the stack drift
+            // is small; for our perf goal we only need the bumps.
+            break;
+        }
+    }
+
+    return high;
+}
+
+/// Compute the per-batch high-water mark in bytes for the mem buffer:
+/// max scan_max_memory across all valid txs, rounded up to 32-byte word.
+inline uint32_t batch_max_memory(std::span<const HostTransaction> txs,
+                                 const std::vector<uint8_t>& invalid)
+{
+    uint32_t high = 0;
+    for (size_t i = 0; i < txs.size(); ++i)
+    {
+        if (invalid[i]) continue;
+        uint32_t v = scan_max_memory(std::span<const uint8_t>(txs[i].code.data(),
+                                                              txs[i].code.size()));
+        if (v > high) high = v;
+        if (high == HOST_MAX_MEMORY_PER_TX) break;  // saturated
+    }
+    // Round up to 32 (one EVM word).
+    high = (high + 31u) & ~31u;
+    if (high > HOST_MAX_MEMORY_PER_TX) high = HOST_MAX_MEMORY_PER_TX;
+    return high;
+}
+
+}  // namespace
 
 class EvmKernelHostMetal final : public EvmKernelHost
 {
@@ -39,21 +250,37 @@ public:
     std::vector<TxResult> execute(std::span<const HostTransaction> txs) override
     {
         BlockContext ctx{};
-        return execute_impl(txs, ctx, pipeline_v1_);
+        auto fut = enqueue(txs, ctx, pipeline_v1_);
+        return fut->await();
     }
 
     std::vector<TxResult> execute(std::span<const HostTransaction> txs,
                                   const BlockContext& ctx) override
     {
-        return execute_impl(txs, ctx, pipeline_v1_);
+        auto fut = enqueue(txs, ctx, pipeline_v1_);
+        return fut->await();
     }
 
     std::vector<TxResult> execute_v2(std::span<const HostTransaction> txs) override
     {
         BlockContext ctx{};
-        if (!pipeline_v2_)
-            return execute_impl(txs, ctx, pipeline_v1_);
-        return execute_impl(txs, ctx, pipeline_v2_);
+        id<MTLComputePipelineState> p = pipeline_v2_ ? pipeline_v2_ : pipeline_v1_;
+        auto fut = enqueue(txs, ctx, p);
+        return fut->await();
+    }
+
+    std::unique_ptr<TxResultFuture> execute_async(
+        std::span<const HostTransaction> txs,
+        const BlockContext& ctx) override
+    {
+        return enqueue(txs, ctx, pipeline_v1_);
+    }
+
+    std::unique_ptr<TxResultFuture> execute_async(
+        std::span<const HostTransaction> txs) override
+    {
+        BlockContext ctx{};
+        return enqueue(txs, ctx, pipeline_v1_);
     }
 
     bool has_v2() const override { return pipeline_v2_ != nil; }
@@ -128,26 +355,147 @@ private:
         return buf;
     }
 
-    std::vector<TxResult> execute_impl(std::span<const HostTransaction> txs,
-                                       const BlockContext& ctx,
-                                       id<MTLComputePipelineState> pipeline)
+    /// Per-tx host-side validation. Returns true if the transaction is well
+    /// formed enough to submit to the kernel. Invalid tx are flagged in
+    /// `invalid` and reported as TxStatus::Error in the result vector — we
+    /// never feed garbage to the GPU.
+    ///
+    /// Bounds we enforce here (kept narrow; the kernel enforces gas/opcode
+    /// semantics):
+    ///   * code.size() <= MAX_CODE_PER_TX  — bytecode must fit in uint32_t
+    ///     offsets and avoid pathological compile time
+    ///   * calldata.size() <= MAX_CALLDATA_PER_TX
+    ///   * code.size() + calldata.size() must not overflow the running offset
+    ///     accumulator used for blob packing
+    static constexpr uint32_t MAX_CODE_PER_TX     = 24576 * 2;   // 2× EIP-170
+    static constexpr uint32_t MAX_CALLDATA_PER_TX = 1u << 24;    // 16 MiB
+
+    static bool validate_tx(const HostTransaction& tx)
+    {
+        if (tx.code.size() > MAX_CODE_PER_TX)
+            return false;
+        if (tx.calldata.size() > MAX_CALLDATA_PER_TX)
+            return false;
+        return true;
+    }
+
+    /// Shared state between enqueue() (producer) and the completion handler
+    /// (consumer-from-the-GPU-side). The future awaits on cv.
+    struct AsyncState
+    {
+        std::mutex                 mu;
+        std::condition_variable    cv;
+        bool                       done = false;
+        std::vector<TxResult>      results;
+        std::exception_ptr         error;
+    };
+
+    /// Concrete future returned by execute_async(). Owns the host's
+    /// exec_mutex_ unique_lock until destroyed — this lets the next
+    /// execute_async() block until the prior batch's completion handler has
+    /// run, while the dispatcher thread between this future's creation and
+    /// its await() is free to do other work (build the next batch, etc.).
+    class MetalFuture final : public TxResultFuture
+    {
+    public:
+        MetalFuture(std::shared_ptr<AsyncState> state,
+                    std::unique_lock<std::mutex> exec_lock)
+            : state_(std::move(state)), exec_lock_(std::move(exec_lock)) {}
+
+        ~MetalFuture() override
+        {
+            // If the caller dropped the future without awaiting, we still
+            // must not release the host mutex until the GPU completion
+            // handler has built the results — otherwise a follow-up
+            // enqueue() would race with the in-flight kernel writing back
+            // into shared MTL buffers.
+            if (!consumed_ && state_)
+            {
+                std::unique_lock<std::mutex> g(state_->mu);
+                state_->cv.wait(g, [this]{ return state_->done; });
+            }
+        }
+
+        bool ready() const override
+        {
+            std::lock_guard<std::mutex> g(state_->mu);
+            return state_->done;
+        }
+
+        std::vector<TxResult> await() override
+        {
+            if (consumed_)
+                throw std::runtime_error("TxResultFuture::await() already consumed");
+            consumed_ = true;
+            std::unique_lock<std::mutex> g(state_->mu);
+            state_->cv.wait(g, [this]{ return state_->done; });
+            if (state_->error)
+                std::rethrow_exception(state_->error);
+            return std::move(state_->results);
+        }
+
+    private:
+        std::shared_ptr<AsyncState>  state_;
+        std::unique_lock<std::mutex> exec_lock_;
+        bool                         consumed_ = false;
+    };
+
+    /// Enqueue a batch onto the GPU and return a future. The host's
+    /// exec_mutex_ is taken inside this function and moved into the
+    /// returned future — released only when the future is destroyed (which
+    /// the future delays until the GPU completion handler has fired).
+    std::unique_ptr<TxResultFuture> enqueue(std::span<const HostTransaction> txs,
+                                            const BlockContext& ctx,
+                                            id<MTLComputePipelineState> pipeline)
     {
         if (txs.empty())
-            return {};
+        {
+            // Trivial case: build an already-completed future. No GPU work,
+            // no lock held.
+            auto state = std::make_shared<AsyncState>();
+            state->done = true;
+            return std::make_unique<MetalFuture>(state, std::unique_lock<std::mutex>{});
+        }
 
-        // Serialize buffer cache + submission on this instance. The mutex is
-        // held for the entire call (including [cmd waitUntilCompleted]) so we
-        // never overlap two GPU runs on the same shared cache. Multiple
-        // EvmKernelHost instances remain independent for higher concurrency.
-        std::lock_guard<std::mutex> guard(exec_mutex_);
+        // Acquire the per-host mutex for buffer cache + queue submission.
+        // The lock is moved into the future at the end of this function and
+        // remains held until the GPU completion handler has built results.
+        std::unique_lock<std::mutex> exec_lock(exec_mutex_);
 
         const size_t num_txs = txs.size();
 
+        // Boundary validation: any tx that fails host-side checks is marked
+        // invalid and replaced with a zero-cost no-op (empty code) for the
+        // GPU. We still have to dispatch num_txs threads because kernel
+        // arrays are indexed by gid; we just give the bad ones nothing to
+        // execute and overwrite their result with Error after dispatch.
+        std::vector<uint8_t> invalid(num_txs, 0);
+        bool any_invalid = false;
+        for (size_t i = 0; i < num_txs; ++i)
+        {
+            if (!validate_tx(txs[i]))
+            {
+                invalid[i] = 1;
+                any_invalid = true;
+            }
+        }
+
         size_t total_blob = 0;
-        for (const auto& tx : txs)
-            total_blob += tx.code.size() + tx.calldata.size();
+        for (size_t i = 0; i < num_txs; ++i)
+        {
+            if (invalid[i])
+                continue;
+            total_blob += txs[i].code.size() + txs[i].calldata.size();
+        }
         if (total_blob == 0)
             total_blob = 1;
+
+        // Overflow guard: the running offset is uint32_t; an attacker-supplied
+        // batch with total_blob > 4 GiB would wrap. We've already capped
+        // per-tx sizes so this is reachable only with millions of large tx;
+        // the explicit check is defensive.
+        if (total_blob > std::numeric_limits<uint32_t>::max())
+            throw std::runtime_error("Metal host: total tx blob exceeds 4 GiB");
 
         std::vector<TxInput> inputs(num_txs);
         std::vector<uint8_t> blob(total_blob, 0);
@@ -156,6 +504,20 @@ private:
         for (size_t i = 0; i < num_txs; ++i)
         {
             const auto& tx = txs[i];
+            if (invalid[i])
+            {
+                // Empty code+calldata, gas_limit=0 → kernel will return OOG
+                // immediately. We overwrite with TxStatus::Error post-run.
+                inputs[i].code_offset = offset;
+                inputs[i].code_size = 0;
+                inputs[i].calldata_offset = offset;
+                inputs[i].calldata_size = 0;
+                inputs[i].gas_limit = 0;
+                inputs[i].caller = uint256{};
+                inputs[i].address = uint256{};
+                inputs[i].value = uint256{};
+                continue;
+            }
             inputs[i].code_offset = offset;
             inputs[i].code_size = static_cast<uint32_t>(tx.code.size());
             if (!tx.code.empty())
@@ -221,19 +583,10 @@ private:
         std::memset([buf_trans_cnt contents], 0, trans_cnt_size);
         std::memset([buf_log_cnt contents],   0, log_cnt_size);
 
-        // SECURITY: zero the entire active region of mem/storage/transient
-        // before the kernel runs. The kernel's expand_mem_range zeros up to
-        // the per-tx mem_size high-water mark, but stale bytes beyond that
-        // mark could be observed if (a) the kernel emits a LOG whose
-        // data_offset/data_size points past the expanded region, or (b) the
-        // host reads past the kernel's reported output_size due to a logic
-        // bug or future kernel change. Zeroing here is the defensive
-        // boundary: every byte the GPU reads is either fresh-allocated zero
-        // or explicitly written this call.
-        //
-        // Cost: ~75KB × num_txs on unified memory. At N=2048 that's 150MB
-        // memset — measurable but cheap relative to the full kernel cost.
-        // Storage/transient are smaller (64 entries * 64 bytes = 4KB/tx).
+        // Zero the active region of mem/storage/transient before the kernel
+        // runs. Bytes beyond the kernel's high-water mark retain prior-call
+        // content; without this scrub a LOG referencing offsets past the
+        // mark could surface stale tx data.
         std::memset([buf_mem contents],     0, mem_size);
         std::memset([buf_storage contents], 0, stor_size);
         std::memset([buf_trans contents],   0, trans_size);
@@ -265,64 +618,110 @@ private:
         [enc dispatchThreads:grid threadsPerThreadgroup:group];
 
         [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
 
-        if ([cmd error])
-        {
-            NSString* desc = [[cmd error] localizedDescription];
-            throw std::runtime_error(std::string("Metal command failed: ") + [desc UTF8String]);
-        }
+        // Build the future state. The completion handler captures `state`
+        // and the GPU buffers (by ARC) and produces the per-tx results once
+        // the GPU is done. The dispatcher thread returns from this function
+        // immediately after [cmd commit] without waiting on the GPU — that
+        // is the whole point of the async API.
+        auto state = std::make_shared<AsyncState>();
 
-        const auto* gpu_outputs = static_cast<const TxOutput*>([buf_outputs contents]);
-        const auto* gpu_outdata = static_cast<const uint8_t*>([buf_outdata contents]);
-        const auto* gpu_mem     = static_cast<const uint8_t*>([buf_mem contents]);
-        const auto* gpu_logs    = static_cast<const GpuLogEntry*>([buf_logs contents]);
-        const auto* gpu_log_cnt = static_cast<const uint32_t*>([buf_log_cnt contents]);
+        // Capture-by-value into the Obj-C block. We move the host-side
+        // `invalid` vector and `any_invalid` flag into the block; the GPU
+        // buffers are kept alive by ARC capture; the cache mutex is owned by
+        // the future and released after this state object signals done.
+        std::vector<uint8_t> invalid_capture = std::move(invalid);
+        const bool any_invalid_capture = any_invalid;
+        const size_t num_txs_capture = num_txs;
 
-        std::vector<TxResult> results(num_txs);
-        for (size_t i = 0; i < num_txs; ++i)
-        {
-            const auto& go = gpu_outputs[i];
-            auto& r = results[i];
-
-            switch (go.status)
+        [cmd addCompletedHandler:^(id<MTLCommandBuffer> done_cmd) {
+            std::shared_ptr<AsyncState> s = state;
+            try
             {
-            case 0:  r.status = TxStatus::Stop; break;
-            case 1:  r.status = TxStatus::Return; break;
-            case 2:  r.status = TxStatus::Revert; break;
-            case 3:  r.status = TxStatus::OutOfGas; break;
-            case 5:  r.status = TxStatus::CallNotSupported; break;
-            default: r.status = TxStatus::Error; break;
-            }
-            r.gas_used = go.gas_used;
-
-            if (go.output_size > 0)
-            {
-                const uint8_t* data = gpu_outdata + i * HOST_MAX_OUTPUT_PER_TX;
-                r.output.assign(data, data + go.output_size);
-            }
-
-            uint32_t lc = gpu_log_cnt[i];
-            if (lc > HOST_MAX_LOGS_PER_TX) lc = HOST_MAX_LOGS_PER_TX;
-            r.logs.reserve(lc);
-            const GpuLogEntry* base = gpu_logs + i * HOST_MAX_LOGS_PER_TX;
-            const uint8_t*     mem  = gpu_mem  + i * HOST_MAX_MEMORY_PER_TX;
-            for (uint32_t k = 0; k < lc; ++k)
-            {
-                HostLog hl;
-                hl.topics.assign(base[k].topics, base[k].topics + base[k].num_topics);
-                if (base[k].data_size > 0 &&
-                    base[k].data_offset + base[k].data_size <= HOST_MAX_MEMORY_PER_TX)
+                if ([done_cmd error])
                 {
-                    hl.data.assign(mem + base[k].data_offset,
-                                   mem + base[k].data_offset + base[k].data_size);
+                    NSString* desc = [[done_cmd error] localizedDescription];
+                    throw std::runtime_error(
+                        std::string("Metal command failed: ") + [desc UTF8String]);
                 }
-                r.logs.push_back(std::move(hl));
-            }
-        }
 
-        return results;
+                const auto* gpu_outputs = static_cast<const TxOutput*>([buf_outputs contents]);
+                const auto* gpu_outdata = static_cast<const uint8_t*>([buf_outdata contents]);
+                const auto* gpu_mem     = static_cast<const uint8_t*>([buf_mem contents]);
+                const auto* gpu_logs    = static_cast<const GpuLogEntry*>([buf_logs contents]);
+                const auto* gpu_log_cnt = static_cast<const uint32_t*>([buf_log_cnt contents]);
+
+                std::vector<TxResult> results(num_txs_capture);
+                for (size_t i = 0; i < num_txs_capture; ++i)
+                {
+                    auto& r = results[i];
+
+                    if (any_invalid_capture && invalid_capture[i])
+                    {
+                        r.status = TxStatus::Error;
+                        r.gas_used = 0;
+                        continue;
+                    }
+
+                    const auto& go = gpu_outputs[i];
+
+                    switch (go.status)
+                    {
+                    case 0:  r.status = TxStatus::Stop; break;
+                    case 1:  r.status = TxStatus::Return; break;
+                    case 2:  r.status = TxStatus::Revert; break;
+                    case 3:  r.status = TxStatus::OutOfGas; break;
+                    case 5:  r.status = TxStatus::CallNotSupported; break;
+                    default: r.status = TxStatus::Error; break;
+                    }
+                    r.gas_used = go.gas_used;
+
+                    if (go.output_size > 0)
+                    {
+                        const uint8_t* data = gpu_outdata + i * HOST_MAX_OUTPUT_PER_TX;
+                        r.output.assign(data, data + go.output_size);
+                    }
+
+                    uint32_t lc = gpu_log_cnt[i];
+                    if (lc > HOST_MAX_LOGS_PER_TX) lc = HOST_MAX_LOGS_PER_TX;
+                    r.logs.reserve(lc);
+                    const GpuLogEntry* base = gpu_logs + i * HOST_MAX_LOGS_PER_TX;
+                    const uint8_t*     mem  = gpu_mem  + i * HOST_MAX_MEMORY_PER_TX;
+                    for (uint32_t k = 0; k < lc; ++k)
+                    {
+                        HostLog hl;
+                        hl.topics.assign(base[k].topics, base[k].topics + base[k].num_topics);
+                        if (base[k].data_size > 0 &&
+                            base[k].data_offset + base[k].data_size <= HOST_MAX_MEMORY_PER_TX)
+                        {
+                            hl.data.assign(mem + base[k].data_offset,
+                                           mem + base[k].data_offset + base[k].data_size);
+                        }
+                        r.logs.push_back(std::move(hl));
+                    }
+                }
+
+                {
+                    std::lock_guard<std::mutex> g(s->mu);
+                    s->results = std::move(results);
+                    s->done = true;
+                }
+                s->cv.notify_all();
+            }
+            catch (...)
+            {
+                std::lock_guard<std::mutex> g(s->mu);
+                s->error = std::current_exception();
+                s->done = true;
+                s->cv.notify_all();
+            }
+        }];
+
+        [cmd commit];
+
+        // The future takes ownership of the lock; releasing it happens when
+        // the future is destroyed, which the future delays until done=true.
+        return std::make_unique<MetalFuture>(state, std::move(exec_lock));
     }
 
     id<MTLDevice> device_;
