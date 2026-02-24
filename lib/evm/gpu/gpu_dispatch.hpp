@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <evmc/evmc.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -48,36 +50,30 @@ struct Config
     bool enable_state_trie_gpu = false;  ///< Offload Keccak-256 trie hashing to GPU
     bool enable_precompile_gpu = false;  ///< Offload precompiles to GPU
 
-    /// Allow the "no host AND no bytecode" short-circuit that returns
-    /// gas_used = gas_limit for every tx. This is ONLY safe for gas
-    /// estimation, never for consensus. Default false: the dispatcher
-    /// returns Error on that path so unsuspecting callers can't accept
-    /// fake "we used all the gas" results.
+    /// Gas-estimation only path: if set, the "no host + no bytecode" short
+    /// circuit returns gas_used=gas_limit per tx. Off by default — wrong
+    /// for consensus, only useful for callers explicitly estimating gas.
     bool gas_estimation_mode = false;
 
-    /// UNSAFE — non-spec optimisation that skips per-opcode gas decrement
-    /// in the GPU kernel for value-transfer-style txs. Violates EVM
-    /// consensus. The dispatcher refuses to honour this flag unless the
-    /// caller also sets fast_value_transfer_acknowledged = true; the
-    /// acknowledgement is the explicit "yes I know this breaks consensus"
-    /// gate. When enabled the dispatcher logs to stderr on every block.
+    /// UNSAFE — skip per-opcode gas decrement in the GPU kernel. Violates
+    /// EVM consensus. Refused unless fast_value_transfer_acknowledged is
+    /// also set. Logs to stderr when enabled.
     bool fast_value_transfer = false;
     bool fast_value_transfer_acknowledged = false;
 
-    /// Skip 4-way parity verification when running parity-mode benchmarks.
-    /// The dispatcher itself doesn't enforce parity, but downstream
-    /// consumers (e.g. the parity_test driver, bench_speedup) can toggle
-    /// this to bypass cross-backend assertions for raw-speed runs.
+    /// Disable 4-way parity assertions when running raw-speed benchmarks.
     bool skip_parity_check = false;
 
-    /// Pre-warmed access list (EIP-2929). Empty = everything cold.
-    /// `warm_addresses`     is a flat vector of 20-byte addresses.
-    /// `warm_storage_keys`  is a flat vector of 52-byte (addr || slot)
-    ///                       entries. The dispatcher passes these to the
-    ///                       backend so cold-access surcharges are not
-    ///                       charged for these touches.
+    /// Pre-warmed access list (EIP-2929). Flat byte vectors:
+    ///   warm_addresses:    [20-byte addr][20-byte addr]...
+    ///   warm_storage_keys: [20-byte addr | 32-byte slot]...
     std::vector<uint8_t> warm_addresses;
     std::vector<uint8_t> warm_storage_keys;
+
+    /// EVM revision for the evmone fallback path. Kernel paths implement
+    /// Cancun unconditionally; this field aligns the evmone path so the
+    /// same tx produces the same result regardless of backend.
+    evmc_revision revision = EVMC_CANCUN;
 };
 
 /// Per-tx execution status. Mirrors kernel::TxStatus so all backends
