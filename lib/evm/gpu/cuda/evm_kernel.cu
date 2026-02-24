@@ -1127,13 +1127,23 @@ __global__ void evm_execute_kernel(
             unsigned long long copy_gas = GAS_COPY * words;
             if (gas < copy_gas) OOG(); gas -= copy_gas;
             if (!expand_mem_range(mem, mem_size, gas, dest, size)) OOG();
-            // src offset: if it overflows 32 bits, treat it as past-end (zero pad).
-            unsigned int src_off = (sv.w[1] | sv.w[2] | sv.w[3] || sv.w[0] >= 0xFFFFFFFFULL)
-                                       ? calldata_size
-                                       : (unsigned int)sv.w[0];
+            // src_off treated as past-end (zero-pad) when:
+            //   - any high limb of sv non-zero,
+            //   - sv.w[0] already >= calldata_size,
+            //   - sv.w[0] + size overflows uint32 (per-byte add would wrap).
+            // Old check `sv.w[0] >= 0xFFFFFFFFULL` only caught exactly
+            // 0xFFFFFFFF; src=0xFFFFFFFE size=5 would wrap and read
+            // calldata[0..2] instead of returning zeros.
+            unsigned long long src_lo = sv.w[0];
+            bool src_past_end = (sv.w[1] | sv.w[2] | sv.w[3]) != 0 ||
+                                src_lo >= calldata_size ||
+                                (src_lo + sz) > 0xFFFFFFFFULL;
+            unsigned int src_off = src_past_end ? calldata_size
+                                                : (unsigned int)src_lo;
             for (unsigned int i = 0; i < size; ++i)
             {
-                unsigned int s = src_off + i;
+                unsigned long long s = (unsigned long long)src_off
+                                     + (unsigned long long)i;
                 mem[dest + i] = (s < calldata_size) ? calldata[s] : 0;
             }
             ++pc; continue;
@@ -1158,12 +1168,18 @@ __global__ void evm_execute_kernel(
             unsigned long long copy_gas = GAS_COPY * words;
             if (gas < copy_gas) OOG(); gas -= copy_gas;
             if (!expand_mem_range(mem, mem_size, gas, dest, size)) OOG();
-            unsigned int src_off = (sv.w[1] | sv.w[2] | sv.w[3] || sv.w[0] >= 0xFFFFFFFFULL)
-                                       ? code_size
-                                       : (unsigned int)sv.w[0];
+            // Same zero-pad rule as CALLDATACOPY: avoid uint32 wrap on
+            // src+i by working in 64-bit and detecting (src+size) > 2^32.
+            unsigned long long src_lo = sv.w[0];
+            bool src_past_end = (sv.w[1] | sv.w[2] | sv.w[3]) != 0 ||
+                                src_lo >= code_size ||
+                                (src_lo + sz) > 0xFFFFFFFFULL;
+            unsigned int src_off = src_past_end ? code_size
+                                                : (unsigned int)src_lo;
             for (unsigned int i = 0; i < size; ++i)
             {
-                unsigned int s = src_off + i;
+                unsigned long long s = (unsigned long long)src_off
+                                     + (unsigned long long)i;
                 mem[dest + i] = (s < code_size) ? code_dev[s] : 0;
             }
             ++pc; continue;
