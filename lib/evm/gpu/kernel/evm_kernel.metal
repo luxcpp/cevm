@@ -1050,11 +1050,16 @@ kernel void evm_execute(
             if (sv.w[1]|sv.w[2]|sv.w[3]) ERR();
             ulong size = sv.w[0];
             if (!offset_in_bounds(ov, size)) ERR();
+            // Output buffer is fixed at MAX_OUTPUT_PER_TX. Silently
+            // truncating would diverge from CPU evmone (no cap there);
+            // the dispatcher routes Error txs to evmone CPU as the
+            // unbounded fallback so legitimate large RETURN payloads
+            // still execute correctly.
+            if (size > MAX_OUTPUT_PER_TX) ERR();
             uint off = uint(ov.w[0]); uint sz = uint(size);
             if (!expand_mem_range(mem, mem_size, gas, off, sz)) OOG();
-            uint csz = (sz>MAX_OUTPUT_PER_TX)?MAX_OUTPUT_PER_TX:sz;
-            for (uint i=0;i<csz;++i) output[i]=mem[off+i];
-            EMIT(1, gas_start-gas, refund_counter, csz);
+            for (uint i=0;i<sz;++i) output[i]=mem[off+i];
+            EMIT(1, gas_start-gas, refund_counter, sz);
         }
         case 0xfd: {
             if (sp < 2) ERR();
@@ -1062,11 +1067,14 @@ kernel void evm_execute(
             if (sv.w[1]|sv.w[2]|sv.w[3]) ERR();
             ulong size = sv.w[0];
             if (!offset_in_bounds(ov, size)) ERR();
+            // Same cap as RETURN: fail-loud on output > MAX_OUTPUT_PER_TX
+            // so the dispatcher falls back to evmone (no cap) instead of
+            // silently truncating REVERT data.
+            if (size > MAX_OUTPUT_PER_TX) ERR();
             uint off = uint(ov.w[0]); uint sz = uint(size);
             if (!expand_mem_range(mem, mem_size, gas, off, sz)) OOG();
-            uint csz = (sz>MAX_OUTPUT_PER_TX)?MAX_OUTPUT_PER_TX:sz;
-            for (uint i=0;i<csz;++i) output[i]=mem[off+i];
-            EMIT(2, gas_start-gas, refund_counter, csz);
+            for (uint i=0;i<sz;++i) output[i]=mem[off+i];
+            EMIT(2, gas_start-gas, refund_counter, sz);
         }
         case 0xfe: EMIT(4, gas_start, refund_counter, 0);
 
