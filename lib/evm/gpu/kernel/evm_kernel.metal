@@ -384,6 +384,9 @@ constant uint MAX_OUTPUT_PER_TX  = 1024;
 constant uint MAX_STORAGE_PER_TX = 64;
 constant uint MAX_LOGS_PER_TX    = 16;
 constant uint STACK_LIMIT        = 1024;
+// Mirrors blob_hashes[8] in BlockContext above. The kernel must never
+// index past this even if the host writes a larger num_blob_hashes.
+constant uint MAX_BLOB_HASHES    = 8;
 
 constant ulong GAS_VERYLOW=3, GAS_LOW=5, GAS_MID=8, GAS_HIGH=10, GAS_BASE=2, GAS_JUMPDEST=1;
 constant ulong GAS_SLOAD=2100, GAS_SSTORE_SET=20000, GAS_SSTORE_RESET=2900;
@@ -800,7 +803,14 @@ kernel void evm_execute(
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
             if (sp < 1) ERR();
             uint256 iv = stack[sp - 1]; uint256 r = u256_zero();
-            if (!iv.w[1]&&!iv.w[2]&&!iv.w[3]&&iv.w[0]<block_ctx->num_blob_hashes) {
+            // Cap at MAX_BLOB_HASHES even if the host wrote num_blob_hashes
+            // > 8: blob_hashes is a fixed-size array. Reading past index 7
+            // would be OOB into adjacent kernel state. EIP-4844 caps blobs
+            // per tx well below 8 in practice; this is belt-and-suspenders.
+            uint nhashes = (block_ctx->num_blob_hashes > MAX_BLOB_HASHES)
+                              ? MAX_BLOB_HASHES
+                              : block_ctx->num_blob_hashes;
+            if (!iv.w[1]&&!iv.w[2]&&!iv.w[3]&&iv.w[0]<nhashes) {
                 uint idx = uint(iv.w[0]);
                 for (uint i = 0; i < 32; ++i) {
                     uint pfr = 31 - i;
