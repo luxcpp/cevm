@@ -118,11 +118,13 @@ if(EVMONE_CUDA)
         gpu/cuda/tx_validate.cu
         gpu/cuda/tx_validate_host.cpp
         gpu/cuda/tx_validate_host.hpp
-        # Stubs (kernels TODO):
         gpu/cuda/state_table.cu
+        gpu/cuda/state_table_host.cpp
         gpu/cuda/state_table_host.hpp
         gpu/cuda/block_stm.cu
+        gpu/cuda/block_stm_host.cpp
         gpu/cuda/block_stm_host.hpp
+        # Stubs (kernels TODO):
         gpu/cuda/evm_kernel.cu
         gpu/cuda/evm_kernel_host.hpp
     )
