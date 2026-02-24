@@ -124,8 +124,8 @@ if(EVMONE_CUDA)
         gpu/cuda/block_stm.cu
         gpu/cuda/block_stm_host.cpp
         gpu/cuda/block_stm_host.hpp
-        # Stubs (kernels TODO):
         gpu/cuda/evm_kernel.cu
+        gpu/cuda/evm_kernel_host.cpp
         gpu/cuda/evm_kernel_host.hpp
     )
     target_compile_features(evm-cuda PUBLIC cxx_std_20)
