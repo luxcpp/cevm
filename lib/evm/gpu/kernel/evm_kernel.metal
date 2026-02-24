@@ -877,7 +877,15 @@ kernel void evm_execute(
             ulong sc = sstore_gas_eip2200(original,current,val,refund_counter);
             if (gas < sc) OOG(); gas -= sc;
             if (found){for(uint i=stor_count;i>0;--i)if(u256_eq(storage[i-1].key,slot)){storage[i-1].value=val;break;}}
-            else if(stor_count<MAX_STORAGE_PER_TX){storage[stor_count].key=slot;storage[stor_count].value=val;stor_count++;}
+            else {
+                // Capacity overflow: silently dropping a charged write
+                // would diverge from CPU evmone (no cap there) and corrupt
+                // consensus. Status=Error, all gas — the dispatcher routes
+                // a tx that errs here to evmone CPU as the unbounded
+                // fallback so legitimate large-storage txs still execute.
+                if (stor_count >= MAX_STORAGE_PER_TX) ERR();
+                storage[stor_count].key=slot; storage[stor_count].value=val; stor_count++;
+            }
             ++pc; continue;
         }
 
@@ -934,7 +942,10 @@ kernel void evm_execute(
             bool found = false;
             for (uint i = trans_count; i > 0; --i)
                 if (u256_eq(transient[i-1].key, slot)) { transient[i-1].value = val; found = true; break; }
-            if (!found && trans_count < MAX_STORAGE_PER_TX) {
+            if (!found) {
+                // Same rationale as SSTORE: silent drop would corrupt the
+                // transient store relative to subsequent TLOAD reads.
+                if (trans_count >= MAX_STORAGE_PER_TX) ERR();
                 transient[trans_count].key = slot;
                 transient[trans_count].value = val;
                 trans_count++;

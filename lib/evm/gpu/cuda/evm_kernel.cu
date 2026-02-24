@@ -1414,6 +1414,12 @@ __global__ void evm_execute_kernel(
             }
             else if (stor_count < MAX_STORAGE_PER_TX)
             {
+                // Capacity overflow: silently dropping a charged write
+                // would diverge from CPU evmone (no cap there) and corrupt
+                // consensus. Status=Error, all gas — the dispatcher routes
+                // a tx that errs here to evmone CPU as the unbounded
+                // fallback so legitimate large-storage txs still execute.
+                if (stor_count >= MAX_STORAGE_PER_TX) ERR();
                 storage[stor_count].key = slot;
                 storage[stor_count].value = val;
                 stor_count++;
@@ -1494,8 +1500,11 @@ __global__ void evm_execute_kernel(
                     found = true;
                     break;
                 }
-            if (!found && tc < MAX_STORAGE_PER_TX)
+            if (!found)
             {
+                // Same rationale as SSTORE: silent drop would corrupt the
+                // transient store relative to subsequent TLOAD reads.
+                if (tc >= MAX_STORAGE_PER_TX) ERR();
                 transient[tc].key = slot;
                 transient[tc].value = val;
                 *trans_count_ptr = tc + 1;
