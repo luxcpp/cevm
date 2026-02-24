@@ -586,6 +586,9 @@ __device__ static constexpr unsigned int MAX_MEMORY_PER_TX  = 65536;
 __device__ static constexpr unsigned int MAX_OUTPUT_PER_TX  = 1024;
 __device__ static constexpr unsigned int MAX_STORAGE_PER_TX = 64;
 __device__ static constexpr unsigned int MAX_LOGS_PER_TX    = 16;
+// Mirrors blob_hashes[8] in BlockContext. The kernel must never index
+// past this even if the host writes a larger num_blob_hashes.
+__device__ static constexpr unsigned int MAX_BLOB_HASHES    = 8;
 
 __device__ static constexpr unsigned long long GAS_VERYLOW    = 3;
 __device__ static constexpr unsigned long long GAS_LOW        = 5;
@@ -1283,7 +1286,14 @@ __global__ void evm_execute_kernel(
             if (sp < 1) ERR();
             uint256 iv = stack[sp - 1];
             uint256 r = u256_zero();
-            if (!iv.w[1] && !iv.w[2] && !iv.w[3] && iv.w[0] < ctx->num_blob_hashes)
+            // Cap at MAX_BLOB_HASHES even if the host wrote num_blob_hashes
+            // > 8: blob_hashes is a fixed-size array. Reading past index 7
+            // would be OOB into adjacent kernel state. EIP-4844 caps blobs
+            // per tx well below 8 in practice; belt-and-suspenders.
+            unsigned int nhashes = (ctx->num_blob_hashes > MAX_BLOB_HASHES)
+                                       ? MAX_BLOB_HASHES
+                                       : ctx->num_blob_hashes;
+            if (!iv.w[1] && !iv.w[2] && !iv.w[3] && iv.w[0] < nhashes)
             {
                 const unsigned char* h = ctx->blob_hashes[(unsigned int)iv.w[0]];
                 for (unsigned int i = 0; i < 32; ++i)
