@@ -5,8 +5,13 @@
 #include "gpu_state_hasher.hpp"
 #include "parallel_engine.hpp"
 
+#ifdef __APPLE__
+#include "metal/block_stm_host.hpp"
+#endif
+
 #ifdef EVM_CUDA
 #include "cuda/keccak_host.hpp"
+#include "cuda/block_stm_host.hpp"
 #endif
 
 #include <chrono>
@@ -184,6 +189,60 @@ static bool compute_state_root_cuda_direct(BlockResult& result)
 }
 #endif  // EVM_CUDA
 
+#ifdef __APPLE__
+/// Build per-sender account states from transactions for the Metal
+/// Block-STM kernel. Each unique sender gets nonce=tx.nonce (matching the
+/// tx so validation passes) and balance high enough to cover gas+value.
+/// Used when no host state is provided (benchmarks, isolated execution).
+static std::vector<metal::GpuAccountState>
+synthesize_base_state(const std::vector<Transaction>& txs)
+{
+    std::vector<metal::GpuAccountState> base_state;
+    base_state.reserve(txs.size());
+    auto already = [&](const uint8_t* addr) -> bool {
+        for (const auto& acct : base_state)
+            if (std::memcmp(acct.address, addr, 20) == 0) return true;
+        return false;
+    };
+    for (const auto& tx : txs)
+    {
+        if (tx.from.size() < 20 || already(tx.from.data())) continue;
+        metal::GpuAccountState acct;
+        std::memset(&acct, 0, sizeof(acct));
+        std::memcpy(acct.address, tx.from.data(), 20);
+        acct.nonce = tx.nonce;
+        acct.balance = ~uint64_t{0} >> 1;  // 9.2 EH gwei worth — won't overflow
+        base_state.push_back(acct);
+    }
+    return base_state;
+}
+#endif
+
+#ifdef EVM_CUDA
+static std::vector<cuda::GpuAccountState>
+synthesize_base_state_cuda(const std::vector<Transaction>& txs)
+{
+    std::vector<cuda::GpuAccountState> base_state;
+    base_state.reserve(txs.size());
+    auto already = [&](const uint8_t* addr) -> bool {
+        for (const auto& acct : base_state)
+            if (std::memcmp(acct.address, addr, 20) == 0) return true;
+        return false;
+    };
+    for (const auto& tx : txs)
+    {
+        if (tx.from.size() < 20 || already(tx.from.data())) continue;
+        cuda::GpuAccountState acct;
+        std::memset(&acct, 0, sizeof(acct));
+        std::memcpy(acct.address, tx.from.data(), 20);
+        acct.nonce = tx.nonce;
+        acct.balance = ~uint64_t{0} >> 1;
+        base_state.push_back(acct);
+    }
+    return base_state;
+}
+#endif
+
 BlockResult execute_block(const Config& config,
                           const std::vector<Transaction>& txs,
                           void* state)
@@ -208,8 +267,30 @@ BlockResult execute_block(const Config& config,
 
     case Backend::GPU_Metal:
     {
-        // Execute transactions via CPU parallel (Block-STM), then
-        // offload state trie hashing to Metal GPU.
+#ifdef __APPLE__
+        // Native GPU Block-STM path: dispatch the full execute/validate/
+        // re-execute loop on Metal. Falls back to CPU Block-STM + GPU
+        // state-root keccak if Metal device is unavailable at runtime.
+        if (state == nullptr)
+        {
+            auto engine = metal::BlockStmGpu::create();
+            if (engine)
+            {
+                auto base_state = synthesize_base_state(txs);
+                auto result = engine->execute_block(txs, base_state);
+                if (config.enable_state_trie_gpu &&
+                    (result.state_root.empty() ||
+                     std::all_of(result.state_root.begin(),
+                                 result.state_root.end(),
+                                 [](uint8_t b){ return b == 0; })))
+                {
+                    compute_state_root_gpu(result, LUX_BACKEND_METAL);
+                }
+                return result;
+            }
+        }
+#endif
+        // CPU Block-STM + GPU state-root keccak fallback.
         auto result = execute_via_engine(config, txs, state, true);
         if (config.enable_state_trie_gpu)
             compute_state_root_gpu(result, LUX_BACKEND_METAL);
@@ -218,16 +299,34 @@ BlockResult execute_block(const Config& config,
 
     case Backend::GPU_CUDA:
     {
-        // Execute transactions via CPU parallel (Block-STM) for now —
-        // the GPU EVM interpreter (cuda/evm_kernel.cu) is still a stub.
-        // Once ported, this path will dispatch evm_execute on device.
+#ifdef EVM_CUDA
+        // Native GPU Block-STM path on NVIDIA. Falls back if no CUDA
+        // device is present at runtime.
+        if (state == nullptr)
+        {
+            auto engine = cuda::BlockStmGpu::create();
+            if (engine)
+            {
+                auto base_state = synthesize_base_state_cuda(txs);
+                auto result = engine->execute_block(txs, base_state);
+                if (config.enable_state_trie_gpu &&
+                    (result.state_root.empty() ||
+                     std::all_of(result.state_root.begin(),
+                                 result.state_root.end(),
+                                 [](uint8_t b){ return b == 0; })))
+                {
+                    if (!compute_state_root_cuda_direct(result))
+                        compute_state_root_gpu(result, LUX_BACKEND_CUDA);
+                }
+                return result;
+            }
+        }
+#endif
+        // CPU Block-STM + GPU state-root keccak fallback.
         auto result = execute_via_engine(config, txs, state, true);
         if (config.enable_state_trie_gpu)
         {
 #ifdef EVM_CUDA
-            // Prefer the direct CUDA Keccak path. If no NVIDIA device
-            // is present, fall back to luxcpp/gpu (which itself falls
-            // back to CPU if its CUDA plugin isn't loaded).
             if (!compute_state_root_cuda_direct(result))
                 compute_state_root_gpu(result, LUX_BACKEND_CUDA);
 #else
