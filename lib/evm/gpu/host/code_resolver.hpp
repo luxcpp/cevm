@@ -65,4 +65,85 @@ struct CodeAnalysis
 /// false "static" claim.
 CodeAnalysis analyze(std::span<const uint8_t> code);
 
+/// GPU kernel resource caps. Hitting any of these means the kernel either
+/// silently truncates (storage, output), silently OOGs (memory), or hits an
+/// ERR (logs). All four are consensus divergences vs evmone, so the
+/// dispatcher must spot them up front and fall back to CPU.
+///
+/// The numbers come from `lib/evm/gpu/kernel/evm_kernel_host.hpp` and the
+/// matching constants inside the Metal/CUDA kernels — see
+/// `HOST_MAX_MEMORY_PER_TX` etc. Keep them in sync.
+constexpr uint32_t KERNEL_MAX_MEMORY_PER_TX  = 65'536;
+constexpr uint32_t KERNEL_MAX_STORAGE_PER_TX = 64;
+constexpr uint32_t KERNEL_MAX_LOGS_PER_TX    = 16;
+constexpr uint32_t KERNEL_MAX_OUTPUT_PER_TX  = 1024;
+
+/// Static-analysis upper bounds on what one execution of `code` could
+/// demand from the GPU kernel. The kernel cannot service:
+///   * BALANCE / EXTCODE* / SELFBALANCE / BLOCKHASH (returns hardcoded 0)
+///   * memory > KERNEL_MAX_MEMORY_PER_TX (silent OOG)
+///   * storage writes > KERNEL_MAX_STORAGE_PER_TX (silent drop)
+///   * logs > KERNEL_MAX_LOGS_PER_TX (ERR)
+///   * RETURN/REVERT size > KERNEL_MAX_OUTPUT_PER_TX (silent truncate)
+///
+/// `analyze_requirements` walks the bytecode once and reports an upper
+/// bound for each. The values are intentionally conservative — if the
+/// analyzer cannot prove a tight bound, it returns one that triggers
+/// fallback. There is no false-positive cost (we run on CPU; correct but
+/// slower) and no false-negative path (we never claim a tx is GPU-safe
+/// when it isn't).
+struct TxRequirements
+{
+    /// True if `code` reaches an opcode whose result depends on the
+    /// account-state oracle: BALANCE (0x31), EXTCODESIZE (0x3b),
+    /// EXTCODECOPY (0x3c), EXTCODEHASH (0x3f), BLOCKHASH (0x40),
+    /// SELFBALANCE (0x47). These return zero on the GPU and can never be
+    /// served correctly without a real host.
+    bool reads_account_state = false;
+    /// Highest static constant memory offset+size we observed in any
+    /// MLOAD/MSTORE/MSTORE8/MCOPY/RETURN/REVERT/CALLDATACOPY/CODECOPY/
+    /// EXTCODECOPY/RETURNDATACOPY/LOG*. If any operand was non-constant
+    /// we set this to UINT32_MAX so the dispatcher falls back.
+    uint32_t max_memory_used = 0;
+    /// Number of distinct constant storage slots we saw written through
+    /// SSTORE. Slots loaded via SLOAD are counted too because the kernel
+    /// promotes loaded slots to its small storage table. Non-constant
+    /// keys → UINT32_MAX.
+    uint32_t max_storage_keys = 0;
+    /// Count of reachable LOG0..LOG4 opcodes. We do not deduplicate by
+    /// path — every LOG opcode in the bytecode counts once. Loops can
+    /// emit more logs at runtime than this bound, so any LOG following a
+    /// JUMP/JUMPI raises the count to UINT32_MAX.
+    uint32_t max_log_count = 0;
+    /// Largest static constant size operand we saw on a RETURN/REVERT.
+    /// Non-constant size → UINT32_MAX.
+    uint32_t max_output_size = 0;
+};
+
+/// Walk `code` once and compute conservative upper bounds.
+TxRequirements analyze_requirements(std::span<const uint8_t> code);
+
+/// Bitmask describing why a tx cannot run safely on the GPU kernel. Used
+/// by the dispatcher to populate `BlockResult::warnings[i]` so callers
+/// can tell whether their per-tx result is consensus-equivalent to evmone.
+enum TxWarning : uint32_t
+{
+    /// Tx reads account state (BALANCE / EXTCODE* / SELFBALANCE / BLOCKHASH)
+    /// and was executed on the GPU without a real host — result diverges
+    /// from mainnet.
+    TX_WARN_ACCOUNT_STATE_ON_GPU = 1u << 0,
+    /// Tx exceeds KERNEL_MAX_MEMORY_PER_TX and was executed on the GPU.
+    TX_WARN_MEMORY_OVERFLOW      = 1u << 1,
+    /// Tx exceeds KERNEL_MAX_STORAGE_PER_TX and was executed on the GPU.
+    TX_WARN_STORAGE_OVERFLOW     = 1u << 2,
+    /// Tx exceeds KERNEL_MAX_LOGS_PER_TX and was executed on the GPU.
+    TX_WARN_LOG_OVERFLOW         = 1u << 3,
+    /// Tx exceeds KERNEL_MAX_OUTPUT_PER_TX and was executed on the GPU.
+    TX_WARN_OUTPUT_OVERFLOW      = 1u << 4,
+};
+
+/// Returns the bitmask of warnings this `req` would produce when executed
+/// on a GPU kernel without a host fallback. Empty (0) means GPU-safe.
+uint32_t classify_warnings(const TxRequirements& req) noexcept;
+
 }  // namespace evm::gpu::host
