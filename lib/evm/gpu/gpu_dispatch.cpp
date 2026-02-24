@@ -23,9 +23,12 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <thread>
+#include <utility>
 
 namespace evm::gpu
 {
@@ -88,34 +91,50 @@ bool set_backend(Config& config, Backend b)
     return false;
 }
 
-/// Execute a block using the dispatch-layer Transaction type.
-/// Converts to EvmTransaction and delegates to the real engine.
-/// The state pointer is expected to be an evmc::Host* when non-null.
+/// Run every tx through evmone using the caller-provided host.
+/// `parallel` selects between sequential and Block-STM execution.
+/// Caller MUST pass a valid evmc::Host&; the host-less path is handled by
+/// the routing helpers (kernel::execute_cpu, gas_estimation_only) instead.
 static BlockResult execute_via_engine(const Config& config,
                                       const std::vector<Transaction>& txs,
-                                      void* state,
+                                      evmc::Host& host,
                                       bool parallel)
 {
-    // Convert dispatch-layer transactions to EVM transactions
     std::vector<EvmTransaction> evm_txs;
     evm_txs.reserve(txs.size());
     for (const auto& tx : txs)
         evm_txs.push_back(to_evm_transaction(tx));
 
-    // If caller provided a Host, use it; otherwise fall back to gas-only mode
-    if (state != nullptr)
+    if (parallel)
     {
-        auto* host = static_cast<evmc::Host*>(state);
-        if (parallel)
-        {
-            return execute_parallel_evmone(evm_txs, *host, EVMC_SHANGHAI,
-                config.num_threads);
-        }
-        return execute_sequential_evmone(evm_txs, *host, EVMC_SHANGHAI);
+        return execute_parallel_evmone(evm_txs, host, EVMC_SHANGHAI,
+            config.num_threads);
     }
+    return execute_sequential_evmone(evm_txs, host, EVMC_SHANGHAI);
+}
 
-    // No host provided: run gas-estimation-only mode (no state access).
-    // This preserves backward compatibility with callers that pass nullptr.
+/// Build a result that signals an early bail-out. Every status is Error,
+/// every gas_used is zero, and `error_message` carries the human-readable
+/// reason. Used when the dispatcher itself rejects the requested combination
+/// of flags + inputs (gas_estimation_mode unset, fast_value_transfer without
+/// the acknowledgement flag, etc.).
+static BlockResult make_error_result(const std::vector<Transaction>& txs,
+                                     std::string message)
+{
+    BlockResult br;
+    const auto n = txs.size();
+    br.gas_used.assign(n, 0);
+    br.status.assign(n, TxStatus::Error);
+    br.output.assign(n, std::vector<uint8_t>{});
+    br.error_message = std::move(message);
+    return br;
+}
+
+/// Explicit gas-estimation shortcut: no host, no bytecode, the dispatcher
+/// reports `gas_used = gas_limit` for every tx. Only invoked after the caller
+/// opts in via Config::gas_estimation_mode = true.
+static BlockResult gas_estimation_only(const std::vector<Transaction>& txs)
+{
     BlockResult result;
     result.gas_used.resize(txs.size());
 
@@ -132,6 +151,25 @@ static BlockResult execute_via_engine(const Config& config,
         std::chrono::duration<double, std::milli>(end - start).count();
 
     return result;
+}
+
+/// Validate Config flags. Returns empty string when ok, otherwise a human
+/// message describing the misuse. Called from the public `execute_block`
+/// entry point so every backend is gated identically.
+static std::string validate_config(const Config& config)
+{
+    if (config.fast_value_transfer && !config.fast_value_transfer_acknowledged)
+    {
+        return "fast_value_transfer requires fast_value_transfer_acknowledged "
+               "(it skips per-opcode gas decrement and violates EVM consensus)";
+    }
+    if (config.fast_value_transfer && config.fast_value_transfer_acknowledged)
+    {
+        std::fprintf(stderr,
+            "[evm::gpu] WARNING: fast_value_transfer enabled — gas accounting "
+            "is non-spec, do not use for consensus-critical execution.\n");
+    }
+    return {};
 }
 
 /// Build the state-root input bytes (concatenated gas_used as little-endian).
@@ -376,184 +414,274 @@ synthesize_base_state_cuda(const std::vector<Transaction>& txs)
 }
 #endif
 
-BlockResult execute_block(const Config& config,
-                          const std::vector<Transaction>& txs,
-                          void* state)
+/// Single source of truth for the CallNotSupported fallback policy.
+/// Walks `results` and replaces every `CallNotSupported` entry with the
+/// outcome of running tx[i] through evmone (sequential) against the real
+/// host. Increments `gpu_fallback_count` for each rewritten slot.
+///
+/// When `host == nullptr` the dispatcher cannot service the fallback, so
+/// the helper rewrites those slots to Error with a clear message instead
+/// of leaking the kernel-internal CallNotSupported status to the caller.
+/// The internal CallNotSupported status code MUST never reach a consumer:
+/// it is a "GPU kernel can't handle this tx" signal, not a tx-level error.
+static void apply_call_not_supported_fallback(BlockResult& br,
+                                              const std::vector<Transaction>& txs,
+                                              evmc::Host* host)
 {
-    switch (config.backend)
+    if (br.status.empty())
+        return;
+
+    for (size_t i = 0; i < br.status.size(); ++i)
     {
-    case Backend::CPU_Sequential:
-    {
-        // When the caller has bytecode but no host, route through the kernel
-        // CPU interpreter so CPU and GPU paths share semantics (parity).
-        if (state == nullptr && any_tx_has_code(txs))
+        if (br.status[i] != TxStatus::CallNotSupported)
+            continue;
+
+        ++br.gpu_fallback_count;
+
+        if (host == nullptr)
         {
-            auto br = execute_kernel_cpu(txs, /*parallel=*/false, 0);
-            if (config.enable_state_trie_gpu)
-                compute_state_root_gpu(br, LUX_BACKEND_CPU);
-            return br;
+            // Without a host we can't service the fallback. Surface Error
+            // with a clear message so the caller knows what to do; never
+            // leak the internal CallNotSupported status to consumers.
+            br.status[i]  = TxStatus::Error;
+            br.output[i].clear();
+            br.gas_used[i] = txs[i].gas_limit;
+            if (br.error_message.empty())
+            {
+                br.error_message =
+                    "GPU kernel returned CallNotSupported but no host was "
+                    "provided — caller must pass evmc::Host* in `state` for "
+                    "txs that issue CALL/CREATE.";
+            }
+            continue;
         }
-        auto result = execute_via_engine(config, txs, state, false);
+
+        // Re-execute this single tx on evmone using the caller's host.
+        std::vector<EvmTransaction> one;
+        one.push_back(to_evm_transaction(txs[i]));
+        auto fb = execute_sequential_evmone(one, *host, EVMC_SHANGHAI);
+
+        // execute_sequential_evmone fills gas_used per tx. It does not yet
+        // populate per-tx status/output — we surface Stop because evmone has
+        // already reflected the success/revert outcome through state changes
+        // on the caller's host. (This is the same contract that the host
+        // bridge tests rely on.)
+        br.gas_used[i] = fb.gas_used.empty() ? txs[i].gas_limit : fb.gas_used[0];
+        br.status[i]   = TxStatus::Stop;
+        br.output[i].clear();
+    }
+
+    // Recompute total_gas because individual entries may have been rewritten.
+    br.total_gas = 0;
+    for (auto g : br.gas_used) br.total_gas += g;
+}
+
+/// CPU sequential and CPU parallel collapse to the same routing tree:
+///   has-host                → evmone (seq/par)
+///   no-host + bytecode      → kernel::execute_cpu (seq/par) — parity path
+///   no-host + no-bytecode   → gas estimation if opted in, else error
+static BlockResult run_cpu(const Config& config,
+                           const std::vector<Transaction>& txs,
+                           evmc::Host* host,
+                           bool parallel)
+{
+    if (host != nullptr)
+    {
+        auto result = execute_via_engine(config, txs, *host, parallel);
         if (config.enable_state_trie_gpu)
             compute_state_root_gpu(result, LUX_BACKEND_CPU);
         return result;
     }
-
-    case Backend::CPU_Parallel:
+    if (any_tx_has_code(txs))
     {
-        if (state == nullptr && any_tx_has_code(txs))
-        {
-            auto br = execute_kernel_cpu(txs, /*parallel=*/true, config.num_threads);
-            if (config.enable_state_trie_gpu)
-                compute_state_root_gpu(br, LUX_BACKEND_CPU);
-            return br;
-        }
-        auto result = execute_via_engine(config, txs, state, true);
+        auto br = execute_kernel_cpu(txs, parallel,
+            parallel ? config.num_threads : 0);
+        // Same fallback policy as the GPU paths: CallNotSupported is an
+        // internal "kernel can't handle this tx" signal, never a tx-level
+        // status code. With no host the dispatcher rewrites it to Error
+        // with a clear message so the four backends report consistently.
+        apply_call_not_supported_fallback(br, txs, host);
         if (config.enable_state_trie_gpu)
-            compute_state_root_gpu(result, LUX_BACKEND_CPU);
-        return result;
+            compute_state_root_gpu(br, LUX_BACKEND_CPU);
+        return br;
     }
+    if (config.gas_estimation_mode)
+        return gas_estimation_only(txs);
+    return make_error_result(txs,
+        "CPU backend requires either a host (state != nullptr) or bytecode "
+        "in at least one tx; got neither. Set Config::gas_estimation_mode to "
+        "request the gas-limit shortcut explicitly.");
+}
 
-    case Backend::GPU_Metal:
-    {
+/// GPU_Metal routing:
+///   has-host               → evmone Block-STM (parallel) — Metal is reserved
+///                            for benches that supply their own state. The
+///                            mainline GPU consensus path is feat/gpu-host-
+///                            bridge, not this dispatcher.
+///   no-host + bytecode     → Metal EvmKernelHost (V1 or V2) + CallNotSupported
+///                            fallback to evmone CPU when host present, else
+///                            Error with a clear message.
+///   no-host + no-bytecode  → BlockStmGpu scheduler-only.
+///   gas-estimation         → opt-in via Config::gas_estimation_mode.
+static BlockResult run_metal(const Config& config,
+                             const std::vector<Transaction>& txs,
+                             evmc::Host* host)
+{
 #ifdef __APPLE__
-        // Real-bytecode path: parallel opcode interpreter on Metal, one
-        // thread per tx (or 32 threads/tx via execute_v2 when available).
-        if (state == nullptr && any_tx_has_code(txs))
+    if (host == nullptr && any_tx_has_code(txs))
+    {
+        auto engine = kernel::EvmKernelHost::create();
+        if (engine)
         {
-            auto engine = kernel::EvmKernelHost::create();
-            if (engine)
-            {
-                auto host_txs = to_host_transactions(txs);
-                auto t0 = std::chrono::high_resolution_clock::now();
-                auto results = engine->has_v2()
-                    ? engine->execute_v2(host_txs)
-                    : engine->execute(host_txs);
-                auto t1 = std::chrono::high_resolution_clock::now();
+            auto host_txs = to_host_transactions(txs);
+            auto t0 = std::chrono::high_resolution_clock::now();
+            auto results = engine->has_v2()
+                ? engine->execute_v2(host_txs)
+                : engine->execute(host_txs);
+            auto t1 = std::chrono::high_resolution_clock::now();
 
-                BlockResult br;
-                br.gas_used.reserve(results.size());
-                br.status.reserve(results.size());
-                br.output.reserve(results.size());
-                br.execution_time_ms =
-                    std::chrono::duration<double, std::milli>(t1 - t0).count();
-                for (auto& r : results)
-                {
-                    br.gas_used.push_back(r.gas_used);
-                    br.status.push_back(convert_status(r.status));
-                    br.output.push_back(std::move(r.output));
-                    br.total_gas += r.gas_used;
-                }
-                if (config.enable_state_trie_gpu)
-                    compute_state_root_gpu(br, LUX_BACKEND_METAL);
-                return br;
-            }
-        }
-        // Scheduler-only path: full execute/validate/re-execute loop on
-        // Metal for value-transfer style txs (no bytecode). Falls back to
-        // CPU Block-STM + GPU state-root keccak if Metal is unavailable.
-        if (state == nullptr)
-        {
-            auto engine = metal::BlockStmGpu::create();
-            if (engine)
+            BlockResult br;
+            br.gas_used.reserve(results.size());
+            br.status.reserve(results.size());
+            br.output.reserve(results.size());
+            br.execution_time_ms =
+                std::chrono::duration<double, std::milli>(t1 - t0).count();
+            for (auto& r : results)
             {
-                auto base_state = synthesize_base_state(txs);
-                auto result = engine->execute_block(txs, base_state);
-                if (config.enable_state_trie_gpu &&
-                    (result.state_root.empty() ||
-                     std::all_of(result.state_root.begin(),
-                                 result.state_root.end(),
-                                 [](uint8_t b){ return b == 0; })))
-                {
-                    compute_state_root_gpu(result, LUX_BACKEND_METAL);
-                }
-                return result;
+                br.gas_used.push_back(r.gas_used);
+                br.status.push_back(convert_status(r.status));
+                br.output.push_back(std::move(r.output));
+                br.total_gas += r.gas_used;
             }
+            apply_call_not_supported_fallback(br, txs, host);
+            if (config.enable_state_trie_gpu)
+                compute_state_root_gpu(br, LUX_BACKEND_METAL);
+            return br;
         }
+    }
+    if (host == nullptr && !any_tx_has_code(txs))
+    {
+        auto engine = metal::BlockStmGpu::create();
+        if (engine)
+        {
+            auto base_state = synthesize_base_state(txs);
+            auto result = engine->execute_block(txs, base_state);
+            if (config.enable_state_trie_gpu &&
+                (result.state_root.empty() ||
+                 std::all_of(result.state_root.begin(),
+                             result.state_root.end(),
+                             [](uint8_t b){ return b == 0; })))
+            {
+                compute_state_root_gpu(result, LUX_BACKEND_METAL);
+            }
+            return result;
+        }
+        if (config.gas_estimation_mode)
+            return gas_estimation_only(txs);
+        return make_error_result(txs,
+            "GPU_Metal: BlockStmGpu unavailable and no host provided; cannot "
+            "execute value-transfer txs without a host or fallback.");
+    }
 #endif
-        // CPU Block-STM + GPU state-root keccak fallback.
-        auto result = execute_via_engine(config, txs, state, true);
+    // Has-host fallback. Honoured on every platform — the GPU keccak helper
+    // degrades to CPU when Metal/CUDA absent.
+    if (host != nullptr)
+    {
+        auto result = execute_via_engine(config, txs, *host, /*parallel=*/true);
         if (config.enable_state_trie_gpu)
             compute_state_root_gpu(result, LUX_BACKEND_METAL);
         return result;
     }
+    if (config.gas_estimation_mode)
+        return gas_estimation_only(txs);
+    return make_error_result(txs,
+        "GPU_Metal: no host and Metal unavailable. Provide an evmc::Host* "
+        "in `state`, or set Config::gas_estimation_mode for the gas-limit "
+        "shortcut.");
+}
 
-    case Backend::GPU_CUDA:
-    {
+/// GPU_CUDA routing — symmetric to run_metal but with CUDA hosts.
+static BlockResult run_cuda(const Config& config,
+                            const std::vector<Transaction>& txs,
+                            evmc::Host* host)
+{
 #ifdef EVM_CUDA
-        // Real-bytecode path: parallel opcode interpreter on CUDA.
-        if (state == nullptr && any_tx_has_code(txs))
+    if (host == nullptr && any_tx_has_code(txs))
+    {
+        auto engine = cuda::EvmKernel::create();
+        if (engine)
         {
-            auto engine = cuda::EvmKernel::create();
-            if (engine)
+            std::vector<cuda::HostTransaction> host_txs;
+            host_txs.reserve(txs.size());
+            for (const auto& tx : txs)
             {
-                std::vector<cuda::HostTransaction> host_txs;
-                host_txs.reserve(txs.size());
-                for (const auto& tx : txs)
-                {
-                    cuda::HostTransaction h;
-                    h.code = tx.code;
-                    h.calldata = tx.data;
-                    h.gas_limit = tx.gas_limit;
-                    std::memcpy(&h.caller, tx.from.data(),
-                                std::min<size_t>(tx.from.size(), sizeof(h.caller)));
-                    std::memcpy(&h.address, tx.to.data(),
-                                std::min<size_t>(tx.to.size(), sizeof(h.address)));
-                    auto* val_lo = reinterpret_cast<uint64_t*>(&h.value);
-                    val_lo[0] = tx.value;
-                    host_txs.push_back(std::move(h));
-                }
-                auto t0 = std::chrono::high_resolution_clock::now();
-                auto results = engine->execute(host_txs);
-                auto t1 = std::chrono::high_resolution_clock::now();
+                cuda::HostTransaction h;
+                h.code = tx.code;
+                h.calldata = tx.data;
+                h.gas_limit = tx.gas_limit;
+                std::memcpy(&h.caller, tx.from.data(),
+                            std::min<size_t>(tx.from.size(), sizeof(h.caller)));
+                std::memcpy(&h.address, tx.to.data(),
+                            std::min<size_t>(tx.to.size(), sizeof(h.address)));
+                auto* val_lo = reinterpret_cast<uint64_t*>(&h.value);
+                val_lo[0] = tx.value;
+                host_txs.push_back(std::move(h));
+            }
+            auto t0 = std::chrono::high_resolution_clock::now();
+            auto results = engine->execute(host_txs);
+            auto t1 = std::chrono::high_resolution_clock::now();
 
-                BlockResult br;
-                br.gas_used.reserve(results.size());
-                br.status.reserve(results.size());
-                br.output.reserve(results.size());
-                br.execution_time_ms =
-                    std::chrono::duration<double, std::milli>(t1 - t0).count();
-                for (auto& r : results)
-                {
-                    br.gas_used.push_back(r.gas_used);
-                    // cuda::TxStatus is bit-compatible with kernel::TxStatus
-                    // (same numeric ABI). Reinterpret then convert.
-                    br.status.push_back(convert_status(static_cast<kernel::TxStatus>(
-                        static_cast<uint32_t>(r.status))));
-                    br.output.push_back(std::move(r.output));
-                    br.total_gas += r.gas_used;
-                }
-                if (config.enable_state_trie_gpu)
-                {
-                    if (!compute_state_root_cuda_direct(br))
-                        compute_state_root_gpu(br, LUX_BACKEND_CUDA);
-                }
-                return br;
-            }
-        }
-        // Scheduler-only path: Block-STM on NVIDIA.
-        if (state == nullptr)
-        {
-            auto engine = cuda::BlockStmGpu::create();
-            if (engine)
+            BlockResult br;
+            br.gas_used.reserve(results.size());
+            br.status.reserve(results.size());
+            br.output.reserve(results.size());
+            br.execution_time_ms =
+                std::chrono::duration<double, std::milli>(t1 - t0).count();
+            for (auto& r : results)
             {
-                auto base_state = synthesize_base_state_cuda(txs);
-                auto result = engine->execute_block(txs, base_state);
-                if (config.enable_state_trie_gpu &&
-                    (result.state_root.empty() ||
-                     std::all_of(result.state_root.begin(),
-                                 result.state_root.end(),
-                                 [](uint8_t b){ return b == 0; })))
-                {
-                    if (!compute_state_root_cuda_direct(result))
-                        compute_state_root_gpu(result, LUX_BACKEND_CUDA);
-                }
-                return result;
+                br.gas_used.push_back(r.gas_used);
+                br.status.push_back(convert_status(static_cast<kernel::TxStatus>(
+                    static_cast<uint32_t>(r.status))));
+                br.output.push_back(std::move(r.output));
+                br.total_gas += r.gas_used;
             }
+            apply_call_not_supported_fallback(br, txs, host);
+            if (config.enable_state_trie_gpu)
+            {
+                if (!compute_state_root_cuda_direct(br))
+                    compute_state_root_gpu(br, LUX_BACKEND_CUDA);
+            }
+            return br;
         }
+    }
+    if (host == nullptr && !any_tx_has_code(txs))
+    {
+        auto engine = cuda::BlockStmGpu::create();
+        if (engine)
+        {
+            auto base_state = synthesize_base_state_cuda(txs);
+            auto result = engine->execute_block(txs, base_state);
+            if (config.enable_state_trie_gpu &&
+                (result.state_root.empty() ||
+                 std::all_of(result.state_root.begin(),
+                             result.state_root.end(),
+                             [](uint8_t b){ return b == 0; })))
+            {
+                if (!compute_state_root_cuda_direct(result))
+                    compute_state_root_gpu(result, LUX_BACKEND_CUDA);
+            }
+            return result;
+        }
+        if (config.gas_estimation_mode)
+            return gas_estimation_only(txs);
+        return make_error_result(txs,
+            "GPU_CUDA: BlockStmGpu unavailable and no host provided; cannot "
+            "execute value-transfer txs without a host or fallback.");
+    }
 #endif
-        // CPU Block-STM + GPU state-root keccak fallback.
-        auto result = execute_via_engine(config, txs, state, true);
+    if (host != nullptr)
+    {
+        auto result = execute_via_engine(config, txs, *host, /*parallel=*/true);
         if (config.enable_state_trie_gpu)
         {
 #ifdef EVM_CUDA
@@ -565,9 +693,31 @@ BlockResult execute_block(const Config& config,
         }
         return result;
     }
-    }
+    if (config.gas_estimation_mode)
+        return gas_estimation_only(txs);
+    return make_error_result(txs,
+        "GPU_CUDA: no host and CUDA unavailable. Provide an evmc::Host* "
+        "in `state`, or set Config::gas_estimation_mode for the gas-limit "
+        "shortcut.");
+}
 
-    return execute_via_engine(config, txs, state, false);
+BlockResult execute_block(const Config& config,
+                          const std::vector<Transaction>& txs,
+                          void* state)
+{
+    if (auto err = validate_config(config); !err.empty())
+        return make_error_result(txs, std::move(err));
+
+    auto* host = static_cast<evmc::Host*>(state);
+
+    switch (config.backend)
+    {
+    case Backend::CPU_Sequential: return run_cpu(config, txs, host, /*parallel=*/false);
+    case Backend::CPU_Parallel:   return run_cpu(config, txs, host, /*parallel=*/true);
+    case Backend::GPU_Metal:      return run_metal(config, txs, host);
+    case Backend::GPU_CUDA:       return run_cuda(config, txs, host);
+    }
+    return make_error_result(txs, "unknown backend");
 }
 
 }  // namespace evm::gpu
