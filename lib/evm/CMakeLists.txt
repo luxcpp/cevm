@@ -105,6 +105,46 @@ target_include_directories(evm-gpu PUBLIC
     $<BUILD_INTERFACE:${include_dir}>
 )
 
+# CUDA backend (optional). Adds the .cu kernels and host launchers, and
+# defines EVM_CUDA on evm-gpu so gpu_dispatch.cpp routes through the
+# direct CUDA path.
+if(EVMONE_CUDA)
+    add_library(evm-cuda STATIC
+        gpu/cuda/keccak256.cu
+        gpu/cuda/keccak_host.cpp
+        gpu/cuda/keccak_host.hpp
+        gpu/cuda/tx_validate.cu
+        gpu/cuda/tx_validate_host.cpp
+        gpu/cuda/tx_validate_host.hpp
+        # Stubs (kernels TODO):
+        gpu/cuda/state_table.cu
+        gpu/cuda/state_table_host.hpp
+        gpu/cuda/block_stm.cu
+        gpu/cuda/block_stm_host.hpp
+        gpu/cuda/evm_kernel.cu
+        gpu/cuda/evm_kernel_host.hpp
+    )
+    target_compile_features(evm-cuda PUBLIC cxx_std_20)
+    set_target_properties(evm-cuda PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_include_directories(evm-cuda PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+    target_link_libraries(evm-cuda PUBLIC
+        evm evmc::evmc intx::intx
+        CUDA::cudart
+    )
+
+    # Wire EVM_CUDA into evm-gpu so the dispatcher routes through CUDA.
+    target_compile_definitions(evm-gpu PUBLIC EVM_CUDA)
+    target_link_libraries(evm-gpu PUBLIC evm-cuda)
+endif()
+
 # Block execution benchmark
 add_executable(evm-bench-block gpu/bench_block.cpp)
 target_compile_features(evm-bench-block PRIVATE cxx_std_20)

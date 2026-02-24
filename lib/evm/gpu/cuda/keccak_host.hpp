@@ -1,0 +1,80 @@
+// Copyright (C) 2026, The evmone Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+/// @file keccak_host.hpp
+/// C++ host-side interface for CUDA-accelerated Keccak-256 hashing.
+///
+/// API mirrors metal/keccak_host.hpp so the dispatcher can swap backends.
+/// Compiled only when EVM_CUDA is defined and a working CUDA toolchain
+/// is available at build time. When CUDA is unavailable at runtime
+/// (e.g. no NVIDIA device), KeccakHasher::create() returns nullptr.
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <vector>
+
+namespace evm::gpu::cuda
+{
+
+/// A single hash input: pointer to data and its length in bytes.
+/// Same layout as metal::HashInput.
+struct HashInput
+{
+    const uint8_t* data;
+    uint32_t length;
+};
+
+/// GPU-accelerated Keccak-256 batch hasher using NVIDIA CUDA.
+///
+/// Manages a CUDA stream and reusable device buffers for the input
+/// descriptor table, packed input bytes, and output digests. Buffers
+/// are sized on demand and held for subsequent calls to amortize
+/// allocation cost across batches.
+///
+/// Thread-safe for batch_hash calls from a single thread. Create one
+/// instance per thread if concurrent hashing is needed.
+class KeccakHasher
+{
+public:
+    virtual ~KeccakHasher() = default;
+
+    /// Create a KeccakHasher. Returns nullptr if CUDA is unavailable
+    /// (no driver, no device, or build-time CUDA support disabled).
+    static std::unique_ptr<KeccakHasher> create();
+
+    /// Hash a batch of inputs in parallel on the GPU.
+    ///
+    /// @param inputs     Array of (data, length) pairs.
+    /// @param num_inputs Number of inputs to hash.
+    /// @return           Flat vector of 32 * num_inputs bytes. Each
+    ///                   consecutive 32-byte slice is the Keccak-256
+    ///                   digest of the corresponding input.
+    virtual std::vector<uint8_t> batch_hash(
+        const HashInput* inputs, size_t num_inputs) = 0;
+
+    /// Convenience overload for span.
+    std::vector<uint8_t> batch_hash(std::span<const HashInput> inputs)
+    {
+        return batch_hash(inputs.data(), inputs.size());
+    }
+
+    /// Get the CUDA device name (for diagnostics).
+    virtual const char* device_name() const = 0;
+
+protected:
+    KeccakHasher() = default;
+    KeccakHasher(const KeccakHasher&) = delete;
+    KeccakHasher& operator=(const KeccakHasher&) = delete;
+};
+
+/// CPU reference implementation of Keccak-256 (single input).
+/// Used for correctness verification and benchmark comparison.
+/// Identical to metal::keccak256_cpu but in the cuda namespace so it
+/// can stand alone when only the CUDA backend is built.
+void keccak256_cpu(const uint8_t* data, size_t length, uint8_t out[32]);
+
+}  // namespace evm::gpu::cuda
