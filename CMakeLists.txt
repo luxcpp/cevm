@@ -13,6 +13,7 @@ option(COVERAGE "Build with coverage instrumentation" OFF)
 option(ASSERTIONS "Force enable the assertions in the code ignoring the CMAKE_BUILD_TYPE default" OFF)
 option(EVMONE_TESTING "Build tests and test tools" OFF)
 option(EVMONE_FUZZING "Instrument libraries and build fuzzing tools" OFF)
+option(EVMONE_CUDA "Enable CUDA backend (NVIDIA GPU acceleration)" OFF)
 
 include(cmake/cable/bootstrap.cmake)
 include(CableBuildType)
@@ -28,6 +29,23 @@ include(Hunter/init)
 
 project(evm LANGUAGES CXX C OBJCXX)
 set(PROJECT_VERSION 0.19.0)
+
+# CUDA backend (optional). Requires CUDA Toolkit 11.8+.
+# Targets compute capability 7.0+ (Turing, Ampere, Hopper, Ada).
+if(EVMONE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit 11.8 REQUIRED)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        # 70 = Volta/Turing, 80 = Ampere, 89 = Ada, 90 = Hopper.
+        set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+    endif()
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+    message(STATUS "CUDA backend: ENABLED (CUDA ${CUDAToolkit_VERSION}, archs: ${CMAKE_CUDA_ARCHITECTURES})")
+else()
+    message(STATUS "CUDA backend: DISABLED (-DEVMONE_CUDA=ON to enable)")
+endif()
 
 string(REGEX MATCH "([0-9]+)\\.([0-9]+)" _ ${PROJECT_VERSION})
 set(PROJECT_VERSION_MAJOR ${CMAKE_MATCH_1})

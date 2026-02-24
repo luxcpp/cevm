@@ -5,7 +5,13 @@
 #include "gpu_state_hasher.hpp"
 #include "parallel_engine.hpp"
 
+#ifdef EVM_CUDA
+#include "cuda/keccak_host.hpp"
+#endif
+
 #include <chrono>
+#include <cstring>
+#include <memory>
 #include <thread>
 
 namespace evm::gpu
@@ -115,22 +121,10 @@ static BlockResult execute_via_engine(const Config& config,
     return result;
 }
 
-/// Compute the state root hash using GPU-accelerated Keccak-256.
-/// For each transaction's storage writes, batch-hash the keys and values
-/// that form the state trie. Returns a 32-byte root hash.
-static void compute_state_root_gpu(BlockResult& result, LuxBackend lux_backend)
+/// Build the state-root input bytes (concatenated gas_used as little-endian).
+/// Used by both the luxcpp/gpu path and the direct-CUDA path below.
+static std::vector<uint8_t> build_state_root_input(const BlockResult& result)
 {
-    if (result.state_root.empty())
-        result.state_root.resize(32, 0);
-
-    // The state root is a Keccak-256 hash of the concatenated gas_used values
-    // as a minimal proof-of-concept. A real implementation would hash the
-    // post-execution state trie. This demonstrates the GPU hashing path.
-    GpuStateHasher hasher(lux_backend);
-    if (!hasher.available())
-        return;
-
-    // Build input: concatenate gas_used as bytes
     std::vector<uint8_t> data;
     data.reserve(result.gas_used.size() * 8);
     for (auto g : result.gas_used)
@@ -138,10 +132,57 @@ static void compute_state_root_gpu(BlockResult& result, LuxBackend lux_backend)
         for (int i = 0; i < 8; ++i)
             data.push_back(static_cast<uint8_t>(g >> (i * 8)));
     }
+    return data;
+}
 
+/// Compute the state root hash using luxcpp/gpu's pluggable backend.
+/// For each transaction's storage writes, batch-hash the keys and values
+/// that form the state trie. Returns a 32-byte root hash.
+///
+/// This is the fallback path used when the direct CUDA backend is not
+/// compiled in. The luxcpp/gpu library may itself fall back to CPU if
+/// the requested backend (LUX_BACKEND_METAL / _CUDA) is unavailable.
+static void compute_state_root_gpu(BlockResult& result, LuxBackend lux_backend)
+{
+    if (result.state_root.empty())
+        result.state_root.resize(32, 0);
+
+    GpuStateHasher hasher(lux_backend);
+    if (!hasher.available())
+        return;
+
+    auto data = build_state_root_input(result);
     size_t len = data.size();
     hasher.hash(data.data(), len, result.state_root.data());
 }
+
+#ifdef EVM_CUDA
+/// Compute the state root using the direct CUDA Keccak path
+/// (lib/evm/gpu/cuda/keccak256.cu). Returns true on success.
+///
+/// This path bypasses luxcpp/gpu's plugin loader and calls the kernel
+/// directly via the CUDA Runtime API. Falls back silently if no CUDA
+/// device is present.
+static bool compute_state_root_cuda_direct(BlockResult& result)
+{
+    static thread_local std::unique_ptr<cuda::KeccakHasher> hasher =
+        cuda::KeccakHasher::create();
+    if (!hasher)
+        return false;
+
+    if (result.state_root.empty())
+        result.state_root.resize(32, 0);
+
+    auto data = build_state_root_input(result);
+    cuda::HashInput input{data.data(), static_cast<uint32_t>(data.size())};
+    auto digest = hasher->batch_hash(&input, 1);
+    if (digest.size() < 32)
+        return false;
+
+    std::memcpy(result.state_root.data(), digest.data(), 32);
+    return true;
+}
+#endif  // EVM_CUDA
 
 BlockResult execute_block(const Config& config,
                           const std::vector<Transaction>& txs,
@@ -177,9 +218,22 @@ BlockResult execute_block(const Config& config,
 
     case Backend::GPU_CUDA:
     {
+        // Execute transactions via CPU parallel (Block-STM) for now —
+        // the GPU EVM interpreter (cuda/evm_kernel.cu) is still a stub.
+        // Once ported, this path will dispatch evm_execute on device.
         auto result = execute_via_engine(config, txs, state, true);
         if (config.enable_state_trie_gpu)
+        {
+#ifdef EVM_CUDA
+            // Prefer the direct CUDA Keccak path. If no NVIDIA device
+            // is present, fall back to luxcpp/gpu (which itself falls
+            // back to CPU if its CUDA plugin isn't loaded).
+            if (!compute_state_root_cuda_direct(result))
+                compute_state_root_gpu(result, LUX_BACKEND_CUDA);
+#else
             compute_state_root_gpu(result, LUX_BACKEND_CUDA);
+#endif
+        }
         return result;
     }
     }
