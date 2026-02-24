@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define EVM_GPU_ABI_VERSION 3
+#define EVM_GPU_ABI_VERSION 4
 
 // Backend constants — must match evm::gpu::Backend.
 #define EVM_GPU_BACKEND_CPU_SEQUENTIAL 0
@@ -27,6 +27,24 @@ extern "C" {
 #define EVM_GPU_TX_OOG             3
 #define EVM_GPU_TX_ERROR           4
 #define EVM_GPU_TX_CALL_NOT_SUPP   5
+
+// EVM revision constants — numeric values match enum evmc_revision in
+// evmc/evmc.h. Listed for completeness; Go callers should pass the raw
+// uint8 from the evmc binding's Revision constants.
+#define EVM_GPU_REV_FRONTIER         0
+#define EVM_GPU_REV_HOMESTEAD        1
+#define EVM_GPU_REV_TANGERINE        2
+#define EVM_GPU_REV_SPURIOUS         3
+#define EVM_GPU_REV_BYZANTIUM        4
+#define EVM_GPU_REV_CONSTANTINOPLE   5
+#define EVM_GPU_REV_PETERSBURG       6
+#define EVM_GPU_REV_ISTANBUL         7
+#define EVM_GPU_REV_BERLIN           8
+#define EVM_GPU_REV_LONDON           9
+#define EVM_GPU_REV_PARIS           10
+#define EVM_GPU_REV_SHANGHAI        11
+#define EVM_GPU_REV_CANCUN          12
+#define EVM_GPU_REV_DEFAULT         EVM_GPU_REV_CANCUN
 
 typedef struct {
     uint8_t  from[20];
@@ -75,11 +93,16 @@ CGpuBlockResult gpu_execute_block(
 
 // Extended block execution: returns state root + per-tx status.
 // num_threads=0 selects hardware concurrency for CPU_PARALLEL.
+// revision is an evmc_revision value (e.g. EVM_GPU_REV_CANCUN). It governs
+// the evmone fallback path; kernel CPU/GPU paths implement Cancun
+// unconditionally and ignore this field. Pass EVM_GPU_REV_DEFAULT for the
+// production default (Cancun).
 CGpuBlockResultV2 gpu_execute_block_v2(
     const CGpuTx* txs,
     uint32_t      num_txs,
     uint8_t       backend,
-    uint32_t      num_threads
+    uint32_t      num_threads,
+    uint8_t       revision
 );
 
 void gpu_free_result(CGpuBlockResult* result);
