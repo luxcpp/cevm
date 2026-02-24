@@ -496,7 +496,12 @@ kernel void evm_execute(
 
     #define CODE_BYTE(idx) ((idx) < cached_size ? code_cache[(idx)] : code_dev[(idx)])
 
-    uint256 stack[32];
+    // EVM Yellow Paper: 1024-deep stack. Solidity-emitted bytecode regularly
+    // hits 30-50 entries; the previous 32-cap silently truncated real
+    // contracts and diverged from CPU evmone. The array lives in thread-
+    // local storage; Metal automatically backs it with device memory when
+    // it exceeds the register file (32 KB per thread here).
+    uint256 stack[1024];
     uint sp = 0;
     ulong gas = inp.gas_limit;
     ulong refund_counter = 0;
@@ -606,7 +611,7 @@ kernel void evm_execute(
 
         case 0x30:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = inp.address; ++pc; continue;
         case 0x31: {
             if (gas < GAS_BALANCE) OOG(); gas -= GAS_BALANCE;
@@ -616,15 +621,15 @@ kernel void evm_execute(
         }
         case 0x32:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = block_ctx->origin; ++pc; continue;
         case 0x33:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = inp.caller; ++pc; continue;
         case 0x34:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = inp.value; ++pc; continue;
         case 0x35: {
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
@@ -638,7 +643,7 @@ kernel void evm_execute(
         }
         case 0x36:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(gpu_u64(calldata_size)); ++pc; continue;
         case 0x37: { // CALLDATACOPY
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
@@ -663,7 +668,7 @@ kernel void evm_execute(
         }
         case 0x38:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(gpu_u64(code_size)); ++pc; continue;
         case 0x39: { // CODECOPY
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
@@ -688,7 +693,7 @@ kernel void evm_execute(
         }
         case 0x3a:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(block_ctx->gas_price); ++pc; continue;
         case 0x3b: {
             if (gas < GAS_EXTCODE) OOG(); gas -= GAS_EXTCODE;
@@ -716,7 +721,7 @@ kernel void evm_execute(
         }
         case 0x3d:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_zero();
             ++pc; continue;
         case 0x3e: {
@@ -746,35 +751,35 @@ kernel void evm_execute(
         }
         case 0x41:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = block_ctx->coinbase; ++pc; continue;
         case 0x42:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(block_ctx->timestamp); ++pc; continue;
         case 0x43:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(block_ctx->number); ++pc; continue;
         case 0x44:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = block_ctx->prevrandao; ++pc; continue;
         case 0x45:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(block_ctx->gas_limit); ++pc; continue;
         case 0x46:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(block_ctx->chain_id); ++pc; continue;
         case 0x47:
             if (gas < GAS_SELFBALANCE) OOG(); gas -= GAS_SELFBALANCE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_zero(); ++pc; continue;
         case 0x48:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(block_ctx->base_fee); ++pc; continue;
         case 0x49: {
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
@@ -792,7 +797,7 @@ kernel void evm_execute(
         }
         case 0x4a:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(block_ctx->blob_base_fee); ++pc; continue;
 
         case 0x50:
@@ -875,15 +880,15 @@ kernel void evm_execute(
 
         case 0x58:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(gpu_u64(pc)); ++pc; continue;
         case 0x59:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(gpu_u64(mem_size)); ++pc; continue;
         case 0x5a:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(gas); ++pc; continue;
         case 0x5b:
             if (gas < GAS_JUMPDEST) OOG(); gas -= GAS_JUMPDEST;
@@ -938,12 +943,12 @@ kernel void evm_execute(
         }
         case 0x5f:
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_zero(); ++pc; continue;
 
         case 0x60: {
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             gpu_u64 push_val = gpu_u64((pc+1 < code_size) ? CODE_BYTE(pc+1) : 0);
             if (pc + 2 < code_size) {
                 uchar next_op = CODE_BYTE(pc + 2);
@@ -963,7 +968,7 @@ kernel void evm_execute(
         case 0x8c: case 0x8d: case 0x8e: case 0x8f: {
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
             uint n = op - 0x80 + 1;
-            if (n > sp || sp >= 32) ERR();
+            if (n > sp || sp >= 1024) ERR();
             stack[sp] = stack[sp - n]; ++sp; ++pc; continue;
         }
 
@@ -1038,7 +1043,7 @@ kernel void evm_execute(
 
         if (op >= 0x61 && op <= 0x7f) {
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             uint n = op - 0x60 + 1;
             uint256 val = u256_zero();
             uint start = pc + 1;
