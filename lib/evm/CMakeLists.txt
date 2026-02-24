@@ -161,6 +161,60 @@ if(LUXCPP_GPU_FOUND)
     target_link_libraries(evm-test-modes PRIVATE evm-gpu evm evmc::evmc)
 endif()
 
+# GPU precompile dispatcher (lib/evm/gpu/precompiles/).
+add_library(evm-precompiles STATIC
+    gpu/precompiles/precompile_dispatch.cpp
+    gpu/precompiles/precompile_dispatch.hpp
+    gpu/precompiles/internal.hpp
+    gpu/precompiles/ecrecover_cpu.cpp
+    gpu/precompiles/sha256_cpu.cpp
+    gpu/precompiles/ripemd160_cpu.cpp
+    gpu/precompiles/identity.cpp
+    gpu/precompiles/modexp_cpu.cpp
+    gpu/precompiles/blake2f_cpu.cpp
+    gpu/precompiles/bn256_cpu.cpp
+    gpu/precompiles/point_eval_cpu.cpp
+    gpu/precompiles/bls12_381_cpu.cpp
+)
+target_compile_features(evm-precompiles PUBLIC cxx_std_20)
+target_link_libraries(evm-precompiles PUBLIC evmone::precompiles intx::intx)
+target_include_directories(evm-precompiles PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${include_dir}>
+)
+if(LUXCPP_GPU_FOUND)
+    target_link_libraries(evm-precompiles PUBLIC luxgpu_core_static)
+endif()
+if(APPLE AND LUXCPP_GPU_FOUND)
+    target_sources(evm-precompiles PRIVATE
+        gpu/precompiles/ecrecover_metal.mm
+        gpu/precompiles/bls12_381_metal.mm
+        gpu/precompiles/point_eval_metal.mm
+    )
+    target_link_libraries(evm-precompiles PUBLIC "-framework Metal" "-framework Foundation")
+endif()
+if(EVMONE_CUDA AND LUXCPP_GPU_FOUND)
+    target_sources(evm-precompiles PRIVATE
+        gpu/precompiles/ecrecover_cuda.cpp
+        gpu/precompiles/bls12_381_cuda.cpp
+    )
+    target_compile_definitions(evm-precompiles PUBLIC EVM_CUDA)
+endif()
+
+find_package(GTest CONFIG QUIET)
+if(GTest_FOUND)
+    add_executable(evm-precompile-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/precompile_test.cpp
+    )
+    target_compile_features(evm-precompile-test PRIVATE cxx_std_20)
+    target_include_directories(evm-precompile-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${include_dir}
+    )
+    target_link_libraries(evm-precompile-test PRIVATE
+        evm-precompiles GTest::gtest GTest::gtest_main evmc::evmc
+    )
+endif()
+
 # GPU EVM kernel interpreter (header-only library for CPU path)
 add_library(evm-kernel INTERFACE)
 target_include_directories(evm-kernel INTERFACE
@@ -279,5 +333,94 @@ if(APPLE AND LUXCPP_GPU_FOUND)
         evm evm-gpu luxgpu_core_static
         evm-kernel-metal
         "-framework Metal" "-framework Foundation"
+    )
+endif()
+
+# Unified pipeline: EVM + consensus state hash + post-quantum sigs on one
+# device, sharing a single LuxGPU handle. Built next to the legacy
+# GpuPipeline (pipeline.hpp) for backwards compatibility.
+if(APPLE AND LUXCPP_GPU_FOUND)
+    add_library(evm-unified-pipeline STATIC
+        gpu/unified_pipeline.cpp
+        gpu/unified_pipeline.hpp
+    )
+    target_compile_features(evm-unified-pipeline PUBLIC cxx_std_20)
+    target_include_directories(evm-unified-pipeline PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+    target_link_libraries(evm-unified-pipeline PUBLIC
+        evm-metal-hosts evm-gpu luxgpu_core_static
+        evm evmc::evmc intx::intx
+        "-framework Metal" "-framework Foundation"
+    )
+
+    add_executable(evm-unified-pipeline-test gpu/test_unified_pipeline.cpp)
+    target_compile_features(evm-unified-pipeline-test PRIVATE cxx_std_20)
+    target_compile_definitions(evm-unified-pipeline-test PRIVATE
+        LUX_GPU_BACKEND_PATH_DEFAULT="${CMAKE_CURRENT_BINARY_DIR}/luxcpp-gpu"
+    )
+    target_link_libraries(evm-unified-pipeline-test PRIVATE
+        evm-unified-pipeline
+    )
+elseif(LUXCPP_GPU_FOUND)
+    # Non-Apple: header still usable, .cpp builds with CPU fallback paths only.
+    add_library(evm-unified-pipeline STATIC
+        gpu/unified_pipeline.cpp
+        gpu/unified_pipeline.hpp
+    )
+    target_compile_features(evm-unified-pipeline PUBLIC cxx_std_20)
+    target_include_directories(evm-unified-pipeline PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+    target_link_libraries(evm-unified-pipeline PUBLIC
+        evm-gpu luxgpu_core_static
+        evm evmc::evmc intx::intx
+    )
+endif()
+
+# -----------------------------------------------------------------------------
+# EVMC Host bridge (feat/gpu-host-bridge).
+#
+# Turns evmc::Host* into a code dictionary that the GPU EVM kernel can run
+# against. Pure leaf transactions and statically call-resolvable transactions
+# go through the bridge; everything else falls back to evmone via the
+# dispatcher.
+# -----------------------------------------------------------------------------
+add_library(evm-host-bridge STATIC
+    gpu/host/evmc_bridge.cpp
+    gpu/host/code_resolver.cpp
+)
+target_compile_features(evm-host-bridge PUBLIC cxx_std_20)
+target_link_libraries(evm-host-bridge
+    PUBLIC evmc::evmc evm-gpu evm
+    PRIVATE evmone::precompiles)
+target_include_directories(evm-host-bridge PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${include_dir}>
+)
+if(APPLE)
+    target_sources(evm-host-bridge PRIVATE gpu/host/frame_metal.mm)
+    target_link_libraries(evm-host-bridge PUBLIC evm-kernel-metal)
+endif()
+if(EVMONE_CUDA)
+    target_sources(evm-cuda PRIVATE gpu/host/frame_cuda.cu)
+endif()
+
+# Self-contained host bridge unit-test executable. Uses the GoogleTest already
+# pulled in by Hunter so we don't need the full evmone test framework.
+hunter_add_package(GTest)
+find_package(GTest CONFIG QUIET)
+if(GTest_FOUND)
+    add_executable(evm-test-host-bridge
+        ${PROJECT_SOURCE_DIR}/test/unittests/host_bridge_test.cpp
+    )
+    target_compile_features(evm-test-host-bridge PRIVATE cxx_std_20)
+    target_link_libraries(evm-test-host-bridge PRIVATE
+        evm-host-bridge evm-gpu evm evmc::evmc
+        GTest::gtest GTest::gtest_main
     )
 endif()
