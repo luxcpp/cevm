@@ -282,6 +282,25 @@ if(GTest_FOUND)
             evm-metal-hosts evm-kernel-metal
         )
     endif()
+
+    # Dispatcher unit tests: routing matrix, CallNotSupported fallback,
+    # status-code translation, gas-estimation gating, fast_value_transfer
+    # acknowledgement guard. See test/unittests/dispatch_test.cpp.
+    add_executable(dispatch-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/dispatch_test.cpp
+    )
+    target_compile_features(dispatch-test PRIVATE cxx_std_20)
+    target_include_directories(dispatch-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${include_dir}
+    )
+    target_link_libraries(dispatch-test PRIVATE
+        evm-gpu evm evmc::evmc GTest::gtest GTest::gtest_main
+    )
+    if(APPLE)
+        target_link_libraries(dispatch-test PRIVATE
+            evm-metal-hosts evm-kernel-metal
+        )
+    endif()
 endif()
 
 # GPU EVM kernel interpreter (header-only library for CPU path)
