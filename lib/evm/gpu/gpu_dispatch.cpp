@@ -5,9 +5,13 @@
 #include "gpu_state_hasher.hpp"
 #include "parallel_engine.hpp"
 
+// The kernel CPU interpreter (kernel::execute_cpu) is header-only and used
+// by all platforms — the CPU paths route bytecode through it whenever the
+// caller passes `state == nullptr`, so the four backends share semantics.
+#include "kernel/evm_kernel_host.hpp"
+
 #ifdef __APPLE__
 #include "metal/block_stm_host.hpp"
-#include "kernel/evm_kernel_host.hpp"
 #endif
 
 #ifdef EVM_CUDA
@@ -16,6 +20,8 @@
 #include "cuda/evm_kernel_host.hpp"
 #endif
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -202,38 +208,117 @@ static bool any_tx_has_code(const std::vector<Transaction>& txs)
     return false;
 }
 
+/// Convert a dispatch-layer Transaction into the kernel's HostTransaction.
+/// Used by both the CPU bytecode path (kernel::execute_cpu) and the GPU
+/// bytecode paths so all four backends consume the same input shape.
+static kernel::HostTransaction to_kernel_tx(const Transaction& tx)
+{
+    kernel::HostTransaction h;
+    h.code      = tx.code;
+    h.calldata  = tx.data;
+    h.gas_limit = tx.gas_limit;
+
+    auto pack_addr = [](kernel::uint256& dst, const std::vector<uint8_t>& addr) {
+        std::memset(&dst, 0, sizeof(dst));
+        if (addr.size() >= 20)
+            std::memcpy(&dst, addr.data(), 20);
+    };
+    auto pack_u64 = [](kernel::uint256& dst, uint64_t v) {
+        std::memset(&dst, 0, sizeof(dst));
+        auto* limbs = reinterpret_cast<uint64_t*>(&dst);
+        limbs[0] = v;
+    };
+
+    pack_addr(h.caller, tx.from);
+    pack_addr(h.address, tx.to);
+    pack_u64(h.value, tx.value);
+    return h;
+}
+
+static TxStatus convert_status(kernel::TxStatus s)
+{
+    switch (s)
+    {
+    case kernel::TxStatus::Stop:             return TxStatus::Stop;
+    case kernel::TxStatus::Return:           return TxStatus::Return;
+    case kernel::TxStatus::Revert:           return TxStatus::Revert;
+    case kernel::TxStatus::OutOfGas:         return TxStatus::OutOfGas;
+    case kernel::TxStatus::Error:            return TxStatus::Error;
+    case kernel::TxStatus::CallNotSupported: return TxStatus::CallNotSupported;
+    }
+    return TxStatus::Error;
+}
+
+/// Run every tx through the kernel CPU interpreter (kernel::execute_cpu),
+/// which is the same interpreter that the Metal/CUDA kernels emulate. This
+/// is the CPU reference path for parity testing — gas, status, and output
+/// match the GPU backends byte-for-byte.
+static BlockResult execute_kernel_cpu(const std::vector<Transaction>& txs,
+                                      bool parallel,
+                                      uint32_t num_threads)
+{
+    const auto n = txs.size();
+    BlockResult br;
+    br.gas_used.resize(n);
+    br.status.resize(n, TxStatus::Error);
+    br.output.resize(n);
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    auto run_one = [&](size_t i) {
+        auto kt = to_kernel_tx(txs[i]);
+        auto r  = kernel::execute_cpu(kt);
+        br.gas_used[i] = r.gas_used;
+        br.status[i]   = convert_status(r.status);
+        br.output[i]   = std::move(r.output);
+    };
+
+    if (parallel && n > 1)
+    {
+        if (num_threads == 0)
+            num_threads = std::max(1u, std::thread::hardware_concurrency());
+        const auto workers = std::min<size_t>(num_threads, n);
+
+        std::vector<std::thread> threads;
+        threads.reserve(workers);
+        std::atomic<size_t> next{0};
+        for (size_t w = 0; w < workers; ++w)
+        {
+            threads.emplace_back([&] {
+                for (;;)
+                {
+                    auto i = next.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= n) return;
+                    run_one(i);
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+    }
+    else
+    {
+        for (size_t i = 0; i < n; ++i)
+            run_one(i);
+    }
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    br.execution_time_ms =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+    for (auto g : br.gas_used) br.total_gas += g;
+    return br;
+}
+
 #ifdef __APPLE__
 /// Build a HostTransaction batch for the Metal EVM kernel from dispatch txs.
-/// Pack uint64 value/balance into the low limbs of the kernel's uint256.
+/// Thin wrapper around `to_kernel_tx` (which is shared with the CPU bytecode
+/// path so the four backends consume identical inputs).
 [[maybe_unused]] static std::vector<kernel::HostTransaction>
 to_host_transactions(const std::vector<Transaction>& txs)
 {
     std::vector<kernel::HostTransaction> out;
     out.reserve(txs.size());
     for (const auto& tx : txs)
-    {
-        kernel::HostTransaction h;
-        h.code      = tx.code;
-        h.calldata  = tx.data;
-        h.gas_limit = tx.gas_limit;
-
-        auto pack_addr = [](kernel::uint256& dst, const std::vector<uint8_t>& addr) {
-            std::memset(&dst, 0, sizeof(dst));
-            if (addr.size() >= 20) {
-                std::memcpy(&dst, addr.data(), 20);
-            }
-        };
-        auto pack_u64 = [](kernel::uint256& dst, uint64_t v) {
-            std::memset(&dst, 0, sizeof(dst));
-            auto* limbs = reinterpret_cast<uint64_t*>(&dst);
-            limbs[0] = v;
-        };
-
-        pack_addr(h.caller, tx.from);
-        pack_addr(h.address, tx.to);
-        pack_u64(h.value, tx.value);
-        out.push_back(std::move(h));
-    }
+        out.push_back(to_kernel_tx(tx));
     return out;
 }
 
@@ -299,6 +384,15 @@ BlockResult execute_block(const Config& config,
     {
     case Backend::CPU_Sequential:
     {
+        // When the caller has bytecode but no host, route through the kernel
+        // CPU interpreter so CPU and GPU paths share semantics (parity).
+        if (state == nullptr && any_tx_has_code(txs))
+        {
+            auto br = execute_kernel_cpu(txs, /*parallel=*/false, 0);
+            if (config.enable_state_trie_gpu)
+                compute_state_root_gpu(br, LUX_BACKEND_CPU);
+            return br;
+        }
         auto result = execute_via_engine(config, txs, state, false);
         if (config.enable_state_trie_gpu)
             compute_state_root_gpu(result, LUX_BACKEND_CPU);
@@ -307,6 +401,13 @@ BlockResult execute_block(const Config& config,
 
     case Backend::CPU_Parallel:
     {
+        if (state == nullptr && any_tx_has_code(txs))
+        {
+            auto br = execute_kernel_cpu(txs, /*parallel=*/true, config.num_threads);
+            if (config.enable_state_trie_gpu)
+                compute_state_root_gpu(br, LUX_BACKEND_CPU);
+            return br;
+        }
         auto result = execute_via_engine(config, txs, state, true);
         if (config.enable_state_trie_gpu)
             compute_state_root_gpu(result, LUX_BACKEND_CPU);
@@ -332,11 +433,15 @@ BlockResult execute_block(const Config& config,
 
                 BlockResult br;
                 br.gas_used.reserve(results.size());
+                br.status.reserve(results.size());
+                br.output.reserve(results.size());
                 br.execution_time_ms =
                     std::chrono::duration<double, std::milli>(t1 - t0).count();
-                for (const auto& r : results)
+                for (auto& r : results)
                 {
                     br.gas_used.push_back(r.gas_used);
+                    br.status.push_back(convert_status(r.status));
+                    br.output.push_back(std::move(r.output));
                     br.total_gas += r.gas_used;
                 }
                 if (config.enable_state_trie_gpu)
@@ -404,11 +509,18 @@ BlockResult execute_block(const Config& config,
 
                 BlockResult br;
                 br.gas_used.reserve(results.size());
+                br.status.reserve(results.size());
+                br.output.reserve(results.size());
                 br.execution_time_ms =
                     std::chrono::duration<double, std::milli>(t1 - t0).count();
-                for (const auto& r : results)
+                for (auto& r : results)
                 {
                     br.gas_used.push_back(r.gas_used);
+                    // cuda::TxStatus is bit-compatible with kernel::TxStatus
+                    // (same numeric ABI). Reinterpret then convert.
+                    br.status.push_back(convert_status(static_cast<kernel::TxStatus>(
+                        static_cast<uint32_t>(r.status))));
+                    br.output.push_back(std::move(r.output));
                     br.total_gas += r.gas_used;
                 }
                 if (config.enable_state_trie_gpu)

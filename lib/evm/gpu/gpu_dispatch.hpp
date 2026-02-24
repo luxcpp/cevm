@@ -42,11 +42,31 @@ struct Config
     bool enable_precompile_gpu = false;  ///< Offload precompiles to GPU
 };
 
+/// Per-tx execution status. Mirrors kernel::TxStatus so all backends
+/// (CPU sequential, CPU parallel, Metal, CUDA) report the same coding.
+///   0 = Stop, 1 = Return, 2 = Revert, 3 = OutOfGas, 4 = Error,
+///   5 = CallNotSupported (GPU kernel rejects external CALLs).
+enum class TxStatus : uint32_t
+{
+    Stop             = 0,
+    Return           = 1,
+    Revert           = 2,
+    OutOfGas         = 3,
+    Error            = 4,
+    CallNotSupported = 5,
+};
+
 /// Result of executing a block of transactions.
 struct BlockResult
 {
     std::vector<uint8_t> state_root;   ///< Post-execution state root (32 bytes)
     std::vector<uint64_t> gas_used;    ///< Gas used per transaction
+    /// Per-tx execution status. Populated when `txs[i].code` is non-empty AND
+    /// `state == nullptr` (i.e. the dispatch routes through the kernel CPU/GPU
+    /// path). Empty otherwise.
+    std::vector<TxStatus> status;
+    /// Per-tx return-data bytes. Populated alongside `status`.
+    std::vector<std::vector<uint8_t>> output;
     uint64_t total_gas = 0;
     double execution_time_ms = 0.0;    ///< Wall-clock execution time
     uint32_t conflicts = 0;            ///< Number of Block-STM conflicts (parallel only)

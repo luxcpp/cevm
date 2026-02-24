@@ -14,6 +14,12 @@ option(ASSERTIONS "Force enable the assertions in the code ignoring the CMAKE_BU
 option(EVMONE_TESTING "Build tests and test tools" OFF)
 option(EVMONE_FUZZING "Instrument libraries and build fuzzing tools" OFF)
 option(EVMONE_CUDA "Enable CUDA backend (NVIDIA GPU acceleration)" OFF)
+# luxcpp/evm targeted coverage. Distinct from -DCOVERAGE which instruments
+# every TU in the project; LUXCPP_EVM_COVERAGE only instruments the targets
+# that constitute the four-backend parity surface (evm, evm-gpu,
+# evm-kernel-metal, evm-cuda) so the report is focused on the opcode
+# dispatch paths rather than CMake helpers / Hunter packages.
+option(LUXCPP_EVM_COVERAGE "Instrument the four-backend EVM targets with LLVM source-based coverage" OFF)
 
 include(cmake/cable/bootstrap.cmake)
 include(CableBuildType)
