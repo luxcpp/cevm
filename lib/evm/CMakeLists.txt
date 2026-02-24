@@ -123,7 +123,9 @@ if(EVMONE_CUDA)
         gpu/cuda/state_table_host.hpp
         gpu/cuda/block_stm.cu
         gpu/cuda/block_stm_host.hpp
+        # EVM interpreter (ported from evm_kernel.metal):
         gpu/cuda/evm_kernel.cu
+        gpu/cuda/evm_kernel_host.cpp
         gpu/cuda/evm_kernel_host.hpp
     )
     target_compile_features(evm-cuda PUBLIC cxx_std_20)
