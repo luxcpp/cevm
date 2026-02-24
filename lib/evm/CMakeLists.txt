@@ -87,6 +87,8 @@ add_library(evm-gpu STATIC
     gpu/gpu_dispatch.cpp
     gpu/gpu_dispatch.hpp
     gpu/gpu_state_hasher.hpp
+    gpu/go_bridge.cpp
+    gpu/go_bridge.h
     gpu/mv_memory.cpp
     gpu/mv_memory.hpp
     gpu/parallel_engine.cpp
