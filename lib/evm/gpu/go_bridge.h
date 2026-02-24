@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define EVM_GPU_ABI_VERSION 2
+#define EVM_GPU_ABI_VERSION 3
 
 // Backend constants — must match evm::gpu::Backend.
 #define EVM_GPU_BACKEND_CPU_SEQUENTIAL 0
