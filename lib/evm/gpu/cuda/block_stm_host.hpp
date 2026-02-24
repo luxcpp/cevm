@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file block_stm_host.hpp
-/// CUDA host interface for GPU Block-STM — STUB.
+/// CUDA host interface for GPU Block-STM execution.
 ///
-/// Mirrors the API of metal/block_stm_host.hpp so the dispatcher can
-/// switch backends without changing call sites. The CUDA implementation
-/// is pending; BlockStmGpu::create() returns nullptr today, and the
-/// dispatcher falls back to the CPU parallel scheduler.
+/// Mirrors the API of metal/block_stm_host.hpp so the dispatcher can swap
+/// backends transparently. The CUDA backend dispatches the same
+/// optimistic-concurrency-control loop on an NVIDIA GPU via block_stm.cu.
 
 #pragma once
 
@@ -21,7 +20,7 @@
 namespace evm::gpu::cuda
 {
 
-// -- GPU-side struct mirrors (must match block_stm.cu when ported) ------------
+// -- GPU-side struct mirrors (must match block_stm.cu byte-for-byte) ----------
 
 static constexpr uint32_t MAX_TXS            = 4096;
 static constexpr uint32_t MAX_READS_PER_TX   = 64;
@@ -75,6 +74,23 @@ struct GpuTxState
     uint32_t write_count;
 };
 
+struct GpuReadSetEntry
+{
+    uint8_t  address[20];
+    uint32_t _pad;
+    uint8_t  slot[32];
+    uint32_t read_tx_index;
+    uint32_t read_incarnation;
+};
+
+struct GpuWriteSetEntry
+{
+    uint8_t  address[20];
+    uint32_t _pad;
+    uint8_t  slot[32];
+    uint8_t  value[32];
+};
+
 struct GpuBlockStmResult
 {
     uint64_t gas_used;
@@ -88,23 +104,19 @@ struct GpuBlockStmParams
     uint32_t max_iterations;
 };
 
-// -- Public interface (stub) --------------------------------------------------
+// -- Public interface ---------------------------------------------------------
 
-/// Returns false until block_stm.cu is fully ported.
-inline bool block_stm_cuda_available() { return false; }
+/// Returns true when the CUDA backend is available at runtime.
+bool block_stm_cuda_available();
 
-/// CUDA-accelerated Block-STM execution engine — stub.
-///
-/// Today, create() always returns nullptr; the dispatcher will fall
-/// back to the CPU Block-STM scheduler. The interface is preserved
-/// here so a future implementation can swap in transparently.
+/// CUDA-accelerated Block-STM execution engine.
 class BlockStmGpu
 {
 public:
     virtual ~BlockStmGpu() = default;
 
-    /// Always returns nullptr until the kernel is ported.
-    static std::unique_ptr<BlockStmGpu> create() { return nullptr; }
+    /// Returns nullptr if CUDA is unavailable (no driver / no device).
+    static std::unique_ptr<BlockStmGpu> create();
 
     virtual BlockResult execute_block(
         std::span<const Transaction> txs,
