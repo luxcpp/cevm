@@ -135,9 +135,10 @@ TEST(Refund, CreateSlotNoRefund)
     auto r = run_kernel_cpu(code);
     ASSERT_EQ(r.status.size(), 1u);
     EXPECT_EQ(r.status[0], TxStatus::Stop);
-    // SSTORE_SET = 20000, PUSH+PUSH+STOP = 3+3+0 = 6, total = 20006.
+    // EIP-2929 cold SSTORE surcharge (2100) + SSTORE_SET (20000) +
+    // PUSH+PUSH+STOP (3+3+0 = 6) = 22106.
     // No refund applies; gas_used stays at the raw cost.
-    EXPECT_EQ(r.gas_used[0], 20006u);
+    EXPECT_EQ(r.gas_used[0], 22106u);
 }
 
 // -----------------------------------------------------------------------------
@@ -172,12 +173,13 @@ TEST(Refund, ClearSlotEarnsRefundUpToCap)
     auto r = run_kernel_cpu(code);
     ASSERT_EQ(r.status.size(), 1u);
     EXPECT_EQ(r.status[0], TxStatus::Stop);
-    // Raw gas before refund: SSTORE_SET (20000) + SSTORE_NOOP (100) +
-    // 4 PUSHes (12) + STOP (0) = 20112.
+    // Raw gas before refund: EIP-2929 cold SSTORE (2100, first slot
+    // touch) + SSTORE_SET (20000) + EIP-2929 warm SSTORE (0, same
+    // slot) + SSTORE_NOOP (100) + 4 PUSHes (12) + STOP (0) = 22212.
     // EIP-2200 refund branch: nv == orig && orig == 0 -> +19900.
-    // EIP-3529 cap: gas_used/5 = 20112/5 = 4022. Final refund = 4022.
-    // Net gas_used = 20112 - 4022 = 16090.
-    EXPECT_EQ(r.gas_used[0], 16090u);
+    // EIP-3529 cap: gas_used/5 = 22212/5 = 4442. Final refund = 4442.
+    // Net gas_used = 22212 - 4442 = 17770.
+    EXPECT_EQ(r.gas_used[0], 17770u);
 }
 
 // -----------------------------------------------------------------------------
@@ -232,25 +234,26 @@ TEST(Refund, Eip3529CapApplied)
     ASSERT_EQ(r.status.size(), 1u);
     ASSERT_EQ(r.status[0], TxStatus::Stop);
 
-    // Without the cap, refund would be 19900 (SSTORE_SET-NOOP). With the
-    // cap, refund <= gas_used/5. Pre-cap gas_used = 20112; the post-cap
-    // gas_used reported back is 20112 - min(19900, 4022) = 16090.
-    // If the cap were missing we'd see 20112 - 19900 = 212 — the test
-    // catches that.
-    EXPECT_EQ(r.gas_used[0], 16090u);
-    EXPECT_NE(r.gas_used[0], 212u) << "EIP-3529 cap not applied";
+    // Without the cap, refund would be 19900 (SSTORE_SET-NOOP). With
+    // the cap, refund <= gas_used/5. Pre-cap gas_used = 22212 (incl.
+    // EIP-2929 cold surcharge); the post-cap gas_used reported back
+    // is 22212 - min(19900, 4442) = 17770. If the cap were missing
+    // we'd see 22212 - 19900 = 2312 — the test catches that.
+    EXPECT_EQ(r.gas_used[0], 17770u);
+    EXPECT_NE(r.gas_used[0], 2312u) << "EIP-3529 cap not applied";
 }
 
 // -----------------------------------------------------------------------------
 // 5. Parity with evmone CPU on the SSTORE refund DIRECTION.
 //
-//    The kernel does not model EIP-2929 cold/warm storage access (separate
-//    bug C5), so the absolute gas numbers diverge from evmone. What MUST
-//    agree is the qualitative behaviour: clearing a slot earns a positive
-//    refund, after which the EIP-3529 cap shrinks net gas_used below the
-//    raw cost. That is exactly the evidence that the signed refund is
-//    flowing through both backends; underflow (the original bug) would
-//    instead inflate gas_used past the gas_limit.
+//    The kernel now models EIP-2929 cold/warm storage access on top of
+//    the EIP-2200 + EIP-3529 refund pipeline, so absolute gas numbers
+//    line up with evmone. What this test asserts is the qualitative
+//    behaviour: clearing a slot earns a positive refund, after which the
+//    EIP-3529 cap shrinks net gas_used below the raw cost. That is
+//    exactly the evidence that the signed refund is flowing through
+//    both backends; underflow (the original bug) would instead inflate
+//    gas_used past the gas_limit.
 // -----------------------------------------------------------------------------
 TEST(Refund, ParityWithEvmoneOnClearSlot)
 {

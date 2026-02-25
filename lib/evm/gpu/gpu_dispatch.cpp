@@ -265,7 +265,13 @@ static bool any_tx_has_code(const std::vector<Transaction>& txs)
 /// Convert a dispatch-layer Transaction into the kernel's HostTransaction.
 /// Used by both the CPU bytecode path (kernel::execute_cpu) and the GPU
 /// bytecode paths so all four backends consume the same input shape.
-static kernel::HostTransaction to_kernel_tx(const Transaction& tx)
+///
+/// `cfg` carries the EIP-2929 caller-supplied warm sets — they are copied
+/// onto each tx so the kernels can pre-warm their per-thread sets at tx
+/// startup. The same warm-set bytes are referenced by every tx in the
+/// batch (Config is per-call); the kernels still maintain independent
+/// per-thread state, so this is correct under the EIP-2929 spec.
+static kernel::HostTransaction to_kernel_tx(const Transaction& tx, const Config& cfg)
 {
     kernel::HostTransaction h;
     h.code      = tx.code;
@@ -275,7 +281,21 @@ static kernel::HostTransaction to_kernel_tx(const Transaction& tx)
     auto pack_addr = [](kernel::uint256& dst, const std::vector<uint8_t>& addr) {
         std::memset(&dst, 0, sizeof(dst));
         if (addr.size() >= 20)
-            std::memcpy(&dst, addr.data(), 20);
+        {
+            // Address is 20 BE bytes. Decode into the kernel uint256
+            // (w[0]=low). Byte 19 (LSB) → low 8 bits of w[0]; byte 0
+            // (top of address) → bits 152..159 of w[2]. This matches
+            // the big-int representation produced by PUSH so warm-set
+            // comparisons against on-stack addresses work.
+            auto* limbs = reinterpret_cast<uint64_t*>(&dst);
+            for (int b = 0; b < 20; ++b)
+            {
+                int pos_from_right = 19 - b;
+                int limb = pos_from_right / 8;
+                int shift = (pos_from_right % 8) * 8;
+                limbs[limb] |= static_cast<uint64_t>(addr[b]) << shift;
+            }
+        }
     };
     auto pack_u64 = [](kernel::uint256& dst, uint64_t v) {
         std::memset(&dst, 0, sizeof(dst));
@@ -286,6 +306,12 @@ static kernel::HostTransaction to_kernel_tx(const Transaction& tx)
     pack_addr(h.caller, tx.from);
     pack_addr(h.address, tx.to);
     pack_u64(h.value, tx.value);
+
+    // EIP-2929 caller-supplied warm sets. Flat byte vectors:
+    //   warm_addresses:    [20-byte addr]...
+    //   warm_storage_keys: [20-byte addr | 32-byte slot]...
+    h.warm_addresses    = cfg.warm_addresses;
+    h.warm_storage_keys = cfg.warm_storage_keys;
     return h;
 }
 
@@ -307,7 +333,8 @@ static TxStatus convert_status(kernel::TxStatus s)
 /// which is the same interpreter that the Metal/CUDA kernels emulate. This
 /// is the CPU reference path for parity testing — gas, status, and output
 /// match the GPU backends byte-for-byte.
-static BlockResult execute_kernel_cpu(const std::vector<Transaction>& txs,
+static BlockResult execute_kernel_cpu(const Config& cfg,
+                                      const std::vector<Transaction>& txs,
                                       bool parallel,
                                       uint32_t num_threads)
 {
@@ -325,7 +352,7 @@ static BlockResult execute_kernel_cpu(const std::vector<Transaction>& txs,
     auto t0 = std::chrono::high_resolution_clock::now();
 
     auto run_one = [&](size_t i) {
-        auto kt = to_kernel_tx(txs[i]);
+        auto kt = to_kernel_tx(txs[i], cfg);
         auto r  = kernel::execute_cpu(kt);
         br.gas_used[i]  = r.gas_used;
         br.status[i]    = convert_status(r.status);
@@ -375,12 +402,12 @@ static BlockResult execute_kernel_cpu(const std::vector<Transaction>& txs,
 /// Thin wrapper around `to_kernel_tx` (which is shared with the CPU bytecode
 /// path so the four backends consume identical inputs).
 [[maybe_unused]] static std::vector<kernel::HostTransaction>
-to_host_transactions(const std::vector<Transaction>& txs)
+to_host_transactions(const std::vector<Transaction>& txs, const Config& cfg)
 {
     std::vector<kernel::HostTransaction> out;
     out.reserve(txs.size());
     for (const auto& tx : txs)
-        out.push_back(to_kernel_tx(tx));
+        out.push_back(to_kernel_tx(tx, cfg));
     return out;
 }
 
@@ -518,7 +545,7 @@ static BlockResult run_cpu(const Config& config,
     }
     if (any_tx_has_code(txs))
     {
-        auto br = execute_kernel_cpu(txs, parallel,
+        auto br = execute_kernel_cpu(config, txs, parallel,
             parallel ? config.num_threads : 0);
         // Same fallback policy as the GPU paths: CallNotSupported is an
         // internal "kernel can't handle this tx" signal, never a tx-level
@@ -557,7 +584,7 @@ static BlockResult run_metal(const Config& config,
         auto engine = kernel::EvmKernelHost::create();
         if (engine)
         {
-            auto host_txs = to_host_transactions(txs);
+            auto host_txs = to_host_transactions(txs, config);
             auto t0 = std::chrono::high_resolution_clock::now();
             auto results = engine->has_v2()
                 ? engine->execute_v2(host_txs)
@@ -650,12 +677,28 @@ static BlockResult run_cuda(const Config& config,
                 h.code = tx.code;
                 h.calldata = tx.data;
                 h.gas_limit = tx.gas_limit;
-                std::memcpy(&h.caller, tx.from.data(),
-                            std::min<size_t>(tx.from.size(), sizeof(h.caller)));
-                std::memcpy(&h.address, tx.to.data(),
-                            std::min<size_t>(tx.to.size(), sizeof(h.address)));
+                // Address is 20 BE bytes; pack into uint256 with
+                // big-endian semantics so PUSH-derived addresses can
+                // be compared against caller/address.
+                auto pack_be = [](void* dst, const uint8_t* src, size_t n) {
+                    std::memset(dst, 0, 32);
+                    auto* limbs = reinterpret_cast<uint64_t*>(dst);
+                    for (size_t b = 0; b < n; ++b)
+                    {
+                        size_t pfr = (n - 1) - b;
+                        limbs[pfr / 8] |= static_cast<uint64_t>(src[b]) << ((pfr % 8) * 8);
+                    }
+                };
+                pack_be(&h.caller, tx.from.data(),
+                        std::min<size_t>(tx.from.size(), 20));
+                pack_be(&h.address, tx.to.data(),
+                        std::min<size_t>(tx.to.size(), 20));
                 auto* val_lo = reinterpret_cast<uint64_t*>(&h.value);
                 val_lo[0] = tx.value;
+                // EIP-2929 caller-supplied warm sets — same per-call set
+                // copied onto every tx so the CUDA host can pack them.
+                h.warm_addresses    = config.warm_addresses;
+                h.warm_storage_keys = config.warm_storage_keys;
                 host_txs.push_back(std::move(h));
             }
             auto t0 = std::chrono::high_resolution_clock::now();

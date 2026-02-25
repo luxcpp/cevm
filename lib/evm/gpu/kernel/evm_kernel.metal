@@ -349,6 +349,12 @@ static void keccak256_dev(device const uchar* input, uint len,
 struct TxInput {
     uint code_offset; uint code_size; uint calldata_offset; uint calldata_size;
     ulong gas_limit; uint256 caller; uint256 address; uint256 value;
+    // EIP-2929 caller-supplied warm sets. Offsets index into the same
+    // `blob` buffer that holds code+calldata. Layouts:
+    //   warm_addrs blob: 20-byte addresses, packed.
+    //   warm_slots blob: (20-byte addr | 32-byte slot key) pairs, packed.
+    uint warm_addr_offset; uint warm_addr_count;
+    uint warm_slot_offset; uint warm_slot_count;
 };
 // gas_refund is signed: SSTORE may transiently subtract refund credit
 // (clear-then-set-then-clear within a tx). The kernel emits the raw
@@ -393,14 +399,31 @@ constant uint STACK_LIMIT        = 1024;
 constant uint MAX_BLOB_HASHES    = 8;
 
 constant ulong GAS_VERYLOW=3, GAS_LOW=5, GAS_MID=8, GAS_HIGH=10, GAS_BASE=2, GAS_JUMPDEST=1;
-constant ulong GAS_SLOAD=2100, GAS_SSTORE_SET=20000, GAS_SSTORE_RESET=2900;
+// EIP-2929 (Berlin) cold/warm pricing for state-access opcodes:
+//   SLOAD       : cold 2100 / warm 100
+//   BALANCE     : cold 2600 / warm 100
+//   EXTCODE*    : cold 2600 / warm 100
+//   SSTORE      : EIP-2200 base + 2100 cold surcharge on first slot access.
+constant ulong GAS_SLOAD_COLD=2100, GAS_SLOAD_WARM=100;
+constant ulong GAS_ACCOUNT_COLD=2600, GAS_ACCOUNT_WARM=100;
+constant ulong GAS_SLOAD=GAS_SLOAD_COLD;  // legacy alias
+constant ulong GAS_SSTORE_SET=20000, GAS_SSTORE_RESET=2900;
 constant ulong GAS_SSTORE_NOOP=100, GAS_SSTORE_REFUND=4800;
 constant ulong GAS_MEMORY=3, GAS_EXP_BASE=10, GAS_EXP_BYTE=50;
 constant ulong GAS_KECCAK_BASE=30, GAS_KECCAK_WORD=6;
 constant ulong GAS_COPY=3;
 constant ulong GAS_LOG_BASE=375, GAS_LOG_TOPIC=375, GAS_LOG_DATA=8;
-constant ulong GAS_BALANCE=100, GAS_EXTCODE=100, GAS_SELFBALANCE=5;
+constant ulong GAS_SELFBALANCE=5;
 constant ulong GAS_TLOAD=100, GAS_TSTORE=100, GAS_BLOCKHASH=20;
+// EIP-2929 per-tx warm-set caps. Saturation falls back to cold pricing —
+// over-charges, never under-charges, so the receipt stays consensus-safe.
+constant uint MAX_WARM_ADDRS = 64;
+constant uint MAX_WARM_SLOT_2929 = 128;
+// Pre-warmed precompile range. Cancun exposes 0x01..0x0a; Prague extends
+// to 0x11. Pre-warming the strict superset keeps the kernel forward-
+// compatible without branching on revision.
+constant uint PRECOMPILE_FIRST = 1;
+constant uint PRECOMPILE_LAST  = 0x11;
 
 constant uchar KECCAK_EMPTY[32] = {
     0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c,
@@ -422,6 +445,20 @@ static inline bool original_value_lookup(thread OriginalEntry* o,uint n,uint256 
 static inline void original_value_record(thread OriginalEntry* o,thread uint& n,uint256 s,uint256 v){
     for(uint i=0;i<n;++i)if(o[i].valid&&u256_eq(o[i].key,s))return;
     if(n<MAX_STORAGE_PER_TX){o[n].key=s;o[n].value=v;o[n].valid=true;n++;}}
+// EIP-2929 warm-set helpers. Returns true iff the key was already warm.
+// Append-on-cold; saturation falls back to cold pricing.
+static inline bool warm_addr_mark(thread uint256* set, thread uint& n, uint256 a) {
+    for (uint i = 0; i < n; ++i) if (u256_eq(set[i], a)) return true;
+    if (n < MAX_WARM_ADDRS) { set[n++] = a; }
+    return false;
+}
+static inline bool warm_slot_mark(thread uint256* addrs, thread uint256* keys,
+                                  thread uint& n, uint256 addr, uint256 slot) {
+    for (uint i = 0; i < n; ++i)
+        if (u256_eq(addrs[i], addr) && u256_eq(keys[i], slot)) return true;
+    if (n < MAX_WARM_SLOT_2929) { addrs[n] = addr; keys[n] = slot; n++; }
+    return false;
+}
 // EIP-2200 net gas SSTORE accounting. `rc` accumulates the *signed* refund
 // delta — clear-then-set-then-clear within a single tx produces a transient
 // negative value. The dispatcher applies EIP-3529 (max refund = gas_used/5)
@@ -524,6 +561,55 @@ kernel void evm_execute(
     uint orig_count = 0;
     for (uint i = 0; i < MAX_STORAGE_PER_TX; ++i) orig_storage[i].valid = false;
 
+    // EIP-2929 per-tx warm sets. Seed with caller, recipient, the
+    // standard precompile range (0x01..0x11), and any caller-supplied
+    // entries packed in the blob via inp.warm_addr_offset/count and
+    // inp.warm_slot_offset/count.
+    uint256 warm_addrs[MAX_WARM_ADDRS];
+    uint warm_addr_count = 0;
+    uint256 warm_slot_addrs[MAX_WARM_SLOT_2929];
+    uint256 warm_slot_keys[MAX_WARM_SLOT_2929];
+    uint warm_slot_count = 0;
+    warm_addr_mark(warm_addrs, warm_addr_count, inp.caller);
+    warm_addr_mark(warm_addrs, warm_addr_count, inp.address);
+    for (uint p = PRECOMPILE_FIRST; p <= PRECOMPILE_LAST; ++p) {
+        uint256 a = u256_zero(); a.w[0] = ulong(p);
+        warm_addr_mark(warm_addrs, warm_addr_count, a);
+    }
+    {
+        device const uchar* blob_warm_a = blob + inp.warm_addr_offset;
+        for (uint i = 0; i < inp.warm_addr_count; ++i) {
+            // 20 BE address bytes → big-int uint256. Byte 19 (LSB) →
+            // bits 0..7 of w[0]; byte 0 (top of address) → bits
+            // 152..159 of w[2]. Matches PUSH-derived addresses.
+            uint256 a = u256_zero();
+            for (uint b = 0; b < 20; ++b) {
+                uint pfr = 19 - b;
+                a.w[pfr / 8] |= ulong(blob_warm_a[i * 20 + b]) << ((pfr % 8) * 8);
+            }
+            warm_addr_mark(warm_addrs, warm_addr_count, a);
+        }
+    }
+    {
+        device const uchar* blob_warm_s = blob + inp.warm_slot_offset;
+        for (uint i = 0; i < inp.warm_slot_count; ++i) {
+            // Address is 20 BE bytes (same convention as above).
+            uint256 a = u256_zero();
+            for (uint b = 0; b < 20; ++b) {
+                uint pfr = 19 - b;
+                a.w[pfr / 8] |= ulong(blob_warm_s[i * 52 + b]) << ((pfr % 8) * 8);
+            }
+            // Slot key is big-endian on the wire: byte 0 is most
+            // significant. Reverse to fit kernel uint256 limb layout.
+            uint256 k = u256_zero();
+            for (uint b = 0; b < 32; ++b) {
+                uint pfr = 31 - b;
+                k.w[pfr / 8] |= ulong(blob_warm_s[i * 52 + 20 + b]) << ((pfr % 8) * 8);
+            }
+            warm_slot_mark(warm_slot_addrs, warm_slot_keys, warm_slot_count, a, k);
+        }
+    }
+
     #define EMIT(st, gu, gr, os) do { out.status=(st); out.gas_used=(gu); out.gas_refund=(gr); out.output_size=(os); return; } while(0)
     #define OOG()  EMIT(3, gas_start, refund_counter, 0)
     #define ERR()  EMIT(4, gas_start - gas, refund_counter, 0)
@@ -625,9 +711,12 @@ kernel void evm_execute(
             if (sp >= 1024) ERR();
             stack[sp++] = inp.address; ++pc; continue;
         case 0x31: {
-            if (gas < GAS_BALANCE) OOG(); gas -= GAS_BALANCE;
+            // EIP-2929 BALANCE — cold 2600 / warm 100.
             if (sp < 1) ERR();
-            stack[sp - 1] = u256_zero();
+            uint256 a = stack[sp - 1];
+            ulong cost = warm_addr_mark(warm_addrs, warm_addr_count, a) ? GAS_ACCOUNT_WARM : GAS_ACCOUNT_COLD;
+            if (gas < cost) OOG(); gas -= cost;
+            stack[sp - 1] = u256_zero();  // no host plumbing → balance is 0
             ++pc; continue;
         }
         case 0x32:
@@ -722,14 +811,18 @@ kernel void evm_execute(
             if (sp >= 1024) ERR();
             stack[sp++] = u256_from(block_ctx->gas_price); ++pc; continue;
         case 0x3b: {
-            if (gas < GAS_EXTCODE) OOG(); gas -= GAS_EXTCODE;
+            // EIP-2929 EXTCODESIZE — cold 2600 / warm 100.
             if (sp < 1) ERR();
+            uint256 a = stack[sp - 1];
+            ulong cost = warm_addr_mark(warm_addrs, warm_addr_count, a) ? GAS_ACCOUNT_WARM : GAS_ACCOUNT_COLD;
+            if (gas < cost) OOG(); gas -= cost;
             stack[sp - 1] = u256_zero();
             ++pc; continue;
         }
         case 0x3c: {
+            // EIP-2929 EXTCODECOPY — cold 2600 / warm 100 + 3 * ceil(size/32).
             if (sp < 4) ERR();
-            (void)stack[--sp];
+            uint256 addr_v = stack[--sp];
             uint256 dv = stack[--sp];
             (void)stack[--sp];
             uint256 lv = stack[--sp];
@@ -739,7 +832,8 @@ kernel void evm_execute(
             uint dest = uint(dv.w[0]);
             uint size = uint(sz);
             ulong words = (sz + 31) / 32;
-            ulong total_gas = GAS_EXTCODE + GAS_COPY * words;
+            ulong access_cost = warm_addr_mark(warm_addrs, warm_addr_count, addr_v) ? GAS_ACCOUNT_WARM : GAS_ACCOUNT_COLD;
+            ulong total_gas = access_cost + GAS_COPY * words;
             if (gas < total_gas) OOG(); gas -= total_gas;
             if (!expand_mem_range(mem, mem_size, gas, dest, size)) OOG();
             for (uint i = 0; i < size; ++i) mem[dest + i] = 0;
@@ -759,8 +853,12 @@ kernel void evm_execute(
             ++pc; continue;
         }
         case 0x3f: {
-            if (gas < GAS_EXTCODE) OOG(); gas -= GAS_EXTCODE;
+            // EIP-2929 EXTCODEHASH — cold 2600 / warm 100.
             if (sp < 1) ERR();
+            uint256 a = stack[sp - 1];
+            ulong cost = warm_addr_mark(warm_addrs, warm_addr_count, a) ? GAS_ACCOUNT_WARM : GAS_ACCOUNT_COLD;
+            if (gas < cost) OOG(); gas -= cost;
+            // No host plumbing → keccak256("") (matches geth/Cancun).
             uint256 r = u256_zero();
             for (uint i = 0; i < 32; ++i) {
                 uint pfr = 31 - i;
@@ -869,15 +967,24 @@ kernel void evm_execute(
             ++pc; continue;
         }
         case 0x54: {
-            if (gas < GAS_SLOAD) OOG(); gas -= GAS_SLOAD;
+            // EIP-2929 SLOAD — cold 2100 / warm 100, keyed on (contract, slot).
             if (sp < 1) ERR();
-            uint256 slot = stack[sp - 1]; uint256 val = u256_zero();
+            uint256 slot = stack[sp - 1];
+            ulong cost = warm_slot_mark(warm_slot_addrs, warm_slot_keys,
+                                        warm_slot_count, inp.address, slot)
+                           ? GAS_SLOAD_WARM : GAS_SLOAD_COLD;
+            if (gas < cost) OOG(); gas -= cost;
+            uint256 val = u256_zero();
             for (uint i=stor_count;i>0;--i) if (u256_eq(storage[i-1].key,slot)){val=storage[i-1].value;break;}
             stack[sp - 1] = val; ++pc; continue;
         }
         case 0x55: {
+            // EIP-2929 surcharge on first slot access (cold).
             if (sp < 2) ERR();
             uint256 slot = stack[--sp]; uint256 val = stack[--sp];
+            ulong access_surcharge = warm_slot_mark(warm_slot_addrs, warm_slot_keys,
+                                                   warm_slot_count, inp.address, slot)
+                                       ? 0UL : GAS_SLOAD_COLD;
             uint256 current = u256_zero(); bool found = false;
             for (uint i=stor_count;i>0;--i) if (u256_eq(storage[i-1].key,slot)){current=storage[i-1].value;found=true;break;}
             // Cap check before any state mutation: appending a new slot when
@@ -889,7 +996,8 @@ kernel void evm_execute(
             original_value_record(orig_storage,orig_count,slot,current);
             uint256 original = u256_zero(); original_value_lookup(orig_storage,orig_count,slot,original);
             ulong sc = sstore_gas_eip2200(original,current,val,refund_counter);
-            if (gas < sc) OOG(); gas -= sc;
+            ulong total = sc + access_surcharge;
+            if (gas < total) OOG(); gas -= total;
             if (found){for(uint i=stor_count;i>0;--i)if(u256_eq(storage[i-1].key,slot)){storage[i-1].value=val;break;}}
             else {
                 if (stor_count >= MAX_STORAGE_PER_TX) ERRA();
