@@ -847,12 +847,18 @@ kernel void evm_execute(
             uint256 slot = stack[--sp]; uint256 val = stack[--sp];
             uint256 current = u256_zero(); bool found = false;
             for (uint i=stor_count;i>0;--i) if (u256_eq(storage[i-1].key,slot)){current=storage[i-1].value;found=true;break;}
+            // Cap check before any state mutation: appending a new slot when
+            // the per-tx buffer is full would silently corrupt state. Signal
+            // INVALID-style (status=Error, all gas consumed). With a host the
+            // dispatcher routes this tx to evmone CPU (which has no cap);
+            // without one the Error is honest — the GPU can't process this tx.
+            if (!found && stor_count >= MAX_STORAGE_PER_TX) ERRA();
             original_value_record(orig_storage,orig_count,slot,current);
             uint256 original = u256_zero(); original_value_lookup(orig_storage,orig_count,slot,original);
             ulong sc = sstore_gas_eip2200(original,current,val,refund_counter);
             if (gas < sc) OOG(); gas -= sc;
             if (found){for(uint i=stor_count;i>0;--i)if(u256_eq(storage[i-1].key,slot)){storage[i-1].value=val;break;}}
-            else if(stor_count<MAX_STORAGE_PER_TX){storage[stor_count].key=slot;storage[stor_count].value=val;stor_count++;}
+            else {storage[stor_count].key=slot;storage[stor_count].value=val;stor_count++;}
             ++pc; continue;
         }
 
@@ -909,7 +915,11 @@ kernel void evm_execute(
             bool found = false;
             for (uint i = trans_count; i > 0; --i)
                 if (u256_eq(transient[i-1].key, slot)) { transient[i-1].value = val; found = true; break; }
-            if (!found && trans_count < MAX_STORAGE_PER_TX) {
+            // Cap check before mutation — same policy as 0x55 SSTORE. A
+            // silent drop would leave the transient store inconsistent with
+            // what TLOAD reads back. INVALID-style: status=Error, all gas.
+            if (!found && trans_count >= MAX_STORAGE_PER_TX) ERRA();
+            if (!found) {
                 transient[trans_count].key = slot;
                 transient[trans_count].value = val;
                 trans_count++;
