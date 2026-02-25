@@ -277,11 +277,9 @@ TEST(StorageOverflow, SStoreOverCap_WithHost_EvmoneSucceeds)
 // 64 distinct TSTOREs must succeed on every backend that implements
 // EIP-1153. The Metal and CUDA kernels do; the kernel CPU interpreter
 // (lib/evm/gpu/kernel/evm_interpreter.hpp) does not. CPU paths therefore
-// surface the unimplemented-opcode signal (TxStatus::Error from the
-// `default:` case in the kernel); GPU paths return TxStatus::Stop.
-//
-// This mirrors the KernelCpuMissing pattern documented in parity_test.cpp.
-TEST(StorageOverflow, TStoreAtCap_GpuSucceeds_CpuMissing)
+// CPU and GPU both implement TSTORE as of v0.26. Filling exactly to capacity
+// (64 slots) reaches STOP on every backend.
+TEST(StorageOverflow, TStoreAtCap_AllBackendsSucceed)
 {
     auto tx = make_tx(build_tstore_program(KERNEL_STORAGE_CAP), 5'000'000);
 
@@ -291,13 +289,7 @@ TEST(StorageOverflow, TStoreAtCap_GpuSucceeds_CpuMissing)
     ASSERT_EQ(r_seq.status.size(),   1u);
     ASSERT_EQ(r_metal.status.size(), 1u);
 
-    // CPU kernel does not implement TSTORE — surfaces Error on the first
-    // 0x5d opcode it encounters. (This is the documented behaviour the
-    // host dispatcher routes around when a real host is present.)
-    EXPECT_EQ(r_seq.status[0], TxStatus::Error);
-
-    // Metal/CUDA do implement TSTORE. With slots 1..64 they fill the
-    // transient buffer exactly to capacity and reach STOP.
+    EXPECT_EQ(r_seq.status[0],   TxStatus::Stop);
     EXPECT_EQ(r_metal.status[0], TxStatus::Stop);
 
 #ifdef EVM_CUDA
