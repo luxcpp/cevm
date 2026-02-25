@@ -10,6 +10,7 @@
 #include "uint256_gpu.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <span>
 #include <vector>
@@ -21,6 +22,14 @@ static constexpr uint32_t HOST_MAX_OUTPUT_PER_TX  = 1024;
 static constexpr uint32_t HOST_MAX_STORAGE_PER_TX = 64;
 static constexpr uint32_t HOST_MAX_LOGS_PER_TX    = 16;
 
+/// On-wire transaction input for the kernel. Layout MUST match the device
+/// structs in evm_kernel.metal and evm_kernel.cu byte-for-byte.
+///
+/// EIP-2929 caller-supplied warm sets are packed into the same shared
+/// `blob` buffer that holds code+calldata. The kernel reads them once at
+/// tx startup and seeds its per-thread warm sets. Layout in the blob:
+///   warm_addr_offset .. +20*warm_addr_count  : 20-byte addresses
+///   warm_slot_offset .. +52*warm_slot_count  : (20-byte addr | 32-byte slot) pairs
 struct TxInput
 {
     uint32_t code_offset;
@@ -31,6 +40,10 @@ struct TxInput
     uint256  caller;
     uint256  address;
     uint256  value;
+    uint32_t warm_addr_offset;
+    uint32_t warm_addr_count;
+    uint32_t warm_slot_offset;
+    uint32_t warm_slot_count;
 };
 
 struct TxOutput
@@ -85,6 +98,13 @@ struct HostTransaction
     uint256  caller;
     uint256  address;
     uint256  value;
+
+    /// EIP-2929 / EIP-2930 caller-supplied warm sets. Flat layouts:
+    ///   warm_addresses:    [20-byte addr][20-byte addr]...
+    ///   warm_storage_keys: [20-byte addr | 32-byte slot]...
+    /// Empty by default; `gpu_dispatch.cpp` fills them from `Config`.
+    std::vector<uint8_t> warm_addresses;
+    std::vector<uint8_t> warm_storage_keys;
 };
 
 enum class TxStatus : uint32_t
@@ -216,6 +236,65 @@ inline TxResult execute_cpu(const HostTransaction& tx)
     interp.logs = log_entries.data();
     interp.log_count = &log_count;
     interp.log_capacity = MAX_LOGS;
+
+    // EIP-2929: per-tx warm sets. Pre-warming for caller / recipient /
+    // precompiles happens inside interp.execute(). Here we just append any
+    // caller-supplied entries (EIP-2930 / Config-level) so subsequent
+    // accesses pay warm.
+    std::vector<uint256> warm_addrs(MAX_WARM_ADDRESSES);
+    std::vector<uint256> warm_slot_addrs(MAX_WARM_SLOTS);
+    std::vector<uint256> warm_slot_keys(MAX_WARM_SLOTS);
+    uint32_t warm_addr_count = 0;
+    uint32_t warm_slot_count = 0;
+    interp.warm_addrs = warm_addrs.data();
+    interp.warm_addr_count = &warm_addr_count;
+    interp.warm_addr_capacity = MAX_WARM_ADDRESSES;
+    interp.warm_slot_addrs = warm_slot_addrs.data();
+    interp.warm_slot_keys = warm_slot_keys.data();
+    interp.warm_slot_count = &warm_slot_count;
+    interp.warm_slot_capacity = MAX_WARM_SLOTS;
+
+    // 20 BE address bytes → big-int uint256 matching the canonical
+    // Ethereum representation. PUSH-derived addresses on the stack use
+    // this same layout, so warm-set comparisons work.
+    auto unpack_addr_be = [](const uint8_t* src) {
+        uint256 v = uint256::zero();
+        for (int b = 0; b < 20; ++b)
+        {
+            int pos_from_right = 19 - b;
+            v.w[pos_from_right / 8] |= static_cast<uint64_t>(src[b]) << ((pos_from_right % 8) * 8);
+        }
+        return v;
+    };
+    {
+        const uint8_t* a = tx.warm_addresses.data();
+        size_t n = tx.warm_addresses.size() / 20;
+        for (size_t i = 0; i < n && warm_addr_count < MAX_WARM_ADDRESSES; ++i)
+            warm_addrs[warm_addr_count++] = unpack_addr_be(a + i * 20);
+    }
+    {
+        const uint8_t* p = tx.warm_storage_keys.data();
+        size_t n = tx.warm_storage_keys.size() / 52;
+        for (size_t i = 0; i < n && warm_slot_count < MAX_WARM_SLOTS; ++i)
+        {
+            uint256 a = unpack_addr_be(p + i * 52);
+            uint256 k = uint256::zero();
+            // Slot key is stored big-endian on the wire; load into the
+            // limb layout used by the kernel uint256 (w[0]=low) by
+            // reversing the byte order.
+            const uint8_t* kb = p + i * 52 + 20;
+            for (int b = 0; b < 32; ++b)
+            {
+                int pos_from_right = 31 - b;
+                int limb = pos_from_right / 8;
+                int shift = (pos_from_right % 8) * 8;
+                k.w[limb] |= static_cast<uint64_t>(kb[b]) << shift;
+            }
+            warm_slot_addrs[warm_slot_count] = a;
+            warm_slot_keys[warm_slot_count] = k;
+            ++warm_slot_count;
+        }
+    }
 
     auto result = interp.execute(memory.data(), output.data());
 

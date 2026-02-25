@@ -56,6 +56,13 @@ struct TxInput
     uint256_host  caller;
     uint256_host  address;
     uint256_host  value;
+    // EIP-2929 caller-supplied warm sets. Layout in the shared blob:
+    //   warm_addrs blob: 20-byte addresses, packed.
+    //   warm_slots blob: (20-byte addr | 32-byte slot) pairs.
+    uint32_t      warm_addr_offset;
+    uint32_t      warm_addr_count;
+    uint32_t      warm_slot_offset;
+    uint32_t      warm_slot_count;
 };
 
 struct TxOutput
@@ -97,6 +104,11 @@ struct HostTransaction
     uint256_host caller;
     uint256_host address;
     uint256_host value;
+    /// EIP-2929 caller-supplied warm sets. Flat layouts:
+    ///   warm_addresses:    [20-byte addr]...
+    ///   warm_storage_keys: [20-byte addr | 32-byte slot]...
+    std::vector<uint8_t> warm_addresses;
+    std::vector<uint8_t> warm_storage_keys;
 };
 
 struct TxResult

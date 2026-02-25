@@ -36,7 +36,15 @@ struct GasCost
     static constexpr gpu_u64 MID        = 8;
     static constexpr gpu_u64 HIGH       = 10;
     static constexpr gpu_u64 JUMPDEST   = 1;
-    static constexpr gpu_u64 SLOAD      = 2100;  // cold
+    // EIP-2929 (Berlin) cold/warm pricing. Cold = first access in the tx.
+    static constexpr gpu_u64 SLOAD_COLD = 2100;
+    static constexpr gpu_u64 SLOAD_WARM = 100;
+    static constexpr gpu_u64 ACCOUNT_COLD = 2600;
+    static constexpr gpu_u64 ACCOUNT_WARM = 100;
+    /// Legacy alias — pre-2929 SLOAD constant. Retained so older callers
+    /// that spell `GasCost::SLOAD` keep compiling; the dispatcher uses the
+    /// cold/warm split.
+    static constexpr gpu_u64 SLOAD      = SLOAD_COLD;
     static constexpr gpu_u64 SSTORE_SET   = 20000;
     static constexpr gpu_u64 SSTORE_RESET = 2900;
     static constexpr gpu_u64 SSTORE_NOOP  = 100;   // EIP-2200: no-op write (same value)
@@ -48,6 +56,17 @@ struct GasCost
     static constexpr gpu_u64 LOG_TOPIC  = 375;
     static constexpr gpu_u64 COPY       = 3;
 };
+
+// -- EIP-2929 warm-set caps --------------------------------------------------
+static constexpr gpu_u32 MAX_WARM_ADDRESSES = 64;
+static constexpr gpu_u32 MAX_WARM_SLOTS     = 128;
+
+// Pre-warmed precompile range. EIP-2929 mandates pre-warming the
+// precompile addresses at tx start. Cancun mainnet exposes 0x01..0x0a;
+// Prague extends to 0x11. Pre-warming the strict superset 0x01..0x11
+// keeps the kernel forward-compatible without branching on revision.
+static constexpr gpu_u32 PRECOMPILE_FIRST = 1;
+static constexpr gpu_u32 PRECOMPILE_LAST  = 0x11;
 
 // -- EVM Memory ---------------------------------------------------------------
 
@@ -173,7 +192,69 @@ struct EvmInterpreter
     gpu_u32*  log_count;
     gpu_u32   log_capacity;
 
+    // -- EIP-2929 warm sets ---------------------------------------------------
+    // The host seeds these at tx start with the caller, recipient, the
+    // standard precompile range, and any EIP-2930 / Config-level entries.
+    // SLOAD / SSTORE consult `warm_slot_*` for (address, slot); BALANCE /
+    // EXTCODE family (where implemented) consult `warm_addrs`. Append-on-
+    // cold so subsequent accesses pay warm. Saturation = cold (over-charge,
+    // never under-charge).
+    uint256*  warm_addrs;
+    gpu_u32*  warm_addr_count;
+    gpu_u32   warm_addr_capacity;
+    uint256*  warm_slot_addrs;
+    uint256*  warm_slot_keys;
+    gpu_u32*  warm_slot_count;
+    gpu_u32   warm_slot_capacity;
+
     // -- Helpers --------------------------------------------------------------
+
+    /// EIP-2929 access-list mark for an address. Returns true iff already warm.
+    /// Append-on-cold; cap saturates as cold.
+    GPU_INLINE bool mark_warm_addr(const uint256& addr)
+    {
+        gpu_u32 n = *warm_addr_count;
+        for (gpu_u32 i = 0; i < n; ++i)
+            if (eq(warm_addrs[i], addr))
+                return true;
+        if (n < warm_addr_capacity)
+        {
+            warm_addrs[n] = addr;
+            *warm_addr_count = n + 1;
+        }
+        return false;
+    }
+
+    /// EIP-2929 access-list mark for (contract, slot). Returns true iff
+    /// already warm. Append-on-cold; cap saturates as cold.
+    GPU_INLINE bool mark_warm_slot(const uint256& addr, const uint256& slot)
+    {
+        gpu_u32 n = *warm_slot_count;
+        for (gpu_u32 i = 0; i < n; ++i)
+            if (eq(warm_slot_addrs[i], addr) && eq(warm_slot_keys[i], slot))
+                return true;
+        if (n < warm_slot_capacity)
+        {
+            warm_slot_addrs[n] = addr;
+            warm_slot_keys[n]  = slot;
+            *warm_slot_count = n + 1;
+        }
+        return false;
+    }
+
+    /// Yellow-paper §6.1.4 + EIP-2929 §"Specification": the tx's caller,
+    /// recipient, and the precompile range are warm at tx start.
+    GPU_INLINE void seed_warm_sets()
+    {
+        mark_warm_addr(caller);
+        mark_warm_addr(address);
+        for (gpu_u32 i = PRECOMPILE_FIRST; i <= PRECOMPILE_LAST; ++i)
+        {
+            uint256 a = uint256::zero();
+            a.w[0] = gpu_u64(i);
+            mark_warm_addr(a);
+        }
+    }
 
     GPU_INLINE bool consume_gas(gpu_u64 cost)
     {
@@ -405,6 +486,11 @@ struct EvmInterpreter
         // (STOP, RETURN, end-of-code). Reverts and aborts drop the refund
         // (matches evmone: state.gas_refund only honoured on success).
         int64_t refund_counter = 0;
+
+        // EIP-2929: pre-warm caller, recipient, precompiles before the
+        // first opcode runs. Caller-supplied entries are appended to the
+        // sets by the host before execute() is invoked.
+        seed_warm_sets();
 
         while (pc < code_size)
         {
@@ -805,13 +891,16 @@ struct EvmInterpreter
 
                 if (op == 0x54) // SLOAD
                 {
-                    if (!consume_gas(GasCost::SLOAD))
-                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
+                    // EIP-2929: cold 2100 / warm 100 keyed on (contract, slot).
+                    bool warm = mark_warm_slot(address, a);
+                    gpu_u64 cost = warm ? GasCost::SLOAD_WARM : GasCost::SLOAD_COLD;
+                    if (!consume_gas(cost))
+                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     s = stack.push(sload(a));
                     if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                 }
-                else // SSTORE: key=top, value=second (EIP-2200 gas)
+                else // SSTORE: key=top, value=second (EIP-2200 + EIP-2929)
                 {
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0, refund_counter};
                     s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0, refund_counter};
@@ -830,13 +919,16 @@ struct EvmInterpreter
                         gas = 0;
                         return {ExecStatus::InvalidOpcode, gas_start, 0, 0, refund_counter};
                     }
-                    // EIP-2200: gas depends on original, current, and new value.
+                    // EIP-2929 surcharge on first access to the slot (cold).
+                    bool warm = mark_warm_slot(address, a);
+                    gpu_u64 access_surcharge = warm ? 0 : GasCost::SLOAD_COLD;
+                    // EIP-2200: base cost depends on original, current, and new value.
                     // sstore_gas_eip2200 mutates refund_counter (signed delta).
                     uint256 current = sload(a);
                     record_original(a, current);
                     uint256 original = sload_original(a);
-                    gpu_u64 cost = sstore_gas_eip2200(original, current, b, refund_counter);
-                    if (!consume_gas(cost))
+                    gpu_u64 base = sstore_gas_eip2200(original, current, b, refund_counter);
+                    if (!consume_gas(base + access_surcharge))
                         return {ExecStatus::OutOfGas, gas_start, 0, 0, refund_counter};
                     sstore(a, b);
                 }

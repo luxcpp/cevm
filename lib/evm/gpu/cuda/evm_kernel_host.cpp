@@ -56,7 +56,7 @@ inline void cuda_check(cudaError_t err, const char* what)
 // uint256_host is 32 bytes (4 uint64s); TxInput is 4*4 + 8 + 3*32 = 120 bytes.
 
 static_assert(sizeof(uint256_host)    == 32,  "uint256_host wire layout");
-static_assert(sizeof(TxInput)         == 120, "TxInput wire layout");
+static_assert(sizeof(TxInput)         == 136, "TxInput wire layout");
 static_assert(sizeof(TxOutput)        == 32,  "TxOutput wire layout");  // 4 + 8 + 8 + 4 + padding
 static_assert(sizeof(StorageEntry)    == 64,  "StorageEntry wire layout");
 
@@ -94,7 +94,13 @@ public:
         // -- Build the contiguous code+calldata blob --------------------------
         size_t total_blob = 0;
         for (const auto& tx : txs)
+        {
             total_blob += tx.code.size() + tx.calldata.size();
+            // EIP-2929 warm sets share the blob: 20 bytes/addr,
+            // 52 bytes/(addr,slot) pair.
+            total_blob += tx.warm_addresses.size();
+            total_blob += tx.warm_storage_keys.size();
+        }
         if (total_blob == 0) total_blob = 1;  // CUDA can't malloc 0 bytes
 
         // -- Build TxInput descriptors ---------------------------------------
@@ -118,6 +124,20 @@ public:
                 std::memcpy(blob.data() + offset, tx.calldata.data(),
                             tx.calldata.size());
             offset += static_cast<uint32_t>(tx.calldata.size());
+
+            // EIP-2929 caller-supplied warm sets — packed into the same
+            // blob, 20 bytes/addr and 52 bytes/(addr,slot) pair.
+            inputs[i].warm_addr_offset = offset;
+            inputs[i].warm_addr_count = static_cast<uint32_t>(tx.warm_addresses.size() / 20);
+            if (!tx.warm_addresses.empty())
+                std::memcpy(blob.data() + offset, tx.warm_addresses.data(), tx.warm_addresses.size());
+            offset += static_cast<uint32_t>(tx.warm_addresses.size());
+
+            inputs[i].warm_slot_offset = offset;
+            inputs[i].warm_slot_count = static_cast<uint32_t>(tx.warm_storage_keys.size() / 52);
+            if (!tx.warm_storage_keys.empty())
+                std::memcpy(blob.data() + offset, tx.warm_storage_keys.data(), tx.warm_storage_keys.size());
+            offset += static_cast<uint32_t>(tx.warm_storage_keys.size());
 
             inputs[i].gas_limit = tx.gas_limit;
             inputs[i].caller    = tx.caller;
