@@ -1370,6 +1370,12 @@ __global__ void evm_execute_kernel(
                     break;
                 }
             }
+            // Cap check before any state mutation: appending a new slot when
+            // the per-tx buffer is full would silently corrupt state. Signal
+            // INVALID-style (status=Error, all gas consumed). With a host the
+            // dispatcher routes this tx to evmone CPU (which has no cap);
+            // without one the Error is honest — the GPU can't process this tx.
+            if (!found && stor_count >= MAX_STORAGE_PER_TX) ERRA();
             original_value_record(orig_storage, orig_count, slot, current);
             uint256 original = u256_zero();
             original_value_lookup(orig_storage, orig_count, slot, original);
@@ -1386,7 +1392,7 @@ __global__ void evm_execute_kernel(
                     }
                 }
             }
-            else if (stor_count < MAX_STORAGE_PER_TX)
+            else
             {
                 storage[stor_count].key = slot;
                 storage[stor_count].value = val;
@@ -1468,7 +1474,11 @@ __global__ void evm_execute_kernel(
                     found = true;
                     break;
                 }
-            if (!found && tc < MAX_STORAGE_PER_TX)
+            // Cap check before mutation — same policy as 0x55 SSTORE. A
+            // silent drop would leave the transient store inconsistent with
+            // what TLOAD reads back. INVALID-style: status=Error, all gas.
+            if (!found && tc >= MAX_STORAGE_PER_TX) ERRA();
+            if (!found)
             {
                 transient[tc].key = slot;
                 transient[tc].value = val;

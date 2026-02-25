@@ -768,6 +768,30 @@ struct EvmInterpreter
                 {
                     s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
                     s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
+                    // Cap check before any state mutation: appending a new
+                    // slot when storage_count == storage_capacity would
+                    // silently drop the write. Signal INVALID-style (status
+                    // maps to TxStatus::Error, all gas consumed). With a
+                    // host the dispatcher routes this tx to evmone CPU
+                    // (which has no cap); without one the Error is honest —
+                    // the kernel can't process this tx.
+                    bool slot_present = false;
+                    {
+                        gpu_u32 sc = *storage_count;
+                        for (gpu_u32 i = sc; i > 0; --i)
+                        {
+                            if (eq(storage_keys[i - 1], a))
+                            {
+                                slot_present = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!slot_present && *storage_count >= storage_capacity)
+                    {
+                        gas = 0;
+                        return {ExecStatus::InvalidOpcode, gas_start, 0, 0};
+                    }
                     // EIP-2200: gas depends on original, current, and new value.
                     uint256 current = sload(a);
                     record_original(a, current);
