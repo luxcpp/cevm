@@ -59,6 +59,12 @@ struct Transaction
     std::vector<uint8_t> from;     ///< 20 bytes
     std::vector<uint8_t> to;       ///< 20 bytes (empty for contract creation)
     std::vector<uint8_t> data;     ///< Calldata
+    std::vector<uint8_t> code;     ///< EVM bytecode for direct execution on the GPU.
+                                    ///< When empty, GPU paths use the scheduler-only
+                                    ///< (Block-STM) kernel. When non-empty, GPU paths
+                                    ///< dispatch through the parallel opcode interpreter
+                                    ///< (kernel::EvmKernelHost on Metal, cuda::EvmKernel
+                                    ///< on NVIDIA).
     uint64_t gas_limit = 0;
     uint64_t value = 0;            ///< Value in wei (simplified to uint64 for now)
     uint64_t nonce = 0;
