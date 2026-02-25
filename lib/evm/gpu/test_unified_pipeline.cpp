@@ -4,8 +4,8 @@
 /// @file test_unified_pipeline.cpp
 /// Unified pipeline functional + throughput test.
 ///
-/// Builds a 1000-block backlog of small blocks (each with ~16 transactions
-/// and a synthetic consensus header) and runs it twice:
+/// Builds a 1000-block backlog of small blocks (each with 16 transactions
+/// running a 50-iteration ADD loop) and runs it twice:
 ///
 ///   1. Serial mode  — process_block called once per block.
 ///   2. Pipelined mode — process_blocks with depth = max_concurrent_blocks.
@@ -13,7 +13,11 @@
 /// Verifies:
 ///   - Pipeline construction succeeds on this device.
 ///   - All result fields are populated (state_root, consensus_hash non-zero).
-///   - Pipelined throughput is no worse than serial; reports the speedup.
+///   - Total EVM gas matches the analytically computed cost of the bytecode
+///     within 5% — this catches regressions to the old fake CPU fallback that
+///     returned 21000 gas/tx regardless of bytecode.
+///   - Pipelined throughput is at least 0.5x of serial (catches a regression
+///     to all-CPU serial-equivalent execution).
 
 #include "unified_pipeline.hpp"
 
@@ -50,7 +54,52 @@ constexpr size_t TXS_PER_BLOCK = 16;
 constexpr size_t ACCOUNTS      = 256;
 constexpr uint64_t INITIAL_BALANCE = 1'000'000'000'000ULL;
 
-evm::gpu::Transaction make_tx(uint32_t i, uint32_t block_height) {
+// Loop iteration count for the synthetic ADD-loop bytecode.
+constexpr uint16_t LOOP_ITERATIONS = 50;
+
+/// Build a counter-increment loop:
+///   PUSH1 0      ; counter = 0           [3 gas]
+///   JUMPDEST     ; loop:                 [1 gas]
+///   PUSH1 1                              [3 gas]
+///   ADD          ; counter += 1          [3 gas]
+///   DUP1                                 [3 gas]
+///   PUSH2 N      ; iteration cap         [3 gas]
+///   SWAP1                                [3 gas]
+///   LT           ; counter < N ?         [3 gas]
+///   PUSH1 2      ; loop JUMPDEST offset  [3 gas]
+///   JUMPI        ; if so, loop          [10 gas]
+///   POP                                  [2 gas]
+///   STOP                                 [0 gas]
+///
+/// Per-iter cost (after the first JUMPDEST tick): 32 gas.
+/// Initial PUSH1 0: 3 gas. Trailing POP+STOP: 2 gas.
+/// Total for N iterations: 3 + 32*N + 2 = 32*N + 5.
+inline std::vector<uint8_t> build_add_loop_bytecode(uint16_t iterations) {
+    std::vector<uint8_t> code;
+    code.push_back(0x60); code.push_back(0x00);                    // PUSH1 0
+    code.push_back(0x5b);                                          // JUMPDEST (offset 2)
+    code.push_back(0x60); code.push_back(0x01);                    // PUSH1 1
+    code.push_back(0x01);                                          // ADD
+    code.push_back(0x80);                                          // DUP1
+    code.push_back(0x61);                                          // PUSH2
+    code.push_back(static_cast<uint8_t>(iterations >> 8));
+    code.push_back(static_cast<uint8_t>(iterations & 0xFF));
+    code.push_back(0x90);                                          // SWAP1
+    code.push_back(0x10);                                          // LT
+    code.push_back(0x60); code.push_back(0x02);                    // PUSH1 2
+    code.push_back(0x57);                                          // JUMPI
+    code.push_back(0x50);                                          // POP
+    code.push_back(0x00);                                          // STOP
+    return code;
+}
+
+inline uint64_t expected_loop_gas(uint16_t iterations) {
+    // Matches the cost breakdown in build_add_loop_bytecode.
+    return 32ULL * iterations + 5ULL;
+}
+
+evm::gpu::Transaction make_tx(uint32_t i, uint32_t block_height,
+                              const std::vector<uint8_t>& code) {
     evm::gpu::Transaction tx;
     tx.from.assign(20, 0);
     tx.to.assign(20, 0);
@@ -63,7 +112,8 @@ evm::gpu::Transaction make_tx(uint32_t i, uint32_t block_height) {
     tx.from[19] = static_cast<uint8_t>((sender_idx      ) & 0xFF);
     tx.to[0] = 0xAA;
     tx.to[19] = static_cast<uint8_t>(recipient_idx & 0xFF);
-    tx.gas_limit = 21000;
+    tx.code = code;                  // Real bytecode — drives kernel CPU/GPU EVM.
+    tx.gas_limit = 1'000'000;        // Plenty of gas for the loop.
     tx.gas_price = 1;
     tx.value = 1000;
     tx.nonce = block_height;
@@ -134,16 +184,28 @@ int main() {
     std::vector<std::vector<evm::gpu::Transaction>> blocks_storage(NUM_BLOCKS);
     std::vector<u::BlockContext> ctxs(NUM_BLOCKS);
 
+    const auto add_loop = build_add_loop_bytecode(LOOP_ITERATIONS);
+    const uint64_t expected_per_tx_gas = expected_loop_gas(LOOP_ITERATIONS);
+
     std::mt19937 rng(42);
     for (size_t b = 0; b < NUM_BLOCKS; b++) {
         blocks_storage[b].reserve(TXS_PER_BLOCK);
         for (size_t i = 0; i < TXS_PER_BLOCK; i++) {
             blocks_storage[b].push_back(
                 make_tx(static_cast<uint32_t>(i + b * TXS_PER_BLOCK),
-                        static_cast<uint32_t>(b)));
+                        static_cast<uint32_t>(b),
+                        add_loop));
         }
         ctxs[b] = make_ctx(b, rng);
     }
+
+    const uint64_t expected_total_gas =
+        expected_per_tx_gas * TXS_PER_BLOCK * NUM_BLOCKS;
+    std::printf("Workload bytecode: %u-iter ADD loop, expected %llu gas/tx, "
+                "%llu gas total\n\n",
+                static_cast<unsigned>(LOOP_ITERATIONS),
+                static_cast<unsigned long long>(expected_per_tx_gas),
+                static_cast<unsigned long long>(expected_total_gas));
 
     std::vector<std::span<const evm::gpu::Transaction>> blocks_spans(NUM_BLOCKS);
     for (size_t b = 0; b < NUM_BLOCKS; b++) {
@@ -237,6 +299,21 @@ int main() {
     CHECK(roots_zero == 0);
     CHECK(hashes_zero == 0);
 
+    // Real EVM execution invariant: the kernel CPU interpreter (and the Metal
+    // / CUDA backends, which emulate the same interpreter) must return the
+    // analytically computed gas for the ADD-loop bytecode. 5% tolerance covers
+    // any post-merge gas-cost adjustments on supported opcodes; the previous
+    // fake path returned 21000*N regardless of bytecode and would fail this.
+    const uint64_t low_bound  = static_cast<uint64_t>(expected_total_gas * 0.95);
+    const uint64_t high_bound = static_cast<uint64_t>(expected_total_gas * 1.05);
+    std::printf("Gas check: total=%llu  expected=%llu  bounds=[%llu, %llu]\n",
+                static_cast<unsigned long long>(total_evm_gas),
+                static_cast<unsigned long long>(expected_total_gas),
+                static_cast<unsigned long long>(low_bound),
+                static_cast<unsigned long long>(high_bound));
+    CHECK(total_evm_gas >= low_bound);
+    CHECK(total_evm_gas <= high_bound);
+
     double speedup = (pipelined_ms > 0) ? serial_ms / pipelined_ms : 0.0;
     std::printf("================================================================\n");
     std::printf("  Pipelined speedup vs serial: %.2fx\n", speedup);
@@ -246,9 +323,10 @@ int main() {
                 pipelined_ms, NUM_BLOCKS * 1000.0 / pipelined_ms);
     std::printf("================================================================\n");
 
-    // We don't fail if pipelining gives <1x on tiny workloads (worker thread
-    // overhead can dominate). The functional invariants above must all hold.
-    CHECK(speedup > 0.0);
+    // Pipelining must give at least 0.5x. Anything lower means thread overhead
+    // is dominating and a regression to all-CPU serial-equivalent execution
+    // has slipped in.
+    CHECK(speedup > 0.5);
 
     return 0;
 }
