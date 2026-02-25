@@ -7,11 +7,13 @@
 
 #ifdef __APPLE__
 #include "metal/block_stm_host.hpp"
+#include "kernel/evm_kernel_host.hpp"
 #endif
 
 #ifdef EVM_CUDA
 #include "cuda/keccak_host.hpp"
 #include "cuda/block_stm_host.hpp"
+#include "cuda/evm_kernel_host.hpp"
 #endif
 
 #include <chrono>
@@ -189,12 +191,58 @@ static bool compute_state_root_cuda_direct(BlockResult& result)
 }
 #endif  // EVM_CUDA
 
+/// Returns true iff at least one tx in the batch has GPU-executable bytecode.
+/// When true, the GPU dispatcher routes through EvmKernelHost (parallel
+/// opcode interpreter, one thread per tx). When false it routes through
+/// BlockStmGpu (scheduler + mv_memory only — for value-transfer benches).
+static bool any_tx_has_code(const std::vector<Transaction>& txs)
+{
+    for (const auto& tx : txs)
+        if (!tx.code.empty()) return true;
+    return false;
+}
+
 #ifdef __APPLE__
+/// Build a HostTransaction batch for the Metal EVM kernel from dispatch txs.
+/// Pack uint64 value/balance into the low limbs of the kernel's uint256.
+[[maybe_unused]] static std::vector<kernel::HostTransaction>
+to_host_transactions(const std::vector<Transaction>& txs)
+{
+    std::vector<kernel::HostTransaction> out;
+    out.reserve(txs.size());
+    for (const auto& tx : txs)
+    {
+        kernel::HostTransaction h;
+        h.code      = tx.code;
+        h.calldata  = tx.data;
+        h.gas_limit = tx.gas_limit;
+
+        auto pack_addr = [](kernel::uint256& dst, const std::vector<uint8_t>& addr) {
+            std::memset(&dst, 0, sizeof(dst));
+            if (addr.size() >= 20) {
+                std::memcpy(&dst, addr.data(), 20);
+            }
+        };
+        auto pack_u64 = [](kernel::uint256& dst, uint64_t v) {
+            std::memset(&dst, 0, sizeof(dst));
+            auto* limbs = reinterpret_cast<uint64_t*>(&dst);
+            limbs[0] = v;
+        };
+
+        pack_addr(h.caller, tx.from);
+        pack_addr(h.address, tx.to);
+        pack_u64(h.value, tx.value);
+        out.push_back(std::move(h));
+    }
+    return out;
+}
+
+
 /// Build per-sender account states from transactions for the Metal
 /// Block-STM kernel. Each unique sender gets nonce=tx.nonce (matching the
 /// tx so validation passes) and balance high enough to cover gas+value.
 /// Used when no host state is provided (benchmarks, isolated execution).
-static std::vector<metal::GpuAccountState>
+[[maybe_unused]] static std::vector<metal::GpuAccountState>
 synthesize_base_state(const std::vector<Transaction>& txs)
 {
     std::vector<metal::GpuAccountState> base_state;
@@ -216,7 +264,7 @@ synthesize_base_state(const std::vector<Transaction>& txs)
     }
     return base_state;
 }
-#endif
+#endif  // __APPLE__
 
 #ifdef EVM_CUDA
 static std::vector<cuda::GpuAccountState>
@@ -268,9 +316,37 @@ BlockResult execute_block(const Config& config,
     case Backend::GPU_Metal:
     {
 #ifdef __APPLE__
-        // Native GPU Block-STM path: dispatch the full execute/validate/
-        // re-execute loop on Metal. Falls back to CPU Block-STM + GPU
-        // state-root keccak if Metal device is unavailable at runtime.
+        // Real-bytecode path: parallel opcode interpreter on Metal, one
+        // thread per tx (or 32 threads/tx via execute_v2 when available).
+        if (state == nullptr && any_tx_has_code(txs))
+        {
+            auto engine = kernel::EvmKernelHost::create();
+            if (engine)
+            {
+                auto host_txs = to_host_transactions(txs);
+                auto t0 = std::chrono::high_resolution_clock::now();
+                auto results = engine->has_v2()
+                    ? engine->execute_v2(host_txs)
+                    : engine->execute(host_txs);
+                auto t1 = std::chrono::high_resolution_clock::now();
+
+                BlockResult br;
+                br.gas_used.reserve(results.size());
+                br.execution_time_ms =
+                    std::chrono::duration<double, std::milli>(t1 - t0).count();
+                for (const auto& r : results)
+                {
+                    br.gas_used.push_back(r.gas_used);
+                    br.total_gas += r.gas_used;
+                }
+                if (config.enable_state_trie_gpu)
+                    compute_state_root_gpu(br, LUX_BACKEND_METAL);
+                return br;
+            }
+        }
+        // Scheduler-only path: full execute/validate/re-execute loop on
+        // Metal for value-transfer style txs (no bytecode). Falls back to
+        // CPU Block-STM + GPU state-root keccak if Metal is unavailable.
         if (state == nullptr)
         {
             auto engine = metal::BlockStmGpu::create();
@@ -300,8 +376,50 @@ BlockResult execute_block(const Config& config,
     case Backend::GPU_CUDA:
     {
 #ifdef EVM_CUDA
-        // Native GPU Block-STM path on NVIDIA. Falls back if no CUDA
-        // device is present at runtime.
+        // Real-bytecode path: parallel opcode interpreter on CUDA.
+        if (state == nullptr && any_tx_has_code(txs))
+        {
+            auto engine = cuda::EvmKernel::create();
+            if (engine)
+            {
+                std::vector<cuda::HostTransaction> host_txs;
+                host_txs.reserve(txs.size());
+                for (const auto& tx : txs)
+                {
+                    cuda::HostTransaction h;
+                    h.code = tx.code;
+                    h.calldata = tx.data;
+                    h.gas_limit = tx.gas_limit;
+                    std::memcpy(&h.caller, tx.from.data(),
+                                std::min<size_t>(tx.from.size(), sizeof(h.caller)));
+                    std::memcpy(&h.address, tx.to.data(),
+                                std::min<size_t>(tx.to.size(), sizeof(h.address)));
+                    auto* val_lo = reinterpret_cast<uint64_t*>(&h.value);
+                    val_lo[0] = tx.value;
+                    host_txs.push_back(std::move(h));
+                }
+                auto t0 = std::chrono::high_resolution_clock::now();
+                auto results = engine->execute(host_txs);
+                auto t1 = std::chrono::high_resolution_clock::now();
+
+                BlockResult br;
+                br.gas_used.reserve(results.size());
+                br.execution_time_ms =
+                    std::chrono::duration<double, std::milli>(t1 - t0).count();
+                for (const auto& r : results)
+                {
+                    br.gas_used.push_back(r.gas_used);
+                    br.total_gas += r.gas_used;
+                }
+                if (config.enable_state_trie_gpu)
+                {
+                    if (!compute_state_root_cuda_direct(br))
+                        compute_state_root_gpu(br, LUX_BACKEND_CUDA);
+                }
+                return br;
+            }
+        }
+        // Scheduler-only path: Block-STM on NVIDIA.
         if (state == nullptr)
         {
             auto engine = cuda::BlockStmGpu::create();

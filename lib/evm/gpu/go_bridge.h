@@ -31,8 +31,10 @@ extern "C" {
 typedef struct {
     uint8_t  from[20];
     uint8_t  to[20];
-    uint8_t* data;
+    uint8_t* data;       // calldata
     uint32_t data_len;
+    uint8_t* code;       // EVM bytecode (NULL/0 ⇒ scheduler-only path, no opcode execution)
+    uint32_t code_len;
     uint64_t gas_limit;
     uint64_t value;
     uint64_t nonce;

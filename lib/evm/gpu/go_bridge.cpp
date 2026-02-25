@@ -30,6 +30,9 @@ CGpuBlockResult gpu_execute_block(
         if (txs[i].data != nullptr && txs[i].data_len > 0) {
             etx.data.assign(txs[i].data, txs[i].data + txs[i].data_len);
         }
+        if (txs[i].code != nullptr && txs[i].code_len > 0) {
+            etx.code.assign(txs[i].code, txs[i].code + txs[i].code_len);
+        }
         etx.gas_limit = txs[i].gas_limit;
         etx.value     = txs[i].value;
         etx.nonce     = txs[i].nonce;
@@ -82,6 +85,9 @@ CGpuBlockResultV2 gpu_execute_block_v2(
         }
         if (txs[i].data != nullptr && txs[i].data_len > 0) {
             etx.data.assign(txs[i].data, txs[i].data + txs[i].data_len);
+        }
+        if (txs[i].code != nullptr && txs[i].code_len > 0) {
+            etx.code.assign(txs[i].code, txs[i].code + txs[i].code_len);
         }
         etx.gas_limit = txs[i].gas_limit;
         etx.value     = txs[i].value;
