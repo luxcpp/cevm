@@ -586,6 +586,9 @@ __device__ static constexpr unsigned int MAX_MEMORY_PER_TX  = 65536;
 __device__ static constexpr unsigned int MAX_OUTPUT_PER_TX  = 1024;
 __device__ static constexpr unsigned int MAX_STORAGE_PER_TX = 64;
 __device__ static constexpr unsigned int MAX_LOGS_PER_TX    = 16;
+// Mirrors blob_hashes[8] in BlockContext. The kernel must never index
+// past this even if the host writes a larger num_blob_hashes.
+__device__ static constexpr unsigned int MAX_BLOB_HASHES    = 8;
 
 __device__ static constexpr unsigned long long GAS_VERYLOW    = 3;
 __device__ static constexpr unsigned long long GAS_LOW        = 5;
@@ -1127,13 +1130,23 @@ __global__ void evm_execute_kernel(
             unsigned long long copy_gas = GAS_COPY * words;
             if (gas < copy_gas) OOG(); gas -= copy_gas;
             if (!expand_mem_range(mem, mem_size, gas, dest, size)) OOG();
-            // src offset: if it overflows 32 bits, treat it as past-end (zero pad).
-            unsigned int src_off = (sv.w[1] | sv.w[2] | sv.w[3] || sv.w[0] >= 0xFFFFFFFFULL)
-                                       ? calldata_size
-                                       : (unsigned int)sv.w[0];
+            // src_off treated as past-end (zero-pad) when:
+            //   - any high limb of sv non-zero,
+            //   - sv.w[0] already >= calldata_size,
+            //   - sv.w[0] + size overflows uint32 (per-byte add would wrap).
+            // Old check `sv.w[0] >= 0xFFFFFFFFULL` only caught exactly
+            // 0xFFFFFFFF; src=0xFFFFFFFE size=5 would wrap and read
+            // calldata[0..2] instead of returning zeros.
+            unsigned long long src_lo = sv.w[0];
+            bool src_past_end = (sv.w[1] | sv.w[2] | sv.w[3]) != 0 ||
+                                src_lo >= calldata_size ||
+                                (src_lo + sz) > 0xFFFFFFFFULL;
+            unsigned int src_off = src_past_end ? calldata_size
+                                                : (unsigned int)src_lo;
             for (unsigned int i = 0; i < size; ++i)
             {
-                unsigned int s = src_off + i;
+                unsigned long long s = (unsigned long long)src_off
+                                     + (unsigned long long)i;
                 mem[dest + i] = (s < calldata_size) ? calldata[s] : 0;
             }
             ++pc; continue;
@@ -1158,12 +1171,18 @@ __global__ void evm_execute_kernel(
             unsigned long long copy_gas = GAS_COPY * words;
             if (gas < copy_gas) OOG(); gas -= copy_gas;
             if (!expand_mem_range(mem, mem_size, gas, dest, size)) OOG();
-            unsigned int src_off = (sv.w[1] | sv.w[2] | sv.w[3] || sv.w[0] >= 0xFFFFFFFFULL)
-                                       ? code_size
-                                       : (unsigned int)sv.w[0];
+            // Same zero-pad rule as CALLDATACOPY: avoid uint32 wrap on
+            // src+i by working in 64-bit and detecting (src+size) > 2^32.
+            unsigned long long src_lo = sv.w[0];
+            bool src_past_end = (sv.w[1] | sv.w[2] | sv.w[3]) != 0 ||
+                                src_lo >= code_size ||
+                                (src_lo + sz) > 0xFFFFFFFFULL;
+            unsigned int src_off = src_past_end ? code_size
+                                                : (unsigned int)src_lo;
             for (unsigned int i = 0; i < size; ++i)
             {
-                unsigned int s = src_off + i;
+                unsigned long long s = (unsigned long long)src_off
+                                     + (unsigned long long)i;
                 mem[dest + i] = (s < code_size) ? code_dev[s] : 0;
             }
             ++pc; continue;
@@ -1267,7 +1286,14 @@ __global__ void evm_execute_kernel(
             if (sp < 1) ERR();
             uint256 iv = stack[sp - 1];
             uint256 r = u256_zero();
-            if (!iv.w[1] && !iv.w[2] && !iv.w[3] && iv.w[0] < ctx->num_blob_hashes)
+            // Cap at MAX_BLOB_HASHES even if the host wrote num_blob_hashes
+            // > 8: blob_hashes is a fixed-size array. Reading past index 7
+            // would be OOB into adjacent kernel state. EIP-4844 caps blobs
+            // per tx well below 8 in practice; belt-and-suspenders.
+            unsigned int nhashes = (ctx->num_blob_hashes > MAX_BLOB_HASHES)
+                                       ? MAX_BLOB_HASHES
+                                       : ctx->num_blob_hashes;
+            if (!iv.w[1] && !iv.w[2] && !iv.w[3] && iv.w[0] < nhashes)
             {
                 const unsigned char* h = ctx->blob_hashes[(unsigned int)iv.w[0]];
                 for (unsigned int i = 0; i < 32; ++i)
@@ -1394,6 +1420,12 @@ __global__ void evm_execute_kernel(
             }
             else
             {
+                // Capacity overflow: silently dropping a charged write
+                // would diverge from CPU evmone (no cap there) and corrupt
+                // consensus. Status=Error, all gas — the dispatcher routes
+                // a tx that errs here to evmone CPU as the unbounded
+                // fallback so legitimate large-storage txs still execute.
+                if (stor_count >= MAX_STORAGE_PER_TX) ERR();
                 storage[stor_count].key = slot;
                 storage[stor_count].value = val;
                 stor_count++;
@@ -1474,9 +1506,6 @@ __global__ void evm_execute_kernel(
                     found = true;
                     break;
                 }
-            // Cap check before mutation — same policy as 0x55 SSTORE. A
-            // silent drop would leave the transient store inconsistent with
-            // what TLOAD reads back. INVALID-style: status=Error, all gas.
             if (!found && tc >= MAX_STORAGE_PER_TX) ERRA();
             if (!found)
             {
@@ -1612,12 +1641,17 @@ __global__ void evm_execute_kernel(
             if (sv.w[1] | sv.w[2] | sv.w[3]) ERR();
             unsigned long long size = sv.w[0];
             if (!offset_in_bounds(ov, size)) ERR();
+            // Output buffer is fixed at MAX_OUTPUT_PER_TX. Silently
+            // truncating would diverge from CPU evmone (no cap there);
+            // the dispatcher routes Error txs to evmone CPU as the
+            // unbounded fallback so legitimate large RETURN payloads
+            // still execute correctly.
+            if (size > MAX_OUTPUT_PER_TX) ERR();
             unsigned int off = (unsigned int)ov.w[0];
             unsigned int sz  = (unsigned int)size;
             if (!expand_mem_range(mem, mem_size, gas, off, sz)) OOG();
-            unsigned int csz = (sz > MAX_OUTPUT_PER_TX) ? MAX_OUTPUT_PER_TX : sz;
-            for (unsigned int i = 0; i < csz; ++i) output[i] = mem[off + i];
-            EMIT(1, gas_start - gas, refund_counter, csz);
+            for (unsigned int i = 0; i < sz; ++i) output[i] = mem[off + i];
+            EMIT(1, gas_start - gas, refund_counter, sz);
         }
         case 0xfd: { // REVERT
             if (sp < 2) ERR();
@@ -1626,12 +1660,15 @@ __global__ void evm_execute_kernel(
             if (sv.w[1] | sv.w[2] | sv.w[3]) ERR();
             unsigned long long size = sv.w[0];
             if (!offset_in_bounds(ov, size)) ERR();
+            // Same cap as RETURN: fail-loud on output > MAX_OUTPUT_PER_TX
+            // so the dispatcher falls back to evmone (no cap) instead of
+            // silently truncating REVERT data.
+            if (size > MAX_OUTPUT_PER_TX) ERR();
             unsigned int off = (unsigned int)ov.w[0];
             unsigned int sz  = (unsigned int)size;
             if (!expand_mem_range(mem, mem_size, gas, off, sz)) OOG();
-            unsigned int csz = (sz > MAX_OUTPUT_PER_TX) ? MAX_OUTPUT_PER_TX : sz;
-            for (unsigned int i = 0; i < csz; ++i) output[i] = mem[off + i];
-            EMIT(2, gas_start - gas, refund_counter, csz);
+            for (unsigned int i = 0; i < sz; ++i) output[i] = mem[off + i];
+            EMIT(2, gas_start - gas, refund_counter, sz);
         }
         case 0xfe: // INVALID — consume all gas
             EMIT(4, gas_start, refund_counter, 0);

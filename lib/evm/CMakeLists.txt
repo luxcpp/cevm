@@ -314,10 +314,8 @@ if(GTest_FOUND)
         target_link_libraries(stack-depth-test PRIVATE evm-metal-hosts evm-kernel-metal)
     endif()
 
-    # Storage-overflow detection: bytecode with 65 SSTORE / TSTORE writes
-    # used to silently drop the 65th when the per-tx kernel cap (64) was
-    # exceeded. Now signals an exceptional halt so the dispatcher can fall
-    # back to evmone (which has no cap).
+    # Storage-overflow detection: 65th SSTORE/TSTORE signals exceptional halt
+    # instead of silently dropping the write.
     add_executable(storage-overflow-test
         ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/storage_overflow_test.cpp
     )
@@ -330,6 +328,21 @@ if(GTest_FOUND)
     )
     if(APPLE)
         target_link_libraries(storage-overflow-test PRIVATE evm-metal-hosts evm-kernel-metal)
+    endif()
+
+    # Kernel edge-cases: uint32 wrap, 2048-byte RETURN, BLOBHASH OOB, etc.
+    add_executable(kernel-edge-cases-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/kernel_edge_cases_test.cpp
+    )
+    target_compile_features(kernel-edge-cases-test PRIVATE cxx_std_20)
+    target_include_directories(kernel-edge-cases-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${include_dir}
+    )
+    target_link_libraries(kernel-edge-cases-test PRIVATE
+        evm-gpu evm evmc::evmc GTest::gtest GTest::gtest_main
+    )
+    if(APPLE)
+        target_link_libraries(kernel-edge-cases-test PRIVATE evm-metal-hosts evm-kernel-metal)
     endif()
 endif()
 
