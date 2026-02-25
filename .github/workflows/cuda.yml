@@ -1,0 +1,114 @@
+# CUDA CI — compile and test EVM CUDA kernels on H100 hardware.
+# Uses the luxcpp self-hosted runner (labels: self-hosted, gpu, cuda, h100).
+name: CUDA EVM
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'lib/evm/gpu/cuda/**'
+      - 'lib/evm/gpu/go_bridge.*'
+      - 'lib/evm/gpu/gpu_dispatch.*'
+      - 'lib/evm/CMakeLists.txt'
+      - 'CMakeLists.txt'
+      - '.github/workflows/cuda.yml'
+  pull_request:
+    paths:
+      - 'lib/evm/gpu/cuda/**'
+      - 'lib/evm/CMakeLists.txt'
+      - '.github/workflows/cuda.yml'
+  workflow_dispatch:
+
+jobs:
+  cuda-build:
+    name: Build CUDA EVM kernels (H100, sm_90)
+    runs-on: [self-hosted, gpu, cuda, h100]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Show toolchain
+        run: |
+          nvcc --version
+          cmake --version
+          nvidia-smi || true
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DEVMONE_CUDA=ON \
+            -DEVMONE_TESTING=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="80;90"
+
+      - name: Build evm-cuda kernels
+        run: cmake --build build --target evm-cuda -j
+
+      - name: Build evm-gpu (with EVM_CUDA defined)
+        run: cmake --build build --target evm-gpu -j
+
+      - name: Verify CUDA symbols in libevm-cuda.a
+        run: |
+          ar t build/lib/evm/libevm-cuda.a | sort
+          nm build/lib/evm/libevm-cuda.a | grep -E "(keccak|tx_validate|state_table|block_stm|evm_kernel)" | head -20 || true
+
+      - name: Verify EVM_CUDA define propagated to evm-gpu
+        run: |
+          nm build/lib/evm/libevm-gpu.a 2>&1 | grep -E "compute_state_root_cuda_direct|cuda::EvmKernel" | head -10 || true
+
+      - name: Build C++ benchmarks
+        run: |
+          cmake --build build --target evm-bench-block evm-bench-kernel -j || true
+
+      - name: Run CUDA bytecode benchmark
+        run: |
+          if [ -x build/lib/evm/evm-bench-kernel ]; then
+            build/lib/evm/evm-bench-kernel || true
+          fi
+
+  cuda-go-bindings:
+    name: Verify cevm Go bindings link against CUDA
+    needs: cuda-build
+    runs-on: [self-hosted, gpu, cuda, h100]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout cevm
+        uses: actions/checkout@v4
+        with:
+          repository: luxfi/cevm
+          path: cevm
+
+      - name: Checkout luxcpp/evm (for libs)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: luxcpp-evm
+
+      - name: Build luxcpp/evm with CUDA
+        run: |
+          cd luxcpp-evm
+          cmake -B build -DEVMONE_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="80;90"
+          cmake --build build --target evm-gpu evm-cuda evm-kernel -j
+
+      - name: Build cevm with CGO + CUDA
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          cd cevm
+          # Override the relative paths for CI layout (cevm + luxcpp/evm side by side)
+          export CGO_LDFLAGS="-L../luxcpp-evm/build/lib/evm -L../luxcpp-evm/build/lib/evm/luxcpp-gpu -L../luxcpp-evm/build/lib -levm-gpu -levm-cuda -lluxgpu -levm -lstdc++"
+          go build -v ./...
+
+      - name: Run cevm tests with CUDA backend
+        env:
+          CGO_ENABLED: '1'
+          GOWORK: 'off'
+        run: |
+          cd cevm
+          export CGO_LDFLAGS="-L../luxcpp-evm/build/lib/evm -L../luxcpp-evm/build/lib/evm/luxcpp-gpu -L../luxcpp-evm/build/lib -levm-gpu -levm-cuda -lluxgpu -levm -lstdc++"
+          go test -v ./...
