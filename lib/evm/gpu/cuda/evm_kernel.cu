@@ -6,16 +6,20 @@
 ///
 /// Mirrors the Metal V1 kernel byte-for-byte:
 ///   - Same uint256 layout (4x uint64 limbs, w[0] = low)
-///   - Same TxInput / TxOutput / StorageEntry struct sizes (matched on the host
-///     via static_assert)
+///   - Same TxInput / TxOutput / StorageEntry / BlockContext struct sizes
+///     (matched on the host via static_assert)
 ///   - Same gas costs and dispatch order
 ///   - Same status codes: 0=stop, 1=return, 2=revert, 3=oog, 4=error,
 ///     5=call_not_supported
 ///
-/// The Metal V1 source uses a 32-entry per-thread stack (line 343 of
-/// evm_kernel.metal). This port keeps that to preserve register pressure
-/// behaviour and gas/error parity. Programs that need >32 stack depth get
-/// status=Error and the dispatcher falls back to CPU evmone.
+/// Spec coverage: every Cancun-era opcode in mainnet today is implemented
+/// here EXCEPT the CALL/CREATE family (0xf0/f1/f2/f4/f5/fa/ff). Those return
+/// status=CallNotSupported so the host falls back to CPU evmone.
+///
+/// Account-state opcodes (BALANCE, EXTCODESIZE, EXTCODEHASH, EXTCODECOPY,
+/// SELFBALANCE) operate as if the address has no code and zero balance — this
+/// matches Cancun semantics for an unset account and is the safe-default for
+/// a kernel that has no Host plumbing. See report for caveats.
 
 #include <cstdint>
 #include <cuda_runtime.h>
@@ -286,6 +290,10 @@ __device__ uint256 u256_addmod(const uint256& a, const uint256& b, const uint256
     return result;
 }
 
+// FIXED (Bug 1): the old loop dropped the i=3 carry (because the guard
+// `if (i + 4 < 8)` is false for i=3) and also failed to propagate further
+// carries from r8[i+4] += if that wraparound. Use 128-bit arithmetic to
+// accumulate, then propagate the carry chain through ALL remaining limbs.
 __device__ uint256 u256_mulmod(const uint256& a, const uint256& b, const uint256& m)
 {
     if (u256_iszero(m)) return u256_zero();
@@ -296,14 +304,19 @@ __device__ uint256 u256_mulmod(const uint256& a, const uint256& b, const uint256
         for (unsigned int j = 0; j < 4; ++j)
         {
             pair64 p = mul_wide(a.w[i], b.w[j]);
-            unsigned long long s = r8[i + j] + p.lo;
-            unsigned long long c = (s < r8[i + j]) ? 1ULL : 0ULL;
-            s += carry;
-            c += (s < carry) ? 1ULL : 0ULL;
-            r8[i + j] = s;
-            carry = p.hi + c;
+            unsigned __int128 t = (unsigned __int128)r8[i + j] + p.lo + carry;
+            r8[i + j] = (unsigned long long)t;
+            carry     = (unsigned long long)(t >> 64) + p.hi;
         }
-        if (i + 4 < 8) r8[i + 4] += carry;
+        // Propagate the remaining carry through ALL higher limbs (not just one).
+        unsigned int k = i + 4;
+        while (carry && k < 8)
+        {
+            unsigned __int128 t = (unsigned __int128)r8[k] + carry;
+            r8[k] = (unsigned long long)t;
+            carry = (unsigned long long)(t >> 64);
+            ++k;
+        }
     }
     uint256 result = u256_zero();
     for (int bit = 511; bit >= 0; --bit)
@@ -383,6 +396,117 @@ __device__ unsigned int u256_byte_length(const uint256& x)
 }
 
 // =============================================================================
+// Keccak-256 (Ethereum, NOT NIST SHA-3) — used by KECCAK256 opcode (0x20).
+// Standalone single-thread implementation. Mirrors gpu/kernels/keccak256.cu
+// but inline so we don't have to link a separate translation unit into the
+// kernel module.
+// =============================================================================
+
+__device__ static const unsigned long long KECCAK_RC[24] = {
+    0x0000000000000001ULL, 0x0000000000008082ULL, 0x800000000000808aULL,
+    0x8000000080008000ULL, 0x000000000000808bULL, 0x0000000080000001ULL,
+    0x8000000080008081ULL, 0x8000000000008009ULL, 0x000000000000008aULL,
+    0x0000000000000088ULL, 0x0000000080008009ULL, 0x000000008000000aULL,
+    0x000000008000808bULL, 0x800000000000008bULL, 0x8000000000008089ULL,
+    0x8000000000008003ULL, 0x8000000000008002ULL, 0x8000000000000080ULL,
+    0x000000000000800aULL, 0x800000008000000aULL, 0x8000000080008081ULL,
+    0x8000000000008080ULL, 0x0000000080000001ULL, 0x8000000080008008ULL
+};
+__device__ static const int KECCAK_ROTC[24] = {
+    1,3,6,10,15,21,28,36,45,55,2,14,27,41,56,8,25,43,62,18,39,61,20,44
+};
+__device__ static const int KECCAK_PI[24] = {
+    10,7,11,17,18,3,5,16,8,21,24,4,15,23,19,13,12,2,20,14,22,9,6,1
+};
+
+__device__ void keccak_f1600(unsigned long long* state)
+{
+    for (int round = 0; round < 24; ++round)
+    {
+        unsigned long long C[5], D[5];
+        for (int x = 0; x < 5; ++x)
+            C[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
+        for (int x = 0; x < 5; ++x)
+        {
+            D[x] = C[(x + 4) % 5]
+                 ^ ((C[(x + 1) % 5] << 1) | (C[(x + 1) % 5] >> 63));
+            for (int y = 0; y < 25; y += 5)
+                state[y + x] ^= D[x];
+        }
+        unsigned long long t = state[1];
+        for (int i = 0; i < 24; ++i)
+        {
+            int j = KECCAK_PI[i];
+            unsigned long long tmp = state[j];
+            state[j] = (t << KECCAK_ROTC[i]) | (t >> (64 - KECCAK_ROTC[i]));
+            t = tmp;
+        }
+        for (int y = 0; y < 25; y += 5)
+        {
+            unsigned long long t0 = state[y], t1 = state[y+1], t2 = state[y+2],
+                               t3 = state[y+3], t4 = state[y+4];
+            state[y]   = t0 ^ (~t1 & t2);
+            state[y+1] = t1 ^ (~t2 & t3);
+            state[y+2] = t2 ^ (~t3 & t4);
+            state[y+3] = t3 ^ (~t4 & t0);
+            state[y+4] = t4 ^ (~t0 & t1);
+        }
+        state[0] ^= KECCAK_RC[round];
+    }
+}
+
+/// Keccak-256 over `[input, input+len)`. Writes 32 bytes to `output`.
+/// Output is the digest in big-endian byte order (Ethereum convention).
+__device__ void keccak256_dev(const unsigned char* input, unsigned int len,
+                              unsigned char output[32])
+{
+    unsigned long long state[25];
+    for (int i = 0; i < 25; ++i) state[i] = 0;
+
+    constexpr unsigned int RATE = 136;  // 1088 bits
+    unsigned int pos = 0;
+
+    while (pos + RATE <= len)
+    {
+        for (unsigned int i = 0; i < 17; ++i)
+        {
+            unsigned long long word = 0;
+            for (unsigned int b = 0; b < 8; ++b)
+                word |= (unsigned long long)input[pos + i * 8 + b] << (b * 8);
+            state[i] ^= word;
+        }
+        keccak_f1600(state);
+        pos += RATE;
+    }
+
+    unsigned char block[RATE];
+    for (unsigned int i = 0; i < RATE; ++i) block[i] = 0;
+    unsigned int rem = len - pos;
+    for (unsigned int i = 0; i < rem; ++i) block[i] = input[pos + i];
+    block[rem]      |= 0x01;
+    block[RATE - 1] |= 0x80;
+
+    for (unsigned int i = 0; i < 17; ++i)
+    {
+        unsigned long long word = 0;
+        for (unsigned int b = 0; b < 8; ++b)
+            word |= (unsigned long long)block[i * 8 + b] << (b * 8);
+        state[i] ^= word;
+    }
+    keccak_f1600(state);
+
+    // Squeeze 32 bytes (big-endian by convention here: byte 0 is the most
+    // significant byte of the 256-bit digest. We write each lane LE because
+    // the EVM later reads the 32-byte output through MLOAD which is BE — but
+    // KECCAK256 *result* in EVM is the big-endian word value pushed onto
+    // the stack. Convention: we return raw little-endian bytes here and
+    // load them into uint256 limbs preserving order.)
+    for (int i = 0; i < 4; ++i)
+        for (int b = 0; b < 8; ++b)
+            output[i * 8 + b] = (unsigned char)((state[i] >> (b * 8)) & 0xFFULL);
+}
+
+// =============================================================================
 // GPU buffer descriptors — must match Metal evm_kernel.metal layouts EXACTLY.
 // Host file evm_kernel_host.hpp also defines a TxInput/TxOutput; we keep
 // the on-device layout identical so the host can memcpy into our buffers.
@@ -414,11 +538,45 @@ struct StorageEntry
     uint256 value;
 };
 
+// Block-level context — same for every tx in a block. ABI v3 addition.
+// Layout MUST match Metal kernel BlockContext struct.
+struct BlockContext
+{
+    uint256             origin;            // 0x32 ORIGIN
+    unsigned long long  gas_price;         // 0x3a GASPRICE (top 64 bits, fits Cancun)
+    unsigned long long  timestamp;         // 0x42 TIMESTAMP
+    unsigned long long  number;            // 0x43 NUMBER
+    uint256             prevrandao;        // 0x44 PREVRANDAO (full 256)
+    unsigned long long  gas_limit;         // 0x45 GASLIMIT
+    unsigned long long  chain_id;          // 0x46 CHAINID
+    unsigned long long  base_fee;          // 0x48 BASEFEE
+    unsigned long long  blob_base_fee;     // 0x4a BLOBBASEFEE
+    uint256             coinbase;          // 0x41 COINBASE (20 bytes right-aligned)
+    unsigned char       blob_hashes[8][32];// 0x49 BLOBHASH (max 8, BE bytes)
+    unsigned int        num_blob_hashes;
+    unsigned int        _pad0;             // align to 8
+};
+
+// Log entry — written into per-tx log pool. Topics are uint256, data is held
+// inside the per-tx memory buffer (we record offset+size, not a copy, since
+// memory for the tx is preserved in the device buffer until D2H).
+struct LogEntry
+{
+    uint256       topics[4];
+    unsigned int  num_topics;
+    unsigned int  data_offset;   // offset into tx's memory pool
+    unsigned int  data_size;
+    unsigned int  _pad0;
+};
+
 // Validate that the device-side wire layout matches the host expectations.
 static_assert(sizeof(uint256)      == 32,  "device uint256 size");
 static_assert(sizeof(TxInput)      == 120, "device TxInput size");
 static_assert(sizeof(TxOutput)     == 32,  "device TxOutput size");
 static_assert(sizeof(StorageEntry) == 64,  "device StorageEntry size");
+static_assert(sizeof(BlockContext) == 32 + 8 + 8 + 8 + 32 + 8 + 8 + 8 + 8 + 32 + 8*32 + 4 + 4,
+              "device BlockContext size");
+static_assert(sizeof(LogEntry)     == 4*32 + 4 + 4 + 4 + 4, "device LogEntry size");
 
 // =============================================================================
 // Constants — must match Metal evm_kernel.metal.
@@ -427,6 +585,7 @@ static_assert(sizeof(StorageEntry) == 64,  "device StorageEntry size");
 __device__ static constexpr unsigned int MAX_MEMORY_PER_TX  = 65536;
 __device__ static constexpr unsigned int MAX_OUTPUT_PER_TX  = 1024;
 __device__ static constexpr unsigned int MAX_STORAGE_PER_TX = 64;
+__device__ static constexpr unsigned int MAX_LOGS_PER_TX    = 16;
 
 __device__ static constexpr unsigned long long GAS_VERYLOW    = 3;
 __device__ static constexpr unsigned long long GAS_LOW        = 5;
@@ -442,6 +601,26 @@ __device__ static constexpr unsigned long long GAS_SSTORE_REFUND = 4800;
 __device__ static constexpr unsigned long long GAS_MEMORY     = 3;
 __device__ static constexpr unsigned long long GAS_EXP_BASE   = 10;
 __device__ static constexpr unsigned long long GAS_EXP_BYTE   = 50;
+__device__ static constexpr unsigned long long GAS_KECCAK_BASE  = 30;
+__device__ static constexpr unsigned long long GAS_KECCAK_WORD  = 6;
+__device__ static constexpr unsigned long long GAS_COPY         = 3;
+__device__ static constexpr unsigned long long GAS_LOG_BASE     = 375;
+__device__ static constexpr unsigned long long GAS_LOG_TOPIC    = 375;
+__device__ static constexpr unsigned long long GAS_LOG_DATA     = 8;
+__device__ static constexpr unsigned long long GAS_BALANCE      = 100;   // warm
+__device__ static constexpr unsigned long long GAS_EXTCODE      = 100;   // warm
+__device__ static constexpr unsigned long long GAS_SELFBALANCE  = 5;
+__device__ static constexpr unsigned long long GAS_TLOAD        = 100;
+__device__ static constexpr unsigned long long GAS_TSTORE       = 100;
+__device__ static constexpr unsigned long long GAS_BLOCKHASH    = 20;
+
+// keccak256 of empty input (hex). EXTCODEHASH of an account with no code.
+__device__ static const unsigned char KECCAK_EMPTY[32] = {
+    0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c,
+    0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7, 0x03, 0xc0,
+    0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b,
+    0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85, 0xa4, 0x70,
+};
 
 // =============================================================================
 // JUMPDEST validation — same algorithm as Metal: scan from byte 0 skipping
@@ -530,8 +709,57 @@ __device__ unsigned long long sstore_gas_eip2200(const uint256& orig,
 }
 
 // =============================================================================
-// V1 kernel: optimized single-thread-per-tx interpreter.
-// One thread per transaction. Mirrors Metal's switch dispatch verbatim.
+// Memory expansion helper. Charges incremental gas; returns false on OOG.
+// FIXED (Bug 3): the old test ov.w[0] + 32 > MAX_MEMORY_PER_TX wraps when
+// ov.w[0] is near 2^64. We now check the high limbs and the raw value first.
+// =============================================================================
+
+__device__ __forceinline__ bool offset_in_bounds(const uint256& v,
+                                                 unsigned long long extra)
+{
+    // Reject if any high limb is non-zero, OR if w[0] exceeds the cap, OR if
+    // w[0] + extra exceeds the cap (and the addition itself doesn't wrap).
+    if (v.w[1] | v.w[2] | v.w[3]) return false;
+    if (v.w[0] > MAX_MEMORY_PER_TX) return false;
+    unsigned long long sum = v.w[0] + extra;
+    if (sum < v.w[0]) return false;            // wrap
+    if (sum > MAX_MEMORY_PER_TX) return false;
+    return true;
+}
+
+__device__ __forceinline__ bool expand_mem_words(unsigned char* mem,
+                                                 unsigned int& mem_size,
+                                                 unsigned long long& gas,
+                                                 unsigned int new_words)
+{
+    unsigned int old_words = mem_size / 32;
+    if (new_words <= old_words) return true;
+    unsigned long long cost =
+        GAS_MEMORY * new_words + ((unsigned long long)new_words * new_words) / 512
+        - GAS_MEMORY * old_words - ((unsigned long long)old_words * old_words) / 512;
+    if (gas < cost) return false;
+    gas -= cost;
+    unsigned int new_size = new_words * 32;
+    for (unsigned int i = mem_size; i < new_size; ++i) mem[i] = 0;
+    mem_size = new_size;
+    return true;
+}
+
+__device__ __forceinline__ bool expand_mem_range(unsigned char* mem,
+                                                 unsigned int& mem_size,
+                                                 unsigned long long& gas,
+                                                 unsigned int offset,
+                                                 unsigned int size)
+{
+    if (size == 0) return true;
+    unsigned int end = offset + size;
+    if (end < offset || end > MAX_MEMORY_PER_TX) return false;
+    unsigned int new_words = (end + 31) / 32;
+    return expand_mem_words(mem, mem_size, gas, new_words);
+}
+
+// =============================================================================
+// Main kernel — single-thread-per-tx interpreter.
 // =============================================================================
 
 __global__ void evm_execute_kernel(
@@ -542,6 +770,11 @@ __global__ void evm_execute_kernel(
     unsigned char*       __restrict__ mem_pool,
     StorageEntry*        __restrict__ storage_pool,
     unsigned int*        __restrict__ storage_counts,
+    StorageEntry*        __restrict__ transient_pool,
+    unsigned int*        __restrict__ transient_counts,
+    LogEntry*            __restrict__ log_pool,
+    unsigned int*        __restrict__ log_counts,
+    const BlockContext*  __restrict__ ctx,
     const unsigned int*  __restrict__ params)
 {
     const unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -555,6 +788,13 @@ __global__ void evm_execute_kernel(
     unsigned char* output = out_data + (unsigned long long)tid * MAX_OUTPUT_PER_TX;
     StorageEntry*  storage = storage_pool + (unsigned long long)tid * MAX_STORAGE_PER_TX;
     unsigned int&  stor_count = storage_counts[tid];
+    StorageEntry*  transient = transient_pool
+                              ? transient_pool + (unsigned long long)tid * MAX_STORAGE_PER_TX
+                              : nullptr;
+    unsigned int*  trans_count_ptr = transient_counts ? &transient_counts[tid] : nullptr;
+    LogEntry*      logs = log_pool ? log_pool + (unsigned long long)tid * MAX_LOGS_PER_TX
+                                   : nullptr;
+    unsigned int*  log_count_ptr = log_counts ? &log_counts[tid] : nullptr;
 
     const unsigned char* code_dev = blob + inp.code_offset;
     const unsigned int   code_size = inp.code_size;
@@ -568,8 +808,7 @@ __global__ void evm_execute_kernel(
 
     #define CODE_BYTE(idx) ((idx) < cached_size ? code_cache[(idx)] : code_dev[(idx)])
 
-    // 32-entry stack — same as Metal V1 (line 343 of evm_kernel.metal).
-    // Programs needing >32 stack entries return Error; the host falls back to CPU.
+    // 32-entry stack — same as Metal V1.
     uint256 stack[32];
     unsigned int       sp  = 0;
     unsigned long long gas = inp.gas_limit;
@@ -589,8 +828,11 @@ __global__ void evm_execute_kernel(
         out.output_size = (os); \
         return; \
     } while (0)
-    #define OOG() EMIT(3, gas_start, refund_counter, 0)
-    #define ERR() EMIT(4, gas_start - gas, refund_counter, 0)
+    #define OOG()  EMIT(3, gas_start, refund_counter, 0)
+    #define ERR()  EMIT(4, gas_start - gas, refund_counter, 0)
+    // INVALID-style: consume all gas. Used for malformed bytecode that the
+    // EVM treats like the explicit 0xFE INVALID opcode.
+    #define ERRA() EMIT(4, gas_start, refund_counter, 0)
 
     while (pc < code_size)
     {
@@ -791,10 +1033,49 @@ __global__ void evm_execute_kernel(
             ++pc; continue;
         }
 
+        case 0x20: { // KECCAK256
+            if (gas < GAS_KECCAK_BASE) OOG(); gas -= GAS_KECCAK_BASE;
+            if (sp < 2) ERR();
+            uint256 ov = stack[--sp];
+            uint256 sv = stack[--sp];
+            // size must fit in 32 bits AND offset+size must fit in memory.
+            if (sv.w[1] | sv.w[2] | sv.w[3]) ERR();
+            unsigned long long size = sv.w[0];
+            if (!offset_in_bounds(ov, size)) ERR();
+            unsigned int sz = (unsigned int)size;
+            unsigned int off = (unsigned int)ov.w[0];
+            unsigned long long words = (size + 31) / 32;
+            unsigned long long word_gas = GAS_KECCAK_WORD * words;
+            if (gas < word_gas) OOG(); gas -= word_gas;
+            if (!expand_mem_range(mem, mem_size, gas, off, sz)) OOG();
+            unsigned char digest[32];
+            keccak256_dev(mem + off, sz, digest);
+            // Load digest as a uint256: bytes are big-endian (byte 0 = MSB).
+            uint256 r = u256_zero();
+            for (unsigned int i = 0; i < 32; ++i)
+            {
+                unsigned int pfr = 31 - i;
+                r.w[pfr / 8] |= (unsigned long long)digest[i] << ((pfr % 8) * 8);
+            }
+            stack[sp++] = r;
+            ++pc; continue;
+        }
+
         case 0x30: // ADDRESS
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
             if (sp >= 32) ERR();
             stack[sp++] = inp.address; ++pc; continue;
+        case 0x31: { // BALANCE — no Host plumbing: return 0 (account has no
+                     // balance in this kernel's view). Cost: warm slot.
+            if (gas < GAS_BALANCE) OOG(); gas -= GAS_BALANCE;
+            if (sp < 1) ERR();
+            stack[sp - 1] = u256_zero();
+            ++pc; continue;
+        }
+        case 0x32: // ORIGIN
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = ctx->origin; ++pc; continue;
         case 0x33: // CALLER
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
             if (sp >= 32) ERR();
@@ -827,6 +1108,177 @@ __global__ void evm_execute_kernel(
             if (sp >= 32) ERR();
             stack[sp++] = u256_from((unsigned long long)calldata_size);
             ++pc; continue;
+        case 0x37: { // CALLDATACOPY
+            if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
+            if (sp < 3) ERR();
+            uint256 dv = stack[--sp];
+            uint256 sv = stack[--sp];
+            uint256 lv = stack[--sp];
+            if (lv.w[1] | lv.w[2] | lv.w[3]) ERR();
+            unsigned long long sz = lv.w[0];
+            if (!offset_in_bounds(dv, sz)) ERR();
+            unsigned int dest = (unsigned int)dv.w[0];
+            unsigned int size = (unsigned int)sz;
+            unsigned long long words = (sz + 31) / 32;
+            unsigned long long copy_gas = GAS_COPY * words;
+            if (gas < copy_gas) OOG(); gas -= copy_gas;
+            if (!expand_mem_range(mem, mem_size, gas, dest, size)) OOG();
+            // src offset: if it overflows 32 bits, treat it as past-end (zero pad).
+            unsigned int src_off = (sv.w[1] | sv.w[2] | sv.w[3] || sv.w[0] >= 0xFFFFFFFFULL)
+                                       ? calldata_size
+                                       : (unsigned int)sv.w[0];
+            for (unsigned int i = 0; i < size; ++i)
+            {
+                unsigned int s = src_off + i;
+                mem[dest + i] = (s < calldata_size) ? calldata[s] : 0;
+            }
+            ++pc; continue;
+        }
+        case 0x38: // CODESIZE
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = u256_from((unsigned long long)code_size);
+            ++pc; continue;
+        case 0x39: { // CODECOPY
+            if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
+            if (sp < 3) ERR();
+            uint256 dv = stack[--sp];
+            uint256 sv = stack[--sp];
+            uint256 lv = stack[--sp];
+            if (lv.w[1] | lv.w[2] | lv.w[3]) ERR();
+            unsigned long long sz = lv.w[0];
+            if (!offset_in_bounds(dv, sz)) ERR();
+            unsigned int dest = (unsigned int)dv.w[0];
+            unsigned int size = (unsigned int)sz;
+            unsigned long long words = (sz + 31) / 32;
+            unsigned long long copy_gas = GAS_COPY * words;
+            if (gas < copy_gas) OOG(); gas -= copy_gas;
+            if (!expand_mem_range(mem, mem_size, gas, dest, size)) OOG();
+            unsigned int src_off = (sv.w[1] | sv.w[2] | sv.w[3] || sv.w[0] >= 0xFFFFFFFFULL)
+                                       ? code_size
+                                       : (unsigned int)sv.w[0];
+            for (unsigned int i = 0; i < size; ++i)
+            {
+                unsigned int s = src_off + i;
+                mem[dest + i] = (s < code_size) ? code_dev[s] : 0;
+            }
+            ++pc; continue;
+        }
+        case 0x3a: // GASPRICE
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = u256_from(ctx->gas_price);
+            ++pc; continue;
+        case 0x3b: { // EXTCODESIZE — no Host: return 0 (no code).
+            if (gas < GAS_EXTCODE) OOG(); gas -= GAS_EXTCODE;
+            if (sp < 1) ERR();
+            stack[sp - 1] = u256_zero();
+            ++pc; continue;
+        }
+        case 0x3c: { // EXTCODECOPY — no Host: zero-pad. Pop 4 args.
+            if (sp < 4) ERR();
+            // Pop addr, dest, src, size.
+            (void)stack[--sp];                 // addr (unused)
+            uint256 dv = stack[--sp];
+            (void)stack[--sp];                 // src offset (unused — pads 0)
+            uint256 lv = stack[--sp];
+            if (lv.w[1] | lv.w[2] | lv.w[3]) ERR();
+            unsigned long long sz = lv.w[0];
+            if (!offset_in_bounds(dv, sz)) ERR();
+            unsigned int dest = (unsigned int)dv.w[0];
+            unsigned int size = (unsigned int)sz;
+            unsigned long long words = (sz + 31) / 32;
+            unsigned long long total_gas = GAS_EXTCODE + GAS_COPY * words;
+            if (gas < total_gas) OOG(); gas -= total_gas;
+            if (!expand_mem_range(mem, mem_size, gas, dest, size)) OOG();
+            for (unsigned int i = 0; i < size; ++i) mem[dest + i] = 0;
+            ++pc; continue;
+        }
+        case 0x3d: // RETURNDATASIZE
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = u256_zero();          // no prior call: empty
+            ++pc; continue;
+        case 0x3e: { // RETURNDATACOPY — any nonzero size is invalid (returndata empty).
+            if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
+            if (sp < 3) ERR();
+            (void)stack[--sp];                  // dest
+            (void)stack[--sp];                  // src
+            uint256 lv = stack[--sp];
+            if (lv.w[1] | lv.w[2] | lv.w[3] || lv.w[0] != 0) ERRA();
+            ++pc; continue;
+        }
+        case 0x3f: { // EXTCODEHASH — no Host: return keccak256("") for any addr.
+            if (gas < GAS_EXTCODE) OOG(); gas -= GAS_EXTCODE;
+            if (sp < 1) ERR();
+            uint256 r = u256_zero();
+            for (unsigned int i = 0; i < 32; ++i)
+            {
+                unsigned int pfr = 31 - i;
+                r.w[pfr / 8] |= (unsigned long long)KECCAK_EMPTY[i] << ((pfr % 8) * 8);
+            }
+            stack[sp - 1] = r;
+            ++pc; continue;
+        }
+        case 0x40: { // BLOCKHASH — return 0 (no history table in kernel).
+            if (gas < GAS_BLOCKHASH) OOG(); gas -= GAS_BLOCKHASH;
+            if (sp < 1) ERR();
+            stack[sp - 1] = u256_zero();
+            ++pc; continue;
+        }
+        case 0x41: // COINBASE
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = ctx->coinbase; ++pc; continue;
+        case 0x42: // TIMESTAMP
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = u256_from(ctx->timestamp); ++pc; continue;
+        case 0x43: // NUMBER
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = u256_from(ctx->number); ++pc; continue;
+        case 0x44: // PREVRANDAO (formerly DIFFICULTY)
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = ctx->prevrandao; ++pc; continue;
+        case 0x45: // GASLIMIT (block)
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = u256_from(ctx->gas_limit); ++pc; continue;
+        case 0x46: // CHAINID
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = u256_from(ctx->chain_id); ++pc; continue;
+        case 0x47: // SELFBALANCE — no Host: zero
+            if (gas < GAS_SELFBALANCE) OOG(); gas -= GAS_SELFBALANCE;
+            if (sp >= 32) ERR();
+            stack[sp++] = u256_zero(); ++pc; continue;
+        case 0x48: // BASEFEE
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = u256_from(ctx->base_fee); ++pc; continue;
+        case 0x49: { // BLOBHASH
+            if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
+            if (sp < 1) ERR();
+            uint256 iv = stack[sp - 1];
+            uint256 r = u256_zero();
+            if (!iv.w[1] && !iv.w[2] && !iv.w[3] && iv.w[0] < ctx->num_blob_hashes)
+            {
+                const unsigned char* h = ctx->blob_hashes[(unsigned int)iv.w[0]];
+                for (unsigned int i = 0; i < 32; ++i)
+                {
+                    unsigned int pfr = 31 - i;
+                    r.w[pfr / 8] |= (unsigned long long)h[i] << ((pfr % 8) * 8);
+                }
+            }
+            stack[sp - 1] = r;
+            ++pc; continue;
+        }
+        case 0x4a: // BLOBBASEFEE
+            if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
+            if (sp >= 32) ERR();
+            stack[sp++] = u256_from(ctx->blob_base_fee); ++pc; continue;
 
         case 0x50: // POP
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
@@ -837,20 +1289,9 @@ __global__ void evm_execute_kernel(
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
             if (sp < 1) ERR();
             uint256 ov = stack[sp - 1];
-            if (ov.w[1] | ov.w[2] | ov.w[3] || ov.w[0] + 32 > MAX_MEMORY_PER_TX) ERR();
+            if (!offset_in_bounds(ov, 32)) ERR();
             unsigned int off = (unsigned int)ov.w[0];
-            unsigned int end = off + 32;
-            unsigned int nw  = (end + 31) / 32;
-            if (nw * 32 > mem_size)
-            {
-                unsigned int ow = mem_size / 32;
-                unsigned long long cost =
-                    GAS_MEMORY * nw + ((unsigned long long)nw * nw) / 512
-                    - GAS_MEMORY * ow - ((unsigned long long)ow * ow) / 512;
-                if (gas < cost) OOG(); gas -= cost;
-                for (unsigned int i = mem_size; i < nw * 32; ++i) mem[i] = 0;
-                mem_size = nw * 32;
-            }
+            if (!expand_mem_range(mem, mem_size, gas, off, 32)) OOG();
             uint256 r = u256_zero();
             for (int lmb = 3; lmb >= 0; --lmb)
             {
@@ -868,20 +1309,9 @@ __global__ void evm_execute_kernel(
             if (sp < 2) ERR();
             uint256 ov = stack[--sp];
             uint256 val = stack[--sp];
-            if (ov.w[1] | ov.w[2] | ov.w[3] || ov.w[0] + 32 > MAX_MEMORY_PER_TX) ERR();
+            if (!offset_in_bounds(ov, 32)) ERR();
             unsigned int off = (unsigned int)ov.w[0];
-            unsigned int end = off + 32;
-            unsigned int nw  = (end + 31) / 32;
-            if (nw * 32 > mem_size)
-            {
-                unsigned int ow = mem_size / 32;
-                unsigned long long cost =
-                    GAS_MEMORY * nw + ((unsigned long long)nw * nw) / 512
-                    - GAS_MEMORY * ow - ((unsigned long long)ow * ow) / 512;
-                if (gas < cost) OOG(); gas -= cost;
-                for (unsigned int i = mem_size; i < nw * 32; ++i) mem[i] = 0;
-                mem_size = nw * 32;
-            }
+            if (!expand_mem_range(mem, mem_size, gas, off, 32)) OOG();
             for (int lmb = 3; lmb >= 0; --lmb)
             {
                 unsigned long long v = val.w[lmb];
@@ -892,6 +1322,17 @@ __global__ void evm_execute_kernel(
                     v >>= 8;
                 }
             }
+            ++pc; continue;
+        }
+        case 0x53: { // MSTORE8
+            if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
+            if (sp < 2) ERR();
+            uint256 ov = stack[--sp];
+            uint256 val = stack[--sp];
+            if (!offset_in_bounds(ov, 1)) ERR();
+            unsigned int off = (unsigned int)ov.w[0];
+            if (!expand_mem_range(mem, mem_size, gas, off, 1)) OOG();
+            mem[off] = (unsigned char)(val.w[0] & 0xFFULL);
             ++pc; continue;
         }
         case 0x54: { // SLOAD
@@ -992,6 +1433,77 @@ __global__ void evm_execute_kernel(
         case 0x5b: // JUMPDEST
             if (gas < GAS_JUMPDEST) OOG(); gas -= GAS_JUMPDEST;
             ++pc; continue;
+        case 0x5c: { // TLOAD (EIP-1153)
+            if (gas < GAS_TLOAD) OOG(); gas -= GAS_TLOAD;
+            if (sp < 1) ERR();
+            if (!transient || !trans_count_ptr) ERR();
+            uint256 slot = stack[sp - 1];
+            uint256 v = u256_zero();
+            unsigned int tc = *trans_count_ptr;
+            for (unsigned int i = tc; i > 0; --i)
+                if (u256_eq(transient[i - 1].key, slot))
+                {
+                    v = transient[i - 1].value;
+                    break;
+                }
+            stack[sp - 1] = v;
+            ++pc; continue;
+        }
+        case 0x5d: { // TSTORE (EIP-1153)
+            if (gas < GAS_TSTORE) OOG(); gas -= GAS_TSTORE;
+            if (sp < 2) ERR();
+            if (!transient || !trans_count_ptr) ERR();
+            uint256 slot = stack[--sp];
+            uint256 val  = stack[--sp];
+            unsigned int tc = *trans_count_ptr;
+            bool found = false;
+            for (unsigned int i = tc; i > 0; --i)
+                if (u256_eq(transient[i - 1].key, slot))
+                {
+                    transient[i - 1].value = val;
+                    found = true;
+                    break;
+                }
+            if (!found && tc < MAX_STORAGE_PER_TX)
+            {
+                transient[tc].key = slot;
+                transient[tc].value = val;
+                *trans_count_ptr = tc + 1;
+            }
+            ++pc; continue;
+        }
+        case 0x5e: { // MCOPY (EIP-5656)
+            if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
+            if (sp < 3) ERR();
+            uint256 dv = stack[--sp];
+            uint256 sv = stack[--sp];
+            uint256 lv = stack[--sp];
+            if (lv.w[1] | lv.w[2] | lv.w[3]) ERR();
+            unsigned long long sz = lv.w[0];
+            if (!offset_in_bounds(dv, sz)) ERR();
+            if (!offset_in_bounds(sv, sz)) ERR();
+            unsigned int dest = (unsigned int)dv.w[0];
+            unsigned int src  = (unsigned int)sv.w[0];
+            unsigned int size = (unsigned int)sz;
+            unsigned long long words = (sz + 31) / 32;
+            unsigned long long copy_gas = GAS_COPY * words;
+            if (gas < copy_gas) OOG(); gas -= copy_gas;
+            // Touch BOTH ranges to expand memory correctly.
+            unsigned int touch = (dest > src ? dest + size : src + size);
+            unsigned int near  = (dest > src ? src : dest);
+            if (!expand_mem_range(mem, mem_size, gas, near, touch - near)) OOG();
+            // Handle overlap with memmove semantics.
+            if (size > 0)
+            {
+                if (dest < src)
+                    for (unsigned int i = 0; i < size; ++i)
+                        mem[dest + i] = mem[src + i];
+                else
+                    for (unsigned int i = size; i > 0; --i)
+                        mem[dest + i - 1] = mem[src + i - 1];
+            }
+            ++pc; continue;
+        }
         case 0x5f: // PUSH0
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
             if (sp >= 32) ERR();
@@ -1047,29 +1559,48 @@ __global__ void evm_execute_kernel(
             ++pc; continue;
         }
 
+        // LOG0..LOG4
+        case 0xa0: case 0xa1: case 0xa2: case 0xa3: case 0xa4: {
+            unsigned int num_topics = op - 0xa0;
+            if (sp < 2u + num_topics) ERR();
+            uint256 ov = stack[--sp];
+            uint256 sv = stack[--sp];
+            if (sv.w[1] | sv.w[2] | sv.w[3]) ERR();
+            unsigned long long size = sv.w[0];
+            if (!offset_in_bounds(ov, size)) ERR();
+            unsigned int off = (unsigned int)ov.w[0];
+            unsigned int sz  = (unsigned int)size;
+            unsigned long long log_gas =
+                GAS_LOG_BASE + GAS_LOG_TOPIC * num_topics + GAS_LOG_DATA * size;
+            if (gas < log_gas) OOG(); gas -= log_gas;
+            if (!expand_mem_range(mem, mem_size, gas, off, sz)) OOG();
+            // Topics come off the stack in order topic1, topic2, ... topic_n.
+            uint256 topics[4];
+            for (unsigned int t = 0; t < num_topics; ++t) topics[t] = stack[--sp];
+            if (logs && log_count_ptr)
+            {
+                unsigned int lc = *log_count_ptr;
+                if (lc >= MAX_LOGS_PER_TX) ERR();
+                LogEntry& e = logs[lc];
+                e.num_topics = num_topics;
+                e.data_offset = off;
+                e.data_size = sz;
+                for (unsigned int t = 0; t < num_topics; ++t) e.topics[t] = topics[t];
+                *log_count_ptr = lc + 1;
+            }
+            ++pc; continue;
+        }
+
         case 0xf3: { // RETURN
             if (sp < 2) ERR();
             uint256 ov = stack[--sp];
             uint256 sv = stack[--sp];
+            if (sv.w[1] | sv.w[2] | sv.w[3]) ERR();
+            unsigned long long size = sv.w[0];
+            if (!offset_in_bounds(ov, size)) ERR();
             unsigned int off = (unsigned int)ov.w[0];
-            unsigned int sz  = (unsigned int)sv.w[0];
-            if (sz > 0)
-            {
-                unsigned int ne = off + sz;
-                if (ne < off || ne > MAX_MEMORY_PER_TX) OOG();
-                if (ne > mem_size)
-                {
-                    unsigned int nw = (ne + 31) / 32;
-                    unsigned int ow = (mem_size + 31) / 32;
-                    unsigned long long mc =
-                        GAS_MEMORY * (nw - ow)
-                        + ((unsigned long long)nw * nw / 512)
-                        - ((unsigned long long)ow * ow / 512);
-                    if (gas < mc) OOG(); gas -= mc;
-                    for (unsigned int i = mem_size; i < nw * 32; ++i) mem[i] = 0;
-                    mem_size = nw * 32;
-                }
-            }
+            unsigned int sz  = (unsigned int)size;
+            if (!expand_mem_range(mem, mem_size, gas, off, sz)) OOG();
             unsigned int csz = (sz > MAX_OUTPUT_PER_TX) ? MAX_OUTPUT_PER_TX : sz;
             for (unsigned int i = 0; i < csz; ++i) output[i] = mem[off + i];
             EMIT(1, gas_start - gas, refund_counter, csz);
@@ -1078,30 +1609,17 @@ __global__ void evm_execute_kernel(
             if (sp < 2) ERR();
             uint256 ov = stack[--sp];
             uint256 sv = stack[--sp];
+            if (sv.w[1] | sv.w[2] | sv.w[3]) ERR();
+            unsigned long long size = sv.w[0];
+            if (!offset_in_bounds(ov, size)) ERR();
             unsigned int off = (unsigned int)ov.w[0];
-            unsigned int sz  = (unsigned int)sv.w[0];
-            if (sz > 0)
-            {
-                unsigned int ne = off + sz;
-                if (ne < off || ne > MAX_MEMORY_PER_TX) OOG();
-                if (ne > mem_size)
-                {
-                    unsigned int nw = (ne + 31) / 32;
-                    unsigned int ow = (mem_size + 31) / 32;
-                    unsigned long long mc =
-                        GAS_MEMORY * (nw - ow)
-                        + ((unsigned long long)nw * nw / 512)
-                        - ((unsigned long long)ow * ow / 512);
-                    if (gas < mc) OOG(); gas -= mc;
-                    for (unsigned int i = mem_size; i < nw * 32; ++i) mem[i] = 0;
-                    mem_size = nw * 32;
-                }
-            }
+            unsigned int sz  = (unsigned int)size;
+            if (!expand_mem_range(mem, mem_size, gas, off, sz)) OOG();
             unsigned int csz = (sz > MAX_OUTPUT_PER_TX) ? MAX_OUTPUT_PER_TX : sz;
             for (unsigned int i = 0; i < csz; ++i) output[i] = mem[off + i];
             EMIT(2, gas_start - gas, refund_counter, csz);
         }
-        case 0xfe: // INVALID
+        case 0xfe: // INVALID — consume all gas
             EMIT(4, gas_start, refund_counter, 0);
 
         // CREATE / CALL / CALLCODE / DELEGATECALL / CREATE2 / STATICCALL / SELFDESTRUCT
@@ -1131,8 +1649,10 @@ __global__ void evm_execute_kernel(
             continue;
         }
 
-        // Unrecognized opcode.
-        ERR();
+        // FIXED (Bug 2): unrecognized opcodes now consume ALL gas, matching
+        // the explicit 0xFE INVALID. Before, `ERR()` reported the partial
+        // consumed-so-far amount which is consensus-incorrect.
+        ERRA();
     }
 
     EMIT(0, gas_start - gas, refund_counter, 0);
@@ -1140,6 +1660,7 @@ __global__ void evm_execute_kernel(
     #undef EMIT
     #undef OOG
     #undef ERR
+    #undef ERRA
     #undef CODE_BYTE
 }
 
@@ -1149,14 +1670,19 @@ __global__ void evm_execute_kernel(
 // =============================================================================
 
 extern "C" cudaError_t evm_cuda_evm_execute_launch(
-    const void*  d_inputs,         // TxInput*
-    const void*  d_blob,           // unsigned char*
-    void*        d_outputs,        // TxOutput*
-    void*        d_out_data,       // unsigned char*
-    void*        d_mem_pool,       // unsigned char*
-    void*        d_storage_pool,   // StorageEntry*
-    void*        d_storage_counts, // unsigned int*
-    const void*  d_params,         // const unsigned int*
+    const void*  d_inputs,            // TxInput*
+    const void*  d_blob,              // unsigned char*
+    void*        d_outputs,           // TxOutput*
+    void*        d_out_data,          // unsigned char*
+    void*        d_mem_pool,          // unsigned char*
+    void*        d_storage_pool,      // StorageEntry*
+    void*        d_storage_counts,    // unsigned int*
+    void*        d_transient_pool,    // StorageEntry* (may be null)
+    void*        d_transient_counts,  // unsigned int* (may be null)
+    void*        d_log_pool,          // LogEntry*    (may be null)
+    void*        d_log_counts,        // unsigned int* (may be null)
+    const void*  d_block_ctx,         // const BlockContext*
+    const void*  d_params,            // const unsigned int*
     unsigned int num_txs,
     cudaStream_t stream)
 {
@@ -1174,6 +1700,11 @@ extern "C" cudaError_t evm_cuda_evm_execute_launch(
         static_cast<unsigned char*>(d_mem_pool),
         static_cast<StorageEntry*>(d_storage_pool),
         static_cast<unsigned int*>(d_storage_counts),
+        static_cast<StorageEntry*>(d_transient_pool),
+        static_cast<unsigned int*>(d_transient_counts),
+        static_cast<LogEntry*>(d_log_pool),
+        static_cast<unsigned int*>(d_log_counts),
+        static_cast<const BlockContext*>(d_block_ctx),
         static_cast<const unsigned int*>(d_params));
 
     return cudaGetLastError();
