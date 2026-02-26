@@ -161,6 +161,60 @@ if(LUXCPP_GPU_FOUND)
     target_link_libraries(evm-test-modes PRIVATE evm-gpu evm evmc::evmc)
 endif()
 
+# GPU precompile dispatcher (lib/evm/gpu/precompiles/).
+add_library(evm-precompiles STATIC
+    gpu/precompiles/precompile_dispatch.cpp
+    gpu/precompiles/precompile_dispatch.hpp
+    gpu/precompiles/internal.hpp
+    gpu/precompiles/ecrecover_cpu.cpp
+    gpu/precompiles/sha256_cpu.cpp
+    gpu/precompiles/ripemd160_cpu.cpp
+    gpu/precompiles/identity.cpp
+    gpu/precompiles/modexp_cpu.cpp
+    gpu/precompiles/blake2f_cpu.cpp
+    gpu/precompiles/bn256_cpu.cpp
+    gpu/precompiles/point_eval_cpu.cpp
+    gpu/precompiles/bls12_381_cpu.cpp
+)
+target_compile_features(evm-precompiles PUBLIC cxx_std_20)
+target_link_libraries(evm-precompiles PUBLIC evmone::precompiles intx::intx)
+target_include_directories(evm-precompiles PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${include_dir}>
+)
+if(LUXCPP_GPU_FOUND)
+    target_link_libraries(evm-precompiles PUBLIC luxgpu_core_static)
+endif()
+if(APPLE AND LUXCPP_GPU_FOUND)
+    target_sources(evm-precompiles PRIVATE
+        gpu/precompiles/ecrecover_metal.mm
+        gpu/precompiles/bls12_381_metal.mm
+        gpu/precompiles/point_eval_metal.mm
+    )
+    target_link_libraries(evm-precompiles PUBLIC "-framework Metal" "-framework Foundation")
+endif()
+if(EVMONE_CUDA AND LUXCPP_GPU_FOUND)
+    target_sources(evm-precompiles PRIVATE
+        gpu/precompiles/ecrecover_cuda.cpp
+        gpu/precompiles/bls12_381_cuda.cpp
+    )
+    target_compile_definitions(evm-precompiles PUBLIC EVM_CUDA)
+endif()
+
+find_package(GTest CONFIG QUIET)
+if(GTest_FOUND)
+    add_executable(evm-precompile-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/precompile_test.cpp
+    )
+    target_compile_features(evm-precompile-test PRIVATE cxx_std_20)
+    target_include_directories(evm-precompile-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${include_dir}
+    )
+    target_link_libraries(evm-precompile-test PRIVATE
+        evm-precompiles GTest::gtest GTest::gtest_main evmc::evmc
+    )
+endif()
+
 # GPU EVM kernel interpreter (header-only library for CPU path)
 add_library(evm-kernel INTERFACE)
 target_include_directories(evm-kernel INTERFACE
