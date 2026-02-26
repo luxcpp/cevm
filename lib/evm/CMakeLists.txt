@@ -228,6 +228,19 @@ if(APPLE)
     if(LUXCPP_GPU_FOUND)
         target_link_libraries(evm-test-pipeline PRIVATE luxgpu_core_static)
     endif()
+
+    # Per-opcode coverage test for the GPU EVM kernel (Metal).
+    add_executable(evm-test-opcodes gpu/test_opcodes.cpp)
+    target_compile_features(evm-test-opcodes PRIVATE cxx_std_20)
+    target_link_libraries(evm-test-opcodes PRIVATE
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(evm-test-opcodes PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
 endif()
 
 # State layer: full Ethereum state (accounts, storage, journal) for evmone
