@@ -3,14 +3,6 @@
 
 /// @file evm_kernel_host.hpp
 /// Host-side dispatcher for GPU EVM kernel execution.
-///
-/// Dispatches N transactions to the Metal GPU. Transactions containing
-/// CALL/CREATE opcodes are detected by the GPU kernel (returns status
-/// CallNotSupported) and fall back to CPU evmone execution.
-///
-/// Usage:
-///   auto engine = EvmKernelHost::create();
-///   auto results = engine->execute(transactions);
 
 #pragma once
 
@@ -24,13 +16,10 @@
 
 namespace evm::gpu::kernel {
 
-// -- Constants matching the Metal kernel --------------------------------------
-
 static constexpr uint32_t HOST_MAX_MEMORY_PER_TX  = 65536;
-static constexpr uint32_t HOST_MAX_OUTPUT_PER_TX   = 1024;
-static constexpr uint32_t HOST_MAX_STORAGE_PER_TX  = 64;
-
-// -- GPU buffer descriptors (must match Metal structs exactly) ----------------
+static constexpr uint32_t HOST_MAX_OUTPUT_PER_TX  = 1024;
+static constexpr uint32_t HOST_MAX_STORAGE_PER_TX = 64;
+static constexpr uint32_t HOST_MAX_LOGS_PER_TX    = 16;
 
 struct TxInput
 {
@@ -46,9 +35,9 @@ struct TxInput
 
 struct TxOutput
 {
-    uint32_t status;      // 0=stop, 1=return, 2=revert, 3=oog, 4=error, 5=call_not_supported
+    uint32_t status;
     uint64_t gas_used;
-    uint64_t gas_refund;  // EIP-2200/3529 refund counter (must match Metal struct layout)
+    uint64_t gas_refund;
     uint32_t output_size;
 };
 
@@ -58,19 +47,43 @@ struct StorageEntry
     uint256 value;
 };
 
-// -- Transaction input for the host API ---------------------------------------
+/// Block-level context — same for every tx in a block. ABI v3 addition.
+struct BlockContext
+{
+    uint256  origin;
+    uint64_t gas_price;
+    uint64_t timestamp;
+    uint64_t number;
+    uint256  prevrandao;
+    uint64_t gas_limit;
+    uint64_t chain_id;
+    uint64_t base_fee;
+    uint64_t blob_base_fee;
+    uint256  coinbase;
+    uint8_t  blob_hashes[8][32];
+    uint32_t num_blob_hashes;
+    uint32_t _pad0;
+};
+
+/// Per-tx log entry written by LOG0..LOG4.
+struct GpuLogEntry
+{
+    uint256  topics[4];
+    uint32_t num_topics;
+    uint32_t data_offset;
+    uint32_t data_size;
+    uint32_t _pad0;
+};
 
 struct HostTransaction
 {
-    std::vector<uint8_t> code;      // EVM bytecode
-    std::vector<uint8_t> calldata;  // Transaction calldata
+    std::vector<uint8_t> code;
+    std::vector<uint8_t> calldata;
     uint64_t gas_limit = 0;
     uint256  caller;
     uint256  address;
     uint256  value;
 };
-
-// -- Execution result per transaction -----------------------------------------
 
 enum class TxStatus : uint32_t
 {
@@ -79,7 +92,13 @@ enum class TxStatus : uint32_t
     Revert           = 2,
     OutOfGas         = 3,
     Error            = 4,
-    CallNotSupported = 5,  // needs CPU fallback
+    CallNotSupported = 5,
+};
+
+struct HostLog
+{
+    std::vector<uint256> topics;
+    std::vector<uint8_t> data;
 };
 
 struct TxResult
@@ -87,35 +106,26 @@ struct TxResult
     TxStatus status;
     uint64_t gas_used;
     std::vector<uint8_t> output;
+    std::vector<HostLog> logs;
 };
-
-// -- Kernel host interface ----------------------------------------------------
 
 class EvmKernelHost
 {
 public:
     virtual ~EvmKernelHost() = default;
 
-    /// Create a Metal-backed kernel host. Returns nullptr if Metal is unavailable.
     static std::unique_ptr<EvmKernelHost> create();
 
-    /// Execute a batch of transactions on the GPU (V1: 1 thread per tx).
-    ///
-    /// Transactions that use CALL/CREATE will have status == CallNotSupported.
-    /// The caller is responsible for re-executing those on the CPU.
-    ///
-    /// @param txs  Transactions to execute.
-    /// @return     Per-transaction results.
     virtual std::vector<TxResult> execute(std::span<const HostTransaction> txs) = 0;
 
-    /// Execute a batch of transactions using V2 SIMD-cooperative kernel
-    /// (32 threads per tx). Falls back to V1 if V2 is not available.
+    /// Execute with explicit block context.
+    virtual std::vector<TxResult> execute(std::span<const HostTransaction> txs,
+                                          const BlockContext& ctx) = 0;
+
     virtual std::vector<TxResult> execute_v2(std::span<const HostTransaction> txs) = 0;
 
-    /// Check if V2 kernel is available.
     virtual bool has_v2() const = 0;
 
-    /// Get the GPU device name.
     virtual const char* device_name() const = 0;
 
 protected:
@@ -124,14 +134,8 @@ protected:
     EvmKernelHost& operator=(const EvmKernelHost&) = delete;
 };
 
-// -- CPU reference interpreter ------------------------------------------------
-//
-// Runs the same interpreter as the GPU kernel, but on CPU. Useful for
-// verification and fallback.
-
 inline TxResult execute_cpu(const HostTransaction& tx)
 {
-    // Allocate interpreter state.
     EvmInterpreter interp{};
     interp.code = tx.code.data();
     interp.code_size = static_cast<uint32_t>(tx.code.size());
@@ -142,12 +146,14 @@ inline TxResult execute_cpu(const HostTransaction& tx)
     interp.address = tx.address;
     interp.value = tx.value;
 
-    // Allocate memory, storage, logs.
     std::vector<uint8_t> memory(HOST_MAX_MEMORY_PER_TX, 0);
     std::vector<uint8_t> output(HOST_MAX_OUTPUT_PER_TX, 0);
     std::vector<uint256> storage_keys(HOST_MAX_STORAGE_PER_TX);
     std::vector<uint256> storage_values(HOST_MAX_STORAGE_PER_TX);
+    std::vector<uint256> orig_keys(HOST_MAX_STORAGE_PER_TX);
+    std::vector<uint256> orig_values(HOST_MAX_STORAGE_PER_TX);
     uint32_t storage_count = 0;
+    uint32_t orig_count = 0;
     std::vector<LogEntry> log_entries(MAX_LOGS);
     uint32_t log_count = 0;
 
@@ -155,6 +161,9 @@ inline TxResult execute_cpu(const HostTransaction& tx)
     interp.storage_values = storage_values.data();
     interp.storage_count = &storage_count;
     interp.storage_capacity = HOST_MAX_STORAGE_PER_TX;
+    interp.orig_keys = orig_keys.data();
+    interp.orig_values = orig_values.data();
+    interp.orig_count = &orig_count;
     interp.logs = log_entries.data();
     interp.log_count = &log_count;
     interp.log_capacity = MAX_LOGS;
