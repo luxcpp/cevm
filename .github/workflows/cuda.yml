@@ -1,5 +1,7 @@
-# CUDA CI — compile and test EVM CUDA kernels on H100 hardware.
-# Uses the luxcpp self-hosted runner (labels: self-hosted, gpu, cuda, h100).
+# CUDA CI — compile and test EVM CUDA kernels on T4 hardware.
+# Runs on the lux-gpu-ci EKS cluster (Karpenter-managed g4dn.xlarge spot).
+# Runner labels: self-hosted, linux, amd64, cuda, gpu, t4
+# See: https://github.com/luxfi/lux-gpu-ci
 name: CUDA EVM
 
 on:
@@ -20,9 +22,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  cuda-build:
-    name: Build CUDA EVM kernels (H100, sm_90)
-    runs-on: [self-hosted, gpu, cuda, h100]
+  cuda-compile:
+    name: Compile CUDA kernels (sm_75 + sm_80 + sm_90)
+    runs-on: [self-hosted, linux, amd64, cuda, gpu]
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -37,13 +39,13 @@ jobs:
           cmake --version
           nvidia-smi || true
 
-      - name: Configure
+      - name: Configure (multi-arch)
         run: |
           cmake -B build \
             -DEVMONE_CUDA=ON \
             -DEVMONE_TESTING=OFF \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CUDA_ARCHITECTURES="80;90"
+            -DCMAKE_CUDA_ARCHITECTURES="75;80;90"
 
       - name: Build evm-cuda kernels
         run: cmake --build build --target evm-cuda -j
@@ -61,46 +63,48 @@ jobs:
           nm build/lib/evm/libevm-gpu.a 2>&1 | grep -E "compute_state_root_cuda_direct|cuda::EvmKernel" | head -10 || true
 
       - name: Build C++ benchmarks
-        run: |
-          cmake --build build --target evm-bench-block evm-bench-kernel -j || true
+        run: cmake --build build --target evm-bench-block evm-bench-kernel -j || true
 
-      - name: Run CUDA bytecode benchmark
-        run: |
-          if [ -x build/lib/evm/evm-bench-kernel ]; then
-            build/lib/evm/evm-bench-kernel || true
-          fi
-
-  cuda-go-bindings:
-    name: Verify cevm Go bindings link against CUDA
-    needs: cuda-build
-    runs-on: [self-hosted, gpu, cuda, h100]
-    timeout-minutes: 15
+  cuda-test:
+    name: Run kernels on T4 GPU + cevm Go tests
+    needs: cuda-compile
+    runs-on: [self-hosted, linux, amd64, cuda, gpu, t4]
+    timeout-minutes: 30
     steps:
+      - name: Checkout luxcpp/evm
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: luxcpp-evm
+
       - name: Checkout cevm
         uses: actions/checkout@v4
         with:
           repository: luxfi/cevm
           path: cevm
 
-      - name: Checkout luxcpp/evm (for libs)
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          path: luxcpp-evm
-
-      - name: Build luxcpp/evm with CUDA
+      - name: Build luxcpp/evm with CUDA (T4 = sm_75)
         run: |
           cd luxcpp-evm
           cmake -B build -DEVMONE_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CUDA_ARCHITECTURES="80;90"
-          cmake --build build --target evm-gpu evm-cuda evm-kernel -j
+            -DCMAKE_CUDA_ARCHITECTURES="75"
+          cmake --build build --target evm-gpu evm-cuda evm-kernel evm-bench-kernel -j
+
+      - name: Run CUDA bytecode benchmark on T4
+        run: |
+          cd luxcpp-evm
+          if [ -x build/lib/evm/evm-bench-kernel ]; then
+            build/lib/evm/evm-bench-kernel
+          else
+            echo "evm-bench-kernel not built — failing"
+            exit 1
+          fi
 
       - name: Build cevm with CGO + CUDA
         env:
           CGO_ENABLED: '1'
         run: |
           cd cevm
-          # Override the relative paths for CI layout (cevm + luxcpp/evm side by side)
           export CGO_LDFLAGS="-L../luxcpp-evm/build/lib/evm -L../luxcpp-evm/build/lib/evm/luxcpp-gpu -L../luxcpp-evm/build/lib -levm-gpu -levm-cuda -lluxgpu -levm -lstdc++"
           go build -v ./...
 
