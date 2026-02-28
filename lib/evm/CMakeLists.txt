@@ -381,3 +381,46 @@ elseif(LUXCPP_GPU_FOUND)
         evm evmc::evmc intx::intx
     )
 endif()
+
+# -----------------------------------------------------------------------------
+# EVMC Host bridge (feat/gpu-host-bridge).
+#
+# Turns evmc::Host* into a code dictionary that the GPU EVM kernel can run
+# against. Pure leaf transactions and statically call-resolvable transactions
+# go through the bridge; everything else falls back to evmone via the
+# dispatcher.
+# -----------------------------------------------------------------------------
+add_library(evm-host-bridge STATIC
+    gpu/host/evmc_bridge.cpp
+    gpu/host/code_resolver.cpp
+)
+target_compile_features(evm-host-bridge PUBLIC cxx_std_20)
+target_link_libraries(evm-host-bridge
+    PUBLIC evmc::evmc evm-gpu evm
+    PRIVATE evmone::precompiles)
+target_include_directories(evm-host-bridge PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${include_dir}>
+)
+if(APPLE)
+    target_sources(evm-host-bridge PRIVATE gpu/host/frame_metal.mm)
+    target_link_libraries(evm-host-bridge PUBLIC evm-kernel-metal)
+endif()
+if(EVMONE_CUDA)
+    target_sources(evm-cuda PRIVATE gpu/host/frame_cuda.cu)
+endif()
+
+# Self-contained host bridge unit-test executable. Uses the GoogleTest already
+# pulled in by Hunter so we don't need the full evmone test framework.
+hunter_add_package(GTest)
+find_package(GTest CONFIG QUIET)
+if(GTest_FOUND)
+    add_executable(evm-test-host-bridge
+        ${PROJECT_SOURCE_DIR}/test/unittests/host_bridge_test.cpp
+    )
+    target_compile_features(evm-test-host-bridge PRIVATE cxx_std_20)
+    target_link_libraries(evm-test-host-bridge PRIVATE
+        evm-host-bridge evm-gpu evm evmc::evmc
+        GTest::gtest GTest::gtest_main
+    )
+endif()
