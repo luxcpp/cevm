@@ -159,6 +159,14 @@ if(LUXCPP_GPU_FOUND)
     add_executable(evm-test-modes gpu/test_modes.cpp)
     target_compile_features(evm-test-modes PRIVATE cxx_std_20)
     target_link_libraries(evm-test-modes PRIVATE evm-gpu evm evmc::evmc)
+    if(APPLE)
+        target_link_libraries(evm-test-modes PRIVATE evm-metal-hosts evm-kernel-metal)
+    endif()
+endif()
+
+# evm-bench-block also needs the Metal hosts to satisfy evm-gpu's references.
+if(APPLE)
+    target_link_libraries(evm-bench-block PRIVATE evm-metal-hosts evm-kernel-metal)
 endif()
 
 # GPU precompile dispatcher (lib/evm/gpu/precompiles/).
