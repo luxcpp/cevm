@@ -11,6 +11,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -128,6 +129,30 @@ private:
         return buf;
     }
 
+    /// Per-tx host-side validation. Returns true if the transaction is well
+    /// formed enough to submit to the kernel. Invalid tx are flagged in
+    /// `invalid` and reported as TxStatus::Error in the result vector — we
+    /// never feed garbage to the GPU.
+    ///
+    /// Bounds we enforce here (kept narrow; the kernel enforces gas/opcode
+    /// semantics):
+    ///   * code.size() <= MAX_CODE_PER_TX  — bytecode must fit in uint32_t
+    ///     offsets and avoid pathological compile time
+    ///   * calldata.size() <= MAX_CALLDATA_PER_TX
+    ///   * code.size() + calldata.size() must not overflow the running offset
+    ///     accumulator used for blob packing
+    static constexpr uint32_t MAX_CODE_PER_TX     = 24576 * 2;   // 2× EIP-170
+    static constexpr uint32_t MAX_CALLDATA_PER_TX = 1u << 24;    // 16 MiB
+
+    static bool validate_tx(const HostTransaction& tx)
+    {
+        if (tx.code.size() > MAX_CODE_PER_TX)
+            return false;
+        if (tx.calldata.size() > MAX_CALLDATA_PER_TX)
+            return false;
+        return true;
+    }
+
     std::vector<TxResult> execute_impl(std::span<const HostTransaction> txs,
                                        const BlockContext& ctx,
                                        id<MTLComputePipelineState> pipeline)
@@ -143,11 +168,38 @@ private:
 
         const size_t num_txs = txs.size();
 
+        // Boundary validation: any tx that fails host-side checks is marked
+        // invalid and replaced with a zero-cost no-op (empty code) for the
+        // GPU. We still have to dispatch num_txs threads because kernel
+        // arrays are indexed by gid; we just give the bad ones nothing to
+        // execute and overwrite their result with Error after dispatch.
+        std::vector<uint8_t> invalid(num_txs, 0);
+        bool any_invalid = false;
+        for (size_t i = 0; i < num_txs; ++i)
+        {
+            if (!validate_tx(txs[i]))
+            {
+                invalid[i] = 1;
+                any_invalid = true;
+            }
+        }
+
         size_t total_blob = 0;
-        for (const auto& tx : txs)
-            total_blob += tx.code.size() + tx.calldata.size();
+        for (size_t i = 0; i < num_txs; ++i)
+        {
+            if (invalid[i])
+                continue;
+            total_blob += txs[i].code.size() + txs[i].calldata.size();
+        }
         if (total_blob == 0)
             total_blob = 1;
+
+        // Overflow guard: the running offset is uint32_t; an attacker-supplied
+        // batch with total_blob > 4 GiB would wrap. We've already capped
+        // per-tx sizes so this is reachable only with millions of large tx;
+        // the explicit check is defensive.
+        if (total_blob > std::numeric_limits<uint32_t>::max())
+            throw std::runtime_error("Metal host: total tx blob exceeds 4 GiB");
 
         std::vector<TxInput> inputs(num_txs);
         std::vector<uint8_t> blob(total_blob, 0);
@@ -156,6 +208,20 @@ private:
         for (size_t i = 0; i < num_txs; ++i)
         {
             const auto& tx = txs[i];
+            if (invalid[i])
+            {
+                // Empty code+calldata, gas_limit=0 → kernel will return OOG
+                // immediately. We overwrite with TxStatus::Error post-run.
+                inputs[i].code_offset = offset;
+                inputs[i].code_size = 0;
+                inputs[i].calldata_offset = offset;
+                inputs[i].calldata_size = 0;
+                inputs[i].gas_limit = 0;
+                inputs[i].caller = uint256{};
+                inputs[i].address = uint256{};
+                inputs[i].value = uint256{};
+                continue;
+            }
             inputs[i].code_offset = offset;
             inputs[i].code_size = static_cast<uint32_t>(tx.code.size());
             if (!tx.code.empty())
@@ -285,8 +351,21 @@ private:
         std::vector<TxResult> results(num_txs);
         for (size_t i = 0; i < num_txs; ++i)
         {
-            const auto& go = gpu_outputs[i];
             auto& r = results[i];
+
+            // Tx that failed host-side validation: report Error and skip the
+            // GPU output for this slot. The kernel ran with empty code and
+            // gas_limit=0 → returned OOG, but the caller asked for an
+            // explicit Error so they can distinguish "ran-out-of-gas" from
+            // "host rejected the input".
+            if (any_invalid && invalid[i])
+            {
+                r.status = TxStatus::Error;
+                r.gas_used = 0;
+                continue;
+            }
+
+            const auto& go = gpu_outputs[i];
 
             switch (go.status)
             {
