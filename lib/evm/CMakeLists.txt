@@ -365,6 +365,22 @@ if(APPLE)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
         $<BUILD_INTERFACE:${include_dir}>
     )
+
+    # Targeted host-layer tests for evm_kernel_host.mm (cache, concurrency,
+    # boundary validation, async API). Mirrors the standalone test_opcodes
+    # pattern — no GoogleTest dep so it builds on bare Apple toolchains.
+    add_executable(metal-host-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/metal_host_test.mm)
+    target_compile_features(metal-host-test PRIVATE cxx_std_20)
+    target_link_libraries(metal-host-test PRIVATE
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(metal-host-test PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
 endif()
 
 # State layer: full Ethereum state (accounts, storage, journal) for evmone
