@@ -10,9 +10,13 @@
 #include "evm_kernel_host.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -246,21 +250,37 @@ public:
     std::vector<TxResult> execute(std::span<const HostTransaction> txs) override
     {
         BlockContext ctx{};
-        return execute_impl(txs, ctx, pipeline_v1_);
+        auto fut = enqueue(txs, ctx, pipeline_v1_);
+        return fut->await();
     }
 
     std::vector<TxResult> execute(std::span<const HostTransaction> txs,
                                   const BlockContext& ctx) override
     {
-        return execute_impl(txs, ctx, pipeline_v1_);
+        auto fut = enqueue(txs, ctx, pipeline_v1_);
+        return fut->await();
     }
 
     std::vector<TxResult> execute_v2(std::span<const HostTransaction> txs) override
     {
         BlockContext ctx{};
-        if (!pipeline_v2_)
-            return execute_impl(txs, ctx, pipeline_v1_);
-        return execute_impl(txs, ctx, pipeline_v2_);
+        id<MTLComputePipelineState> p = pipeline_v2_ ? pipeline_v2_ : pipeline_v1_;
+        auto fut = enqueue(txs, ctx, p);
+        return fut->await();
+    }
+
+    std::unique_ptr<TxResultFuture> execute_async(
+        std::span<const HostTransaction> txs,
+        const BlockContext& ctx) override
+    {
+        return enqueue(txs, ctx, pipeline_v1_);
+    }
+
+    std::unique_ptr<TxResultFuture> execute_async(
+        std::span<const HostTransaction> txs) override
+    {
+        BlockContext ctx{};
+        return enqueue(txs, ctx, pipeline_v1_);
     }
 
     bool has_v2() const override { return pipeline_v2_ != nil; }
@@ -359,18 +379,88 @@ private:
         return true;
     }
 
-    std::vector<TxResult> execute_impl(std::span<const HostTransaction> txs,
-                                       const BlockContext& ctx,
-                                       id<MTLComputePipelineState> pipeline)
+    /// Shared state between enqueue() (producer) and the completion handler
+    /// (consumer-from-the-GPU-side). The future awaits on cv.
+    struct AsyncState
+    {
+        std::mutex                 mu;
+        std::condition_variable    cv;
+        bool                       done = false;
+        std::vector<TxResult>      results;
+        std::exception_ptr         error;
+    };
+
+    /// Concrete future returned by execute_async(). Owns the host's
+    /// exec_mutex_ unique_lock until destroyed — this lets the next
+    /// execute_async() block until the prior batch's completion handler has
+    /// run, while the dispatcher thread between this future's creation and
+    /// its await() is free to do other work (build the next batch, etc.).
+    class MetalFuture final : public TxResultFuture
+    {
+    public:
+        MetalFuture(std::shared_ptr<AsyncState> state,
+                    std::unique_lock<std::mutex> exec_lock)
+            : state_(std::move(state)), exec_lock_(std::move(exec_lock)) {}
+
+        ~MetalFuture() override
+        {
+            // If the caller dropped the future without awaiting, we still
+            // must not release the host mutex until the GPU completion
+            // handler has built the results — otherwise a follow-up
+            // enqueue() would race with the in-flight kernel writing back
+            // into shared MTL buffers.
+            if (!consumed_ && state_)
+            {
+                std::unique_lock<std::mutex> g(state_->mu);
+                state_->cv.wait(g, [this]{ return state_->done; });
+            }
+        }
+
+        bool ready() const override
+        {
+            std::lock_guard<std::mutex> g(state_->mu);
+            return state_->done;
+        }
+
+        std::vector<TxResult> await() override
+        {
+            if (consumed_)
+                throw std::runtime_error("TxResultFuture::await() already consumed");
+            consumed_ = true;
+            std::unique_lock<std::mutex> g(state_->mu);
+            state_->cv.wait(g, [this]{ return state_->done; });
+            if (state_->error)
+                std::rethrow_exception(state_->error);
+            return std::move(state_->results);
+        }
+
+    private:
+        std::shared_ptr<AsyncState>  state_;
+        std::unique_lock<std::mutex> exec_lock_;
+        bool                         consumed_ = false;
+    };
+
+    /// Enqueue a batch onto the GPU and return a future. The host's
+    /// exec_mutex_ is taken inside this function and moved into the
+    /// returned future — released only when the future is destroyed (which
+    /// the future delays until the GPU completion handler has fired).
+    std::unique_ptr<TxResultFuture> enqueue(std::span<const HostTransaction> txs,
+                                            const BlockContext& ctx,
+                                            id<MTLComputePipelineState> pipeline)
     {
         if (txs.empty())
-            return {};
+        {
+            // Trivial case: build an already-completed future. No GPU work,
+            // no lock held.
+            auto state = std::make_shared<AsyncState>();
+            state->done = true;
+            return std::make_unique<MetalFuture>(state, std::unique_lock<std::mutex>{});
+        }
 
-        // Serialize buffer cache + submission on this instance. The mutex is
-        // held for the entire call (including [cmd waitUntilCompleted]) so we
-        // never overlap two GPU runs on the same shared cache. Multiple
-        // EvmKernelHost instances remain independent for higher concurrency.
-        std::lock_guard<std::mutex> guard(exec_mutex_);
+        // Acquire the per-host mutex for buffer cache + queue submission.
+        // The lock is moved into the future at the end of this function and
+        // remains held until the GPU completion handler has built results.
+        std::unique_lock<std::mutex> exec_lock(exec_mutex_);
 
         const size_t num_txs = txs.size();
 
@@ -550,77 +640,110 @@ private:
         [enc dispatchThreads:grid threadsPerThreadgroup:group];
 
         [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
 
-        if ([cmd error])
-        {
-            NSString* desc = [[cmd error] localizedDescription];
-            throw std::runtime_error(std::string("Metal command failed: ") + [desc UTF8String]);
-        }
+        // Build the future state. The completion handler captures `state`
+        // and the GPU buffers (by ARC) and produces the per-tx results once
+        // the GPU is done. The dispatcher thread returns from this function
+        // immediately after [cmd commit] without waiting on the GPU — that
+        // is the whole point of the async API.
+        auto state = std::make_shared<AsyncState>();
 
-        const auto* gpu_outputs = static_cast<const TxOutput*>([buf_outputs contents]);
-        const auto* gpu_outdata = static_cast<const uint8_t*>([buf_outdata contents]);
-        const auto* gpu_mem     = static_cast<const uint8_t*>([buf_mem contents]);
-        const auto* gpu_logs    = static_cast<const GpuLogEntry*>([buf_logs contents]);
-        const auto* gpu_log_cnt = static_cast<const uint32_t*>([buf_log_cnt contents]);
+        // Capture-by-value into the Obj-C block. We move the host-side
+        // `invalid` vector and `any_invalid` flag into the block; the GPU
+        // buffers are kept alive by ARC capture; the cache mutex is owned by
+        // the future and released after this state object signals done.
+        std::vector<uint8_t> invalid_capture = std::move(invalid);
+        const bool any_invalid_capture = any_invalid;
+        const size_t num_txs_capture = num_txs;
 
-        std::vector<TxResult> results(num_txs);
-        for (size_t i = 0; i < num_txs; ++i)
-        {
-            auto& r = results[i];
-
-            // Tx that failed host-side validation: report Error and skip the
-            // GPU output for this slot. The kernel ran with empty code and
-            // gas_limit=0 → returned OOG, but the caller asked for an
-            // explicit Error so they can distinguish "ran-out-of-gas" from
-            // "host rejected the input".
-            if (any_invalid && invalid[i])
+        [cmd addCompletedHandler:^(id<MTLCommandBuffer> done_cmd) {
+            std::shared_ptr<AsyncState> s = state;
+            try
             {
-                r.status = TxStatus::Error;
-                r.gas_used = 0;
-                continue;
-            }
-
-            const auto& go = gpu_outputs[i];
-
-            switch (go.status)
-            {
-            case 0:  r.status = TxStatus::Stop; break;
-            case 1:  r.status = TxStatus::Return; break;
-            case 2:  r.status = TxStatus::Revert; break;
-            case 3:  r.status = TxStatus::OutOfGas; break;
-            case 5:  r.status = TxStatus::CallNotSupported; break;
-            default: r.status = TxStatus::Error; break;
-            }
-            r.gas_used = go.gas_used;
-
-            if (go.output_size > 0)
-            {
-                const uint8_t* data = gpu_outdata + i * HOST_MAX_OUTPUT_PER_TX;
-                r.output.assign(data, data + go.output_size);
-            }
-
-            uint32_t lc = gpu_log_cnt[i];
-            if (lc > HOST_MAX_LOGS_PER_TX) lc = HOST_MAX_LOGS_PER_TX;
-            r.logs.reserve(lc);
-            const GpuLogEntry* base = gpu_logs + i * HOST_MAX_LOGS_PER_TX;
-            const uint8_t*     mem  = gpu_mem  + i * HOST_MAX_MEMORY_PER_TX;
-            for (uint32_t k = 0; k < lc; ++k)
-            {
-                HostLog hl;
-                hl.topics.assign(base[k].topics, base[k].topics + base[k].num_topics);
-                if (base[k].data_size > 0 &&
-                    base[k].data_offset + base[k].data_size <= HOST_MAX_MEMORY_PER_TX)
+                if ([done_cmd error])
                 {
-                    hl.data.assign(mem + base[k].data_offset,
-                                   mem + base[k].data_offset + base[k].data_size);
+                    NSString* desc = [[done_cmd error] localizedDescription];
+                    throw std::runtime_error(
+                        std::string("Metal command failed: ") + [desc UTF8String]);
                 }
-                r.logs.push_back(std::move(hl));
-            }
-        }
 
-        return results;
+                const auto* gpu_outputs = static_cast<const TxOutput*>([buf_outputs contents]);
+                const auto* gpu_outdata = static_cast<const uint8_t*>([buf_outdata contents]);
+                const auto* gpu_mem     = static_cast<const uint8_t*>([buf_mem contents]);
+                const auto* gpu_logs    = static_cast<const GpuLogEntry*>([buf_logs contents]);
+                const auto* gpu_log_cnt = static_cast<const uint32_t*>([buf_log_cnt contents]);
+
+                std::vector<TxResult> results(num_txs_capture);
+                for (size_t i = 0; i < num_txs_capture; ++i)
+                {
+                    auto& r = results[i];
+
+                    if (any_invalid_capture && invalid_capture[i])
+                    {
+                        r.status = TxStatus::Error;
+                        r.gas_used = 0;
+                        continue;
+                    }
+
+                    const auto& go = gpu_outputs[i];
+
+                    switch (go.status)
+                    {
+                    case 0:  r.status = TxStatus::Stop; break;
+                    case 1:  r.status = TxStatus::Return; break;
+                    case 2:  r.status = TxStatus::Revert; break;
+                    case 3:  r.status = TxStatus::OutOfGas; break;
+                    case 5:  r.status = TxStatus::CallNotSupported; break;
+                    default: r.status = TxStatus::Error; break;
+                    }
+                    r.gas_used = go.gas_used;
+
+                    if (go.output_size > 0)
+                    {
+                        const uint8_t* data = gpu_outdata + i * HOST_MAX_OUTPUT_PER_TX;
+                        r.output.assign(data, data + go.output_size);
+                    }
+
+                    uint32_t lc = gpu_log_cnt[i];
+                    if (lc > HOST_MAX_LOGS_PER_TX) lc = HOST_MAX_LOGS_PER_TX;
+                    r.logs.reserve(lc);
+                    const GpuLogEntry* base = gpu_logs + i * HOST_MAX_LOGS_PER_TX;
+                    const uint8_t*     mem  = gpu_mem  + i * HOST_MAX_MEMORY_PER_TX;
+                    for (uint32_t k = 0; k < lc; ++k)
+                    {
+                        HostLog hl;
+                        hl.topics.assign(base[k].topics, base[k].topics + base[k].num_topics);
+                        if (base[k].data_size > 0 &&
+                            base[k].data_offset + base[k].data_size <= HOST_MAX_MEMORY_PER_TX)
+                        {
+                            hl.data.assign(mem + base[k].data_offset,
+                                           mem + base[k].data_offset + base[k].data_size);
+                        }
+                        r.logs.push_back(std::move(hl));
+                    }
+                }
+
+                {
+                    std::lock_guard<std::mutex> g(s->mu);
+                    s->results = std::move(results);
+                    s->done = true;
+                }
+                s->cv.notify_all();
+            }
+            catch (...)
+            {
+                std::lock_guard<std::mutex> g(s->mu);
+                s->error = std::current_exception();
+                s->done = true;
+                s->cv.notify_all();
+            }
+        }];
+
+        [cmd commit];
+
+        // The future takes ownership of the lock; releasing it happens when
+        // the future is destroyed, which the future delays until done=true.
+        return std::make_unique<MetalFuture>(state, std::move(exec_lock));
     }
 
     id<MTLDevice> device_;
