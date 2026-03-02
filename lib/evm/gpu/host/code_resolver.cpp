@@ -225,8 +225,9 @@ private:
         site.fully_static = true;
     }
 
+public:
     // Stack effect for opcodes we don't model precisely.
-    // Returns {pops, pushes}.
+    // Returns {pops, pushes}. Public so RequirementsAnalyzer can reuse it.
     static std::pair<uint32_t, uint32_t> stack_effect(uint8_t op)
     {
         // Most arithmetic / comparison / bitwise ops: 2 pops, 1 push.
@@ -284,12 +285,352 @@ private:
     std::span<const uint8_t> code_;
 };
 
+// -- Requirements analyzer ----------------------------------------------------
+//
+// Walks `code` once and reports conservative upper bounds for memory,
+// storage slot count, log count, and output size. Also flags any use of
+// the six account-state opcodes the GPU kernel cannot serve.
+//
+// Design notes:
+//
+// * The stack model is the same simple constant tracker used by `Analyzer`
+//   above (PUSH/DUP/SWAP/POP/JUMPDEST). Anything else clears the relevant
+//   stack slot to "unknown".
+//
+// * For memory operations we look at the constant offset + the constant
+//   size. If either is unknown we set max_memory_used = UINT32_MAX so the
+//   dispatcher conservatively falls back. The kernel needs a hard upper
+//   bound, not a "probably fits" guess.
+//
+// * For SSTORE/SLOAD we count distinct constant slot keys via a small
+//   inline set. Non-constant keys → UINT32_MAX.
+//
+// * For LOG0..LOG4 we count reachable opcodes. LOGs after the first
+//   JUMP/JUMPI raise the count to UINT32_MAX because we can't bound loop
+//   iterations.
+//
+// * For RETURN/REVERT we read the constant size operand (top-1 of stack).
+//
+// All the upper bounds are conservative: if the analyzer can't see the
+// value, it returns one that forces fallback. Better slow-correct than
+// fast-wrong.
+class RequirementsAnalyzer
+{
+public:
+    explicit RequirementsAnalyzer(std::span<const uint8_t> code) noexcept
+        : code_{code}
+    {
+    }
+
+    TxRequirements run()
+    {
+        TxRequirements req;
+        std::vector<StackItem> stack;
+        stack.reserve(64);
+
+        // Distinct slot keys we saw on SSTORE/SLOAD. Bounded so a
+        // pathological 1MB-of-storage-keys analysis stays fast.
+        struct Slot { uint8_t bytes[32]; };
+        std::vector<Slot> seen_slots;
+        seen_slots.reserve(KERNEL_MAX_STORAGE_PER_TX + 1);
+
+        const auto add_slot = [&](const StackItem& key) {
+            if (req.max_storage_keys == UINT32_MAX)
+                return;
+            if (!key.known)
+            {
+                req.max_storage_keys = UINT32_MAX;
+                return;
+            }
+            for (const auto& s : seen_slots)
+            {
+                if (std::memcmp(s.bytes, key.bytes, 32) == 0)
+                    return;
+            }
+            Slot s;
+            std::memcpy(s.bytes, key.bytes, 32);
+            seen_slots.push_back(s);
+            if (seen_slots.size() > KERNEL_MAX_STORAGE_PER_TX)
+                req.max_storage_keys = UINT32_MAX;
+            else
+                req.max_storage_keys = static_cast<uint32_t>(seen_slots.size());
+        };
+
+        bool may_loop = false;
+
+        // Estimate memory bytes used, given constant offset and constant
+        // size. Both arguments are full 256-bit StackItems; we require
+        // they fit in 32 bits.
+        const auto bump_memory = [&](const StackItem& off, const StackItem& sz) {
+            if (req.max_memory_used == UINT32_MAX)
+                return;
+            if (!off.known || !sz.known)
+            {
+                req.max_memory_used = UINT32_MAX;
+                return;
+            }
+            for (int i = 0; i < 28; ++i)
+            {
+                if (off.bytes[i] != 0 || sz.bytes[i] != 0)
+                {
+                    req.max_memory_used = UINT32_MAX;
+                    return;
+                }
+            }
+            const uint64_t o = (uint64_t(off.bytes[28]) << 24) |
+                               (uint64_t(off.bytes[29]) << 16) |
+                               (uint64_t(off.bytes[30]) <<  8) |
+                                uint64_t(off.bytes[31]);
+            const uint64_t s = (uint64_t(sz.bytes[28]) << 24) |
+                               (uint64_t(sz.bytes[29]) << 16) |
+                               (uint64_t(sz.bytes[30]) <<  8) |
+                                uint64_t(sz.bytes[31]);
+            const uint64_t end = o + s;
+            if (end > UINT32_MAX || end < o)
+            {
+                req.max_memory_used = UINT32_MAX;
+                return;
+            }
+            const auto end32 = static_cast<uint32_t>(end);
+            if (end32 > req.max_memory_used)
+                req.max_memory_used = end32;
+        };
+
+        // Single-arg variant: bump memory to cover [off, off+span).
+        const auto bump_word_at = [&](const StackItem& off, uint64_t span) {
+            StackItem fake_size{};
+            fake_size.known = true;
+            fake_size.bytes[31] = static_cast<uint8_t>(span);
+            fake_size.bytes[30] = static_cast<uint8_t>(span >> 8);
+            fake_size.bytes[29] = static_cast<uint8_t>(span >> 16);
+            fake_size.bytes[28] = static_cast<uint8_t>(span >> 24);
+            bump_memory(off, fake_size);
+        };
+
+        const auto bump_log = [&] {
+            if (req.max_log_count == UINT32_MAX)
+                return;
+            if (may_loop)
+            {
+                req.max_log_count = UINT32_MAX;
+                return;
+            }
+            ++req.max_log_count;
+        };
+
+        const auto top = [&](size_t k) -> StackItem {
+            if (stack.size() <= k)
+                return StackItem{};
+            return stack[stack.size() - 1 - k];
+        };
+
+        for (uint32_t pc = 0; pc < code_.size();)
+        {
+            const uint8_t op = code_[pc];
+
+            // -- Account-state opcodes -----------------------------------
+            // ANY use → fall back. There is no GPU path for these.
+            switch (op)
+            {
+            case 0x31:  // BALANCE
+            case 0x3b:  // EXTCODESIZE
+            case 0x3c:  // EXTCODECOPY (also bumps memory below)
+            case 0x3f:  // EXTCODEHASH
+            case 0x40:  // BLOCKHASH
+            case 0x47:  // SELFBALANCE
+                req.reads_account_state = true;
+                break;
+            default:
+                break;
+            }
+
+            // -- Memory-touching opcodes ---------------------------------
+            switch (op)
+            {
+            case 0x51:  // MLOAD
+            case 0x52:  // MSTORE
+                bump_word_at(top(0), 32);
+                break;
+            case 0x53:  // MSTORE8
+                bump_word_at(top(0), 1);
+                break;
+            case 0x37:  // CALLDATACOPY: destOff, srcOff, size
+            case 0x39:  // CODECOPY:     destOff, srcOff, size
+            case 0x3e:  // RETURNDATACOPY: destOff, srcOff, size
+                bump_memory(top(0), top(2));
+                break;
+            case 0x3c:  // EXTCODECOPY: addr, destOff, srcOff, size
+                bump_memory(top(1), top(3));
+                break;
+            case 0x5e:  // MCOPY: destOff, srcOff, size
+                bump_memory(top(0), top(2));
+                break;
+            case 0x20:  // KECCAK256: offset, size
+            case 0xf3:  // RETURN: offset, size
+            case 0xfd:  // REVERT: offset, size
+                bump_memory(top(0), top(1));
+                break;
+            default:
+                break;
+            }
+
+            // -- Output size (RETURN/REVERT only) ------------------------
+            if (op == 0xf3 || op == 0xfd)
+            {
+                if (req.max_output_size != UINT32_MAX)
+                {
+                    const auto sz = top(1);
+                    if (!sz.known)
+                    {
+                        req.max_output_size = UINT32_MAX;
+                    }
+                    else
+                    {
+                        bool fits = true;
+                        for (int i = 0; i < 28; ++i)
+                            if (sz.bytes[i] != 0) { fits = false; break; }
+                        if (!fits)
+                        {
+                            req.max_output_size = UINT32_MAX;
+                        }
+                        else
+                        {
+                            const uint32_t s =
+                                (uint32_t(sz.bytes[28]) << 24) |
+                                (uint32_t(sz.bytes[29]) << 16) |
+                                (uint32_t(sz.bytes[30]) <<  8) |
+                                 uint32_t(sz.bytes[31]);
+                            if (s > req.max_output_size)
+                                req.max_output_size = s;
+                        }
+                    }
+                }
+            }
+
+            // -- Storage opcodes -----------------------------------------
+            if (op == 0x55)       // SSTORE: key, value
+                add_slot(top(0));
+            else if (op == 0x54)  // SLOAD: key
+                add_slot(top(0));
+
+            // -- Log opcodes ---------------------------------------------
+            if (op >= 0xa0 && op <= 0xa4)
+            {
+                bump_memory(top(0), top(1));
+                bump_log();
+            }
+
+            // -- Stack-tracking step --------------------------------------
+            if (op == 0x5f)  // PUSH0
+            {
+                StackItem it; it.known = true;
+                stack.push_back(it);
+                ++pc;
+                continue;
+            }
+            if (is_push(op))
+            {
+                const uint32_t n = static_cast<uint32_t>(op - 0x60 + 1);
+                StackItem it; it.known = true;
+                if (pc + 1 + n <= code_.size())
+                    std::memcpy(&it.bytes[32 - n], &code_[pc + 1], n);
+                stack.push_back(it);
+                pc += 1 + n;
+                continue;
+            }
+            if (is_dup(op))
+            {
+                const uint32_t k = static_cast<uint32_t>(op - 0x80 + 1);
+                if (k <= stack.size())
+                    stack.push_back(stack[stack.size() - k]);
+                else
+                    stack.push_back({});
+                ++pc;
+                continue;
+            }
+            if (is_swap(op))
+            {
+                const uint32_t k = static_cast<uint32_t>(op - 0x90 + 1);
+                if (k < stack.size())
+                {
+                    const auto t = stack.back();
+                    stack.back() = stack[stack.size() - 1 - k];
+                    stack[stack.size() - 1 - k] = t;
+                }
+                ++pc;
+                continue;
+            }
+            if (op == 0x50)  // POP
+            {
+                if (!stack.empty()) stack.pop_back();
+                ++pc;
+                continue;
+            }
+            if (op == 0x5b)  // JUMPDEST
+            {
+                stack.clear();
+                ++pc;
+                continue;
+            }
+            if (op == 0x56 || op == 0x57)  // JUMP / JUMPI
+            {
+                may_loop = true;
+                stack.clear();
+                ++pc;
+                continue;
+            }
+            if (op == 0x00 || op == 0xf3 || op == 0xfd || op == 0xfe)
+            {
+                stack.clear();
+                ++pc;
+                continue;
+            }
+
+            // Generic stack-effect step.
+            const auto [pops, pushes] = Analyzer::stack_effect(op);
+            for (uint32_t i = 0; i < pops && !stack.empty(); ++i)
+                stack.pop_back();
+            for (uint32_t i = 0; i < pushes; ++i)
+                stack.push_back({});
+
+            ++pc;
+        }
+
+        return req;
+    }
+
+private:
+    std::span<const uint8_t> code_;
+};
+
 }  // namespace
 
 CodeAnalysis analyze(std::span<const uint8_t> code)
 {
     Analyzer a{code};
     return a.run();
+}
+
+TxRequirements analyze_requirements(std::span<const uint8_t> code)
+{
+    RequirementsAnalyzer a{code};
+    return a.run();
+}
+
+uint32_t classify_warnings(const TxRequirements& req) noexcept
+{
+    uint32_t w = 0;
+    if (req.reads_account_state)
+        w |= TX_WARN_ACCOUNT_STATE_ON_GPU;
+    if (req.max_memory_used > KERNEL_MAX_MEMORY_PER_TX)
+        w |= TX_WARN_MEMORY_OVERFLOW;
+    if (req.max_storage_keys > KERNEL_MAX_STORAGE_PER_TX)
+        w |= TX_WARN_STORAGE_OVERFLOW;
+    if (req.max_log_count > KERNEL_MAX_LOGS_PER_TX)
+        w |= TX_WARN_LOG_OVERFLOW;
+    if (req.max_output_size > KERNEL_MAX_OUTPUT_PER_TX)
+        w |= TX_WARN_OUTPUT_OVERFLOW;
+    return w;
 }
 
 }  // namespace evm::gpu::host
