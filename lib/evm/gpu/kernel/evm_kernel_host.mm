@@ -221,6 +221,26 @@ private:
         std::memset([buf_trans_cnt contents], 0, trans_cnt_size);
         std::memset([buf_log_cnt contents],   0, log_cnt_size);
 
+        // SECURITY: zero the active region of mem/storage/transient/logs at the
+        // start of every call. The kernel's expand_mem_range zeros up to the
+        // per-tx high-water mark, but bytes beyond that mark retain prior-call
+        // content. A LOG that references offsets past the high-water mark
+        // (kernel bug, future opcode, or attacker-influenced data_offset)
+        // would expose stale tx data from an earlier batch — non-deterministic
+        // LOG output and a side channel between unrelated batches.
+        //
+        // Zero-on-entry makes every byte the GPU reads either fresh-allocated
+        // zero (Metal newBufferWithLength is zero-initialized) or explicitly
+        // written by this call's kernel.
+        //
+        // Cost on M1 unified memory: ~75KB × num_txs for mem (dominant). At
+        // N=2048 that's 150MB memset — sub-millisecond and dwarfed by full
+        // kernel runtime. Storage/transient/logs are smaller per-tx.
+        std::memset([buf_mem contents],     0, mem_size);
+        std::memset([buf_storage contents], 0, stor_size);
+        std::memset([buf_trans contents],   0, trans_size);
+        std::memset([buf_logs contents],    0, log_size);
+
         id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
 
