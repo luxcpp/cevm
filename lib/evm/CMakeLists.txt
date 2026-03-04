@@ -282,6 +282,26 @@ if(GTest_FOUND)
             evm-metal-hosts evm-kernel-metal
         )
     endif()
+
+    # EIP-2200 / 3529 refund counter regression test. Drives four scenarios
+    # through the kernel CPU interpreter (which the Metal/CUDA kernels
+    # emulate) and asserts gas_used after the dispatcher cap matches the
+    # value evmone would charge.
+    add_executable(evm-refund-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/refund_test.cpp
+    )
+    target_compile_features(evm-refund-test PRIVATE cxx_std_20)
+    target_include_directories(evm-refund-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${include_dir}
+    )
+    target_link_libraries(evm-refund-test PRIVATE
+        evm-gpu evm evmc::evmc GTest::gtest GTest::gtest_main
+    )
+    if(APPLE)
+        target_link_libraries(evm-refund-test PRIVATE
+            evm-metal-hosts evm-kernel-metal
+        )
+    endif()
 endif()
 
 # GPU EVM kernel interpreter (header-only library for CPU path)

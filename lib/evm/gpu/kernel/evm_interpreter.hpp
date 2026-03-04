@@ -37,9 +37,10 @@ struct GasCost
     static constexpr gpu_u64 HIGH       = 10;
     static constexpr gpu_u64 JUMPDEST   = 1;
     static constexpr gpu_u64 SLOAD      = 2100;  // cold
-    static constexpr gpu_u64 SSTORE_SET   = 20000;
-    static constexpr gpu_u64 SSTORE_RESET = 2900;
-    static constexpr gpu_u64 SSTORE_NOOP  = 100;   // EIP-2200: no-op write (same value)
+    static constexpr gpu_u64 SSTORE_SET    = 20000;
+    static constexpr gpu_u64 SSTORE_RESET  = 2900;
+    static constexpr gpu_u64 SSTORE_NOOP   = 100;   // EIP-2200: no-op write (same value)
+    static constexpr gpu_u64 SSTORE_REFUND = 4800;  // EIP-2200/3529: refund credit on slot clear
     static constexpr gpu_u64 EXP_BASE   = 10;
     static constexpr gpu_u64 EXP_BYTE   = 50;
     static constexpr gpu_u64 MEMORY     = 3;
@@ -109,6 +110,10 @@ struct InterpreterResult
     gpu_u64 gas_used;
     gpu_u64 gas_remaining;
     gpu_u32 output_size;
+    // EIP-2200 raw refund counter (signed: subtraction can dip below zero).
+    // The dispatcher applies EIP-3529 cap (refund <= gas_used / 5) before
+    // exposing gas_used to callers.
+    int64_t gas_refund = 0;
     // Output data is written to a separate buffer provided by the caller.
 };
 
@@ -314,10 +319,12 @@ struct EvmInterpreter
         }
     }
 
-    /// EIP-2200 SSTORE gas calculation.
+    /// EIP-2200 SSTORE gas calculation. Updates `rc` (signed) per EIP-2200
+    /// refund accounting; the dispatcher applies the EIP-3529 cap.
     GPU_INLINE gpu_u64 sstore_gas_eip2200(const uint256& original,
                                            const uint256& current,
-                                           const uint256& new_val) const
+                                           const uint256& new_val,
+                                           int64_t& rc) const
     {
         // No-op: writing the same value that's already there.
         if (eq(new_val, current))
@@ -328,10 +335,28 @@ struct EvmInterpreter
         {
             if (iszero(original))
                 return GasCost::SSTORE_SET;    // 0 -> non-zero: 20000
+            if (iszero(new_val))
+                rc += static_cast<int64_t>(GasCost::SSTORE_REFUND);
             return GasCost::SSTORE_RESET;      // non-zero -> different: 2900
         }
 
-        // Subsequent modification (current != original): cheap.
+        // Subsequent modification (current != original): refund bookkeeping
+        // per EIP-2200 — credit/debit as the slot transitions through zero
+        // and as we approach/leave the original value.
+        if (!iszero(original))
+        {
+            if (iszero(current))
+                rc -= static_cast<int64_t>(GasCost::SSTORE_REFUND);
+            else if (iszero(new_val))
+                rc += static_cast<int64_t>(GasCost::SSTORE_REFUND);
+        }
+        if (eq(new_val, original))
+        {
+            if (iszero(original))
+                rc += static_cast<int64_t>(GasCost::SSTORE_SET   - GasCost::SSTORE_NOOP);
+            else
+                rc += static_cast<int64_t>(GasCost::SSTORE_RESET - GasCost::SSTORE_NOOP);
+        }
         return GasCost::SSTORE_NOOP;  // 100
     }
 
@@ -364,6 +389,10 @@ struct EvmInterpreter
         pc = 0;
         mem_size = 0;
         gpu_u64 gas_start = gas;
+        // EIP-2200 raw refund counter; written by SSTORE handler. Signed so
+        // subtractions on slot transitions can dip below zero before later
+        // credits restore it. Dispatcher applies EIP-3529 cap on emit.
+        int64_t refund_counter = 0;
 
         while (pc < code_size)
         {
@@ -372,7 +401,7 @@ struct EvmInterpreter
             // -- STOP (0x00) --------------------------------------------------
             if (op == 0x00)
             {
-                return {ExecStatus::Stop, gas_start - gas, gas, 0};
+                return {ExecStatus::Stop, gas_start - gas, gas, 0, refund_counter};
             }
 
             // -- Arithmetic (0x01 - 0x0b) -------------------------------------
@@ -772,7 +801,7 @@ struct EvmInterpreter
                     uint256 current = sload(a);
                     record_original(a, current);
                     uint256 original = sload_original(a);
-                    gpu_u64 cost = sstore_gas_eip2200(original, current, b);
+                    gpu_u64 cost = sstore_gas_eip2200(original, current, b, refund_counter);
                     if (!consume_gas(cost))
                         return {ExecStatus::OutOfGas, gas_start, 0, 0};
                     sstore(a, b);
@@ -976,9 +1005,9 @@ struct EvmInterpreter
                     gpu_u32 copy_sz = (sz > MAX_OUTPUT) ? MAX_OUTPUT : sz;
                     for (gpu_u32 i = 0; i < copy_sz; ++i)
                         output[i] = mem[off + i];
-                    return {ExecStatus::Return, gas_start - gas, gas, copy_sz};
+                    return {ExecStatus::Return, gas_start - gas, gas, copy_sz, refund_counter};
                 }
-                return {ExecStatus::Return, gas_start - gas, gas, 0};
+                return {ExecStatus::Return, gas_start - gas, gas, 0, refund_counter};
             }
 
             // -- REVERT (0xfd) ------------------------------------------------
@@ -1033,7 +1062,7 @@ struct EvmInterpreter
         }  // while (pc < code_size)
 
         // Fell off the end of code -> implicit STOP.
-        return {ExecStatus::Stop, gas_start - gas, gas, 0};
+        return {ExecStatus::Stop, gas_start - gas, gas, 0, refund_counter};
     }
 };
 

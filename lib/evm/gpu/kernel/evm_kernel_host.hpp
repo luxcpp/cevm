@@ -37,7 +37,7 @@ struct TxOutput
 {
     uint32_t status;
     uint64_t gas_used;
-    uint64_t gas_refund;
+    int64_t  gas_refund;  // signed: EIP-2200 allows refund subtraction
     uint32_t output_size;
 };
 
@@ -105,6 +105,7 @@ struct TxResult
 {
     TxStatus status;
     uint64_t gas_used;
+    int64_t  gas_refund = 0;  // EIP-2200 raw refund counter; dispatcher applies EIP-3529 cap
     std::vector<uint8_t> output;
     std::vector<HostLog> logs;
 };
@@ -180,7 +181,8 @@ inline TxResult execute_cpu(const HostTransaction& tx)
     case ExecStatus::CallNotSupported: r.status = TxStatus::CallNotSupported; break;
     default:                        r.status = TxStatus::Error; break;
     }
-    r.gas_used = result.gas_used;
+    r.gas_used   = result.gas_used;
+    r.gas_refund = result.gas_refund;
     if (result.output_size > 0)
         r.output.assign(output.data(), output.data() + result.output_size);
 

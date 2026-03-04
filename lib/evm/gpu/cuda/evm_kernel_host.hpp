@@ -62,7 +62,7 @@ struct TxOutput
 {
     uint32_t  status;       // 0=stop, 1=return, 2=revert, 3=oog, 4=error, 5=call_not_supported
     uint64_t  gas_used;
-    uint64_t  gas_refund;   // EIP-2200/3529 refund counter
+    int64_t   gas_refund;   // EIP-2200 raw refund (signed). EIP-3529 cap applied at dispatcher.
     uint32_t  output_size;
 };
 
@@ -100,7 +100,7 @@ struct TxResult
 {
     TxStatus              status = TxStatus::Error;
     uint64_t              gas_used = 0;
-    uint64_t              gas_refund = 0;
+    int64_t               gas_refund = 0;  // EIP-2200 raw; cap applied at dispatcher
     std::vector<uint8_t>  output;
 };
 

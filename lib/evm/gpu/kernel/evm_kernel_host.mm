@@ -277,7 +277,8 @@ private:
             case 5:  r.status = TxStatus::CallNotSupported; break;
             default: r.status = TxStatus::Error; break;
             }
-            r.gas_used = go.gas_used;
+            r.gas_used   = go.gas_used;
+            r.gas_refund = go.gas_refund;
 
             if (go.output_size > 0)
             {

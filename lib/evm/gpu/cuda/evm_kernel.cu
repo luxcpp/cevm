@@ -528,7 +528,7 @@ struct TxOutput
 {
     unsigned int        status;
     unsigned long long  gas_used;
-    unsigned long long  gas_refund;
+    long long           gas_refund;  // signed: EIP-2200 allows refund subtraction
     unsigned int        output_size;
 };
 
@@ -683,27 +683,30 @@ __device__ void original_value_record(OriginalEntry* o, unsigned int& n,
     }
 }
 
+// Signed `rc`: EIP-2200 ordering can subtract a previously credited refund
+// (e.g. orig!=0, cur==0, then write nv==0 cancels the credit). EIP-3529 cap
+// (refund <= gas_used / 5) is applied at the dispatcher, not in-kernel.
 __device__ unsigned long long sstore_gas_eip2200(const uint256& orig,
                                                  const uint256& cur,
                                                  const uint256& nv,
-                                                 unsigned long long& rc)
+                                                 long long& rc)
 {
     if (u256_eq(nv, cur)) return GAS_SSTORE_NOOP;
     if (u256_eq(orig, cur))
     {
         if (u256_iszero(orig))      return GAS_SSTORE_SET;
-        if (u256_iszero(nv))        rc += GAS_SSTORE_REFUND;
+        if (u256_iszero(nv))        rc += (long long)GAS_SSTORE_REFUND;
         return GAS_SSTORE_RESET;
     }
     if (!u256_iszero(orig))
     {
-        if (u256_iszero(cur))       rc -= GAS_SSTORE_REFUND;
-        else if (u256_iszero(nv))   rc += GAS_SSTORE_REFUND;
+        if (u256_iszero(cur))       rc -= (long long)GAS_SSTORE_REFUND;
+        else if (u256_iszero(nv))   rc += (long long)GAS_SSTORE_REFUND;
     }
     if (u256_eq(nv, orig))
     {
-        if (u256_iszero(orig))      rc += GAS_SSTORE_SET   - GAS_SSTORE_NOOP;
-        else                        rc += GAS_SSTORE_RESET - GAS_SSTORE_NOOP;
+        if (u256_iszero(orig))      rc += (long long)(GAS_SSTORE_SET   - GAS_SSTORE_NOOP);
+        else                        rc += (long long)(GAS_SSTORE_RESET - GAS_SSTORE_NOOP);
     }
     return GAS_SSTORE_NOOP;
 }
@@ -812,7 +815,7 @@ __global__ void evm_execute_kernel(
     uint256 stack[32];
     unsigned int       sp  = 0;
     unsigned long long gas = inp.gas_limit;
-    unsigned long long refund_counter = 0;
+    long long          refund_counter = 0;
     unsigned int       pc = 0;
     unsigned int       mem_size = 0;
     const unsigned long long gas_start = gas;

@@ -249,6 +249,23 @@ static TxStatus convert_status(kernel::TxStatus s)
     return TxStatus::Error;
 }
 
+/// EIP-3529 (London): the refund counter is capped at gas_used / 5 and then
+/// subtracted from gas_used. Negative refund counters (EIP-2200 ordering can
+/// drive `rc` below zero in transient sequences) are floored at 0 — refunds
+/// can never increase the gas charged. The kernels emit raw refund + raw
+/// gas_used; the dispatcher applies the cap so all backends agree on the
+/// post-cap gas value the caller actually pays.
+static inline uint64_t apply_eip3529_cap(uint64_t gas_used, int64_t gas_refund)
+{
+    if (gas_refund <= 0)
+        return gas_used;
+    const uint64_t max_refund = gas_used / 5;
+    const uint64_t refund = (static_cast<uint64_t>(gas_refund) < max_refund)
+                                ? static_cast<uint64_t>(gas_refund)
+                                : max_refund;
+    return gas_used - refund;
+}
+
 /// Run every tx through the kernel CPU interpreter (kernel::execute_cpu),
 /// which is the same interpreter that the Metal/CUDA kernels emulate. This
 /// is the CPU reference path for parity testing — gas, status, and output
@@ -268,7 +285,7 @@ static BlockResult execute_kernel_cpu(const std::vector<Transaction>& txs,
     auto run_one = [&](size_t i) {
         auto kt = to_kernel_tx(txs[i]);
         auto r  = kernel::execute_cpu(kt);
-        br.gas_used[i] = r.gas_used;
+        br.gas_used[i] = apply_eip3529_cap(r.gas_used, r.gas_refund);
         br.status[i]   = convert_status(r.status);
         br.output[i]   = std::move(r.output);
     };
@@ -439,10 +456,11 @@ BlockResult execute_block(const Config& config,
                     std::chrono::duration<double, std::milli>(t1 - t0).count();
                 for (auto& r : results)
                 {
-                    br.gas_used.push_back(r.gas_used);
+                    const uint64_t gu = apply_eip3529_cap(r.gas_used, r.gas_refund);
+                    br.gas_used.push_back(gu);
                     br.status.push_back(convert_status(r.status));
                     br.output.push_back(std::move(r.output));
-                    br.total_gas += r.gas_used;
+                    br.total_gas += gu;
                 }
                 if (config.enable_state_trie_gpu)
                     compute_state_root_gpu(br, LUX_BACKEND_METAL);
@@ -515,13 +533,14 @@ BlockResult execute_block(const Config& config,
                     std::chrono::duration<double, std::milli>(t1 - t0).count();
                 for (auto& r : results)
                 {
-                    br.gas_used.push_back(r.gas_used);
+                    const uint64_t gu = apply_eip3529_cap(r.gas_used, r.gas_refund);
+                    br.gas_used.push_back(gu);
                     // cuda::TxStatus is bit-compatible with kernel::TxStatus
                     // (same numeric ABI). Reinterpret then convert.
                     br.status.push_back(convert_status(static_cast<kernel::TxStatus>(
                         static_cast<uint32_t>(r.status))));
                     br.output.push_back(std::move(r.output));
-                    br.total_gas += r.gas_used;
+                    br.total_gas += gu;
                 }
                 if (config.enable_state_trie_gpu)
                 {
