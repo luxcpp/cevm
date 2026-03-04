@@ -110,6 +110,14 @@ struct InterpreterResult
     gpu_u64 gas_remaining;
     gpu_u32 output_size;
     // Output data is written to a separate buffer provided by the caller.
+
+    // Signed EIP-2200/3529 refund counter. SSTORE may transiently subtract
+    // refund credit (clear-then-set within a tx), so the accumulator is
+    // signed. The dispatcher floors at 0 and applies the EIP-3529 cap
+    // (max refund = gas_used / 5). Defaults to 0 so existing aggregate
+    // returns of the form `{status, gas_used, gas_remaining, output_size}`
+    // continue to compile — only the success-terminating paths populate it.
+    int64_t gas_refund = 0;
 };
 
 // -- The Interpreter ----------------------------------------------------------
@@ -314,11 +322,20 @@ struct EvmInterpreter
         }
     }
 
-    /// EIP-2200 SSTORE gas calculation.
+    /// EIP-2200 SSTORE gas calculation. `refund_counter` accumulates the
+    /// *signed* refund delta — clear-then-set-then-clear within a single
+    /// tx produces a transient negative value. The dispatcher applies
+    /// EIP-3529 (max refund = gas_used / 5) and floors at 0.
+    ///
+    /// Mirrors the kernel-side sstore_gas_eip2200 in evm_kernel.metal /
+    /// evm_kernel.cu byte-for-byte; this is the parity reference.
     GPU_INLINE gpu_u64 sstore_gas_eip2200(const uint256& original,
                                            const uint256& current,
-                                           const uint256& new_val) const
+                                           const uint256& new_val,
+                                           int64_t& refund_counter) const
     {
+        constexpr int64_t SSTORE_REFUND = 4800;  // EIP-3529 (Cancun)
+
         // No-op: writing the same value that's already there.
         if (eq(new_val, current))
             return GasCost::SSTORE_NOOP;
@@ -328,10 +345,29 @@ struct EvmInterpreter
         {
             if (iszero(original))
                 return GasCost::SSTORE_SET;    // 0 -> non-zero: 20000
+            if (iszero(new_val))
+                refund_counter += SSTORE_REFUND;  // non-zero -> 0: refund
             return GasCost::SSTORE_RESET;      // non-zero -> different: 2900
         }
 
-        // Subsequent modification (current != original): cheap.
+        // Subsequent modification within the same tx (current != original).
+        // Adjust refund based on whether the slot was previously cleared.
+        if (!iszero(original))
+        {
+            if (iszero(current))
+                refund_counter -= SSTORE_REFUND;  // un-clear: revoke prior refund
+            else if (iszero(new_val))
+                refund_counter += SSTORE_REFUND;  // clear now: refund
+        }
+
+        // Restoration of original value: refund the overpayment.
+        if (eq(new_val, original))
+        {
+            if (iszero(original))
+                refund_counter += static_cast<int64_t>(GasCost::SSTORE_SET   - GasCost::SSTORE_NOOP);
+            else
+                refund_counter += static_cast<int64_t>(GasCost::SSTORE_RESET - GasCost::SSTORE_NOOP);
+        }
         return GasCost::SSTORE_NOOP;  // 100
     }
 
@@ -364,6 +400,11 @@ struct EvmInterpreter
         pc = 0;
         mem_size = 0;
         gpu_u64 gas_start = gas;
+        // Signed accumulator for the EIP-2200 refund counter. Mutated by
+        // sstore_gas_eip2200; reported on success-terminating opcodes
+        // (STOP, RETURN, end-of-code). Reverts and aborts drop the refund
+        // (matches evmone: state.gas_refund only honoured on success).
+        int64_t refund_counter = 0;
 
         while (pc < code_size)
         {
@@ -372,7 +413,7 @@ struct EvmInterpreter
             // -- STOP (0x00) --------------------------------------------------
             if (op == 0x00)
             {
-                return {ExecStatus::Stop, gas_start - gas, gas, 0};
+                return {ExecStatus::Stop, gas_start - gas, gas, 0, refund_counter};
             }
 
             // -- Arithmetic (0x01 - 0x0b) -------------------------------------
@@ -766,15 +807,16 @@ struct EvmInterpreter
                 }
                 else // SSTORE: key=top, value=second (EIP-2200 gas)
                 {
-                    s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
-                    s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0};
+                    s = stack.pop(a); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0, refund_counter};
+                    s = stack.pop(b); if (s != ExecStatus::Ok) return {s, gas_start - gas, gas, 0, refund_counter};
                     // EIP-2200: gas depends on original, current, and new value.
+                    // sstore_gas_eip2200 mutates refund_counter (signed delta).
                     uint256 current = sload(a);
                     record_original(a, current);
                     uint256 original = sload_original(a);
-                    gpu_u64 cost = sstore_gas_eip2200(original, current, b);
+                    gpu_u64 cost = sstore_gas_eip2200(original, current, b, refund_counter);
                     if (!consume_gas(cost))
-                        return {ExecStatus::OutOfGas, gas_start, 0, 0};
+                        return {ExecStatus::OutOfGas, gas_start, 0, 0, refund_counter};
                     sstore(a, b);
                 }
                 ++pc;
@@ -976,9 +1018,9 @@ struct EvmInterpreter
                     gpu_u32 copy_sz = (sz > MAX_OUTPUT) ? MAX_OUTPUT : sz;
                     for (gpu_u32 i = 0; i < copy_sz; ++i)
                         output[i] = mem[off + i];
-                    return {ExecStatus::Return, gas_start - gas, gas, copy_sz};
+                    return {ExecStatus::Return, gas_start - gas, gas, copy_sz, refund_counter};
                 }
-                return {ExecStatus::Return, gas_start - gas, gas, 0};
+                return {ExecStatus::Return, gas_start - gas, gas, 0, refund_counter};
             }
 
             // -- REVERT (0xfd) ------------------------------------------------
@@ -1033,7 +1075,7 @@ struct EvmInterpreter
         }  // while (pc < code_size)
 
         // Fell off the end of code -> implicit STOP.
-        return {ExecStatus::Stop, gas_start - gas, gas, 0};
+        return {ExecStatus::Stop, gas_start - gas, gas, 0, refund_counter};
     }
 };
 

@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <span>
 #include <string>
 #include <thread>
 #include <utility>
@@ -172,6 +173,21 @@ static std::string validate_config(const Config& config)
     return {};
 }
 
+/// EIP-3529 (London/Cancun) refund cap. Each kernel emits the raw signed
+/// EIP-2200 refund accumulator per tx. The dispatcher floors at 0, caps at
+/// gas_used / 5, and subtracts from gas_used. Mutates `br.gas_used` in
+/// place; consumers see the post-refund value as the spec requires.
+static void apply_eip3529_cap(BlockResult& br, std::span<const int64_t> raw_refunds)
+{
+    for (size_t i = 0; i < br.gas_used.size(); ++i)
+    {
+        const int64_t refund = std::max<int64_t>(0, raw_refunds[i]);
+        const int64_t cap    = static_cast<int64_t>(br.gas_used[i] / 5);
+        const int64_t final_refund = std::min(refund, cap);
+        br.gas_used[i] -= static_cast<uint64_t>(final_refund);
+    }
+}
+
 /// Build the state-root input bytes (concatenated gas_used as little-endian).
 /// Used by both the luxcpp/gpu path and the direct-CUDA path below.
 static std::vector<uint8_t> build_state_root_input(const BlockResult& result)
@@ -301,14 +317,20 @@ static BlockResult execute_kernel_cpu(const std::vector<Transaction>& txs,
     br.status.resize(n, TxStatus::Error);
     br.output.resize(n);
 
+    // Per-tx raw signed refund accumulator from the kernel. Floored at 0
+    // and capped to gas_used/5 by apply_eip3529_cap below before total_gas
+    // is computed.
+    std::vector<int64_t> raw_refunds(n, 0);
+
     auto t0 = std::chrono::high_resolution_clock::now();
 
     auto run_one = [&](size_t i) {
         auto kt = to_kernel_tx(txs[i]);
         auto r  = kernel::execute_cpu(kt);
-        br.gas_used[i] = r.gas_used;
-        br.status[i]   = convert_status(r.status);
-        br.output[i]   = std::move(r.output);
+        br.gas_used[i]  = r.gas_used;
+        br.status[i]    = convert_status(r.status);
+        br.output[i]    = std::move(r.output);
+        raw_refunds[i]  = r.gas_refund;
     };
 
     if (parallel && n > 1)
@@ -338,6 +360,8 @@ static BlockResult execute_kernel_cpu(const std::vector<Transaction>& txs,
         for (size_t i = 0; i < n; ++i)
             run_one(i);
     }
+
+    apply_eip3529_cap(br, raw_refunds);
 
     auto t1 = std::chrono::high_resolution_clock::now();
     br.execution_time_ms =
@@ -546,13 +570,20 @@ static BlockResult run_metal(const Config& config,
             br.output.reserve(results.size());
             br.execution_time_ms =
                 std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+            // Collect per-tx raw signed refund. Floored at 0 and capped at
+            // gas_used/5 by apply_eip3529_cap before total_gas is summed.
+            std::vector<int64_t> raw_refunds;
+            raw_refunds.reserve(results.size());
             for (auto& r : results)
             {
                 br.gas_used.push_back(r.gas_used);
                 br.status.push_back(convert_status(r.status));
                 br.output.push_back(std::move(r.output));
-                br.total_gas += r.gas_used;
+                raw_refunds.push_back(r.gas_refund);
             }
+            apply_eip3529_cap(br, raw_refunds);
+            for (auto g : br.gas_used) br.total_gas += g;
             apply_call_not_supported_fallback(br, txs, host);
             if (config.enable_state_trie_gpu)
                 compute_state_root_gpu(br, LUX_BACKEND_METAL);
@@ -637,14 +668,21 @@ static BlockResult run_cuda(const Config& config,
             br.output.reserve(results.size());
             br.execution_time_ms =
                 std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+            // Collect per-tx raw signed refund. Floored at 0 and capped at
+            // gas_used/5 by apply_eip3529_cap before total_gas is summed.
+            std::vector<int64_t> raw_refunds;
+            raw_refunds.reserve(results.size());
             for (auto& r : results)
             {
                 br.gas_used.push_back(r.gas_used);
                 br.status.push_back(convert_status(static_cast<kernel::TxStatus>(
                     static_cast<uint32_t>(r.status))));
                 br.output.push_back(std::move(r.output));
-                br.total_gas += r.gas_used;
+                raw_refunds.push_back(r.gas_refund);
             }
+            apply_eip3529_cap(br, raw_refunds);
+            for (auto g : br.gas_used) br.total_gas += g;
             apply_call_not_supported_fallback(br, txs, host);
             if (config.enable_state_trie_gpu)
             {
