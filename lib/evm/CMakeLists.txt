@@ -362,6 +362,25 @@ if(GTest_FOUND)
     if(APPLE)
         target_link_libraries(kernel-edge-cases-test PRIVATE evm-metal-hosts evm-kernel-metal)
     endif()
+
+    # EIP-2929 access-list test: cold/warm gas accounting for SLOAD,
+    # SSTORE, BALANCE, EXTCODE family on the kernel CPU + GPU paths.
+    # Verifies that caller-supplied `Config::warm_addresses` and
+    # `Config::warm_storage_keys` reach the kernel and pre-warm the
+    # right keys, and that CPU + Metal agree on gas.
+    add_executable(access-list-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/access_list_test.cpp
+    )
+    target_compile_features(access-list-test PRIVATE cxx_std_20)
+    target_include_directories(access-list-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${include_dir}
+    )
+    target_link_libraries(access-list-test PRIVATE
+        evm-gpu evm evmc::evmc GTest::gtest GTest::gtest_main
+    )
+    if(APPLE)
+        target_link_libraries(access-list-test PRIVATE evm-metal-hosts evm-kernel-metal)
+    endif()
 endif()
 
 # GPU EVM kernel interpreter (header-only library for CPU path)
