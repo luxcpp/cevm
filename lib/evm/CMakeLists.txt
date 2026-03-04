@@ -298,6 +298,24 @@ if(GTest_FOUND)
         target_link_libraries(dispatch-test PRIVATE evm-metal-hosts evm-kernel-metal)
     endif()
 
+    # EIP-2200 signed refund + EIP-3529 cap test: covers the kernel CPU
+    # interpreter's refund tracking and the dispatcher's cap application.
+    # The kernel CPU path is the parity reference for Metal/CUDA, so this
+    # test indirectly exercises the GPU kernels as well.
+    add_executable(refund-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/refund_test.cpp
+    )
+    target_compile_features(refund-test PRIVATE cxx_std_20)
+    target_include_directories(refund-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${include_dir}
+    )
+    target_link_libraries(refund-test PRIVATE
+        evm-gpu evm evmc::evmc GTest::gtest GTest::gtest_main
+    )
+    if(APPLE)
+        target_link_libraries(refund-test PRIVATE evm-metal-hosts evm-kernel-metal)
+    endif()
+
     # Stack-depth parity test: bytecode with stack depth >32, proves
     # Metal/CUDA match CPU evmone now that the spec's 1024-deep stack is wired.
     add_executable(stack-depth-test

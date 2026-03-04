@@ -62,7 +62,10 @@ struct TxOutput
 {
     uint32_t  status;       // 0=stop, 1=return, 2=revert, 3=oog, 4=error, 5=call_not_supported
     uint64_t  gas_used;
-    uint64_t  gas_refund;   // EIP-2200/3529 refund counter
+    // Signed EIP-2200 refund counter. SSTORE may transiently subtract
+    // refund credit; the dispatcher floors at 0 and applies EIP-3529
+    // (max refund = gas_used / 5).
+    int64_t   gas_refund;
     uint32_t  output_size;
 };
 
@@ -100,7 +103,10 @@ struct TxResult
 {
     TxStatus              status = TxStatus::Error;
     uint64_t              gas_used = 0;
-    uint64_t              gas_refund = 0;
+    // Signed EIP-2200 refund counter. The kernel emits the raw signed
+    // value; the dispatcher floors at 0 and applies the EIP-3529 cap
+    // (max refund = gas_used / 5).
+    int64_t               gas_refund = 0;
     std::vector<uint8_t>  output;
 };
 

@@ -350,8 +350,12 @@ struct TxInput {
     uint code_offset; uint code_size; uint calldata_offset; uint calldata_size;
     ulong gas_limit; uint256 caller; uint256 address; uint256 value;
 };
+// gas_refund is signed: SSTORE may transiently subtract refund credit
+// (clear-then-set-then-clear within a tx). The kernel emits the raw
+// signed value; the host dispatcher floors at 0 and applies the EIP-3529
+// cap of gas_used/5.
 struct TxOutput {
-    uint status; ulong gas_used; ulong gas_refund; uint output_size;
+    uint status; ulong gas_used; long gas_refund; uint output_size;
 };
 struct StorageEntry { uint256 key; uint256 value; };
 
@@ -415,11 +419,15 @@ static inline bool original_value_lookup(thread OriginalEntry* o,uint n,uint256 
 static inline void original_value_record(thread OriginalEntry* o,thread uint& n,uint256 s,uint256 v){
     for(uint i=0;i<n;++i)if(o[i].valid&&u256_eq(o[i].key,s))return;
     if(n<MAX_STORAGE_PER_TX){o[n].key=s;o[n].value=v;o[n].valid=true;n++;}}
-static inline ulong sstore_gas_eip2200(uint256 orig,uint256 cur,uint256 nv,thread ulong& rc){
+// EIP-2200 net gas SSTORE accounting. `rc` accumulates the *signed* refund
+// delta — clear-then-set-then-clear within a single tx produces a transient
+// negative value. The dispatcher applies EIP-3529 (max refund = gas_used/5)
+// and floors at 0 after execution.
+static inline ulong sstore_gas_eip2200(uint256 orig,uint256 cur,uint256 nv,thread long& rc){
     if(u256_eq(nv,cur))return GAS_SSTORE_NOOP;
-    if(u256_eq(orig,cur)){if(u256_iszero(orig))return GAS_SSTORE_SET;if(u256_iszero(nv))rc+=GAS_SSTORE_REFUND;return GAS_SSTORE_RESET;}
-    if(!u256_iszero(orig)){if(u256_iszero(cur))rc-=GAS_SSTORE_REFUND;else if(u256_iszero(nv))rc+=GAS_SSTORE_REFUND;}
-    if(u256_eq(nv,orig)){if(u256_iszero(orig))rc+=GAS_SSTORE_SET-GAS_SSTORE_NOOP;else rc+=GAS_SSTORE_RESET-GAS_SSTORE_NOOP;}
+    if(u256_eq(orig,cur)){if(u256_iszero(orig))return GAS_SSTORE_SET;if(u256_iszero(nv))rc+=long(GAS_SSTORE_REFUND);return GAS_SSTORE_RESET;}
+    if(!u256_iszero(orig)){if(u256_iszero(cur))rc-=long(GAS_SSTORE_REFUND);else if(u256_iszero(nv))rc+=long(GAS_SSTORE_REFUND);}
+    if(u256_eq(nv,orig)){if(u256_iszero(orig))rc+=long(GAS_SSTORE_SET-GAS_SSTORE_NOOP);else rc+=long(GAS_SSTORE_RESET-GAS_SSTORE_NOOP);}
     return GAS_SSTORE_NOOP;
 }
 
@@ -504,7 +512,7 @@ kernel void evm_execute(
     uint256 stack[1024];
     uint sp = 0;
     ulong gas = inp.gas_limit;
-    ulong refund_counter = 0;
+    long  refund_counter = 0;
     uint pc = 0;
     uint mem_size = 0;
     ulong gas_start = gas;
