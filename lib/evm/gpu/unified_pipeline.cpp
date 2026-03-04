@@ -15,8 +15,9 @@
 ///     bounded by UnifiedConfig::max_concurrent_blocks to keep memory bounded.
 ///
 /// EVM execution path selection:
-///   - APPLE: Metal Block-STM if available, else kernel CPU interpreter.
-///   - EVMONE_CUDA: CUDA EvmKernel if available, else kernel CPU interpreter.
+///   - APPLE + value-transfer batch: Metal Block-STM. Otherwise: kernel CPU
+///     interpreter on Apple too, since Block-STM ignores tx.code.
+///   - EVM_CUDA: CUDA EvmKernel if available, else kernel CPU interpreter.
 ///   - Otherwise: kernel CPU interpreter (the same reference interpreter the
 ///     Metal/CUDA kernels emulate). Gas, status, and output match byte-for-byte
 ///     for opcodes the CPU interpreter implements; opcodes not yet implemented
@@ -43,7 +44,7 @@
 #include "metal/bls_host.hpp"
 #endif
 
-#if defined(EVMONE_CUDA)
+#if defined(EVM_CUDA)
 #include "cuda/evm_kernel_host.hpp"
 #endif
 
@@ -118,7 +119,7 @@ inline TxStatus convert_kernel_status(kernel::TxStatus s) {
     return TxStatus::Error;
 }
 
-#if defined(EVMONE_CUDA)
+#if defined(EVM_CUDA)
 /// Convert a dispatch-layer Transaction into the CUDA host's HostTransaction.
 /// The CUDA backend uses uint256_host (different layout from kernel::uint256),
 /// so this is a separate converter.
@@ -151,7 +152,7 @@ inline TxStatus convert_cuda_status(cuda::TxStatus s) {
     }
     return TxStatus::Error;
 }
-#endif  // EVMONE_CUDA
+#endif  // EVM_CUDA
 
 // ---- Concrete implementation ----------------------------------------------
 
@@ -330,7 +331,7 @@ private:
         }
         run_evm_cpu(txs, r);
         return;
-#elif defined(EVMONE_CUDA)
+#elif defined(EVM_CUDA)
         (void)accounts;
         {
             std::lock_guard<std::mutex> lock(cuda_mu_);
@@ -502,7 +503,7 @@ private:
     std::unique_ptr<metal::BlockStmGpu> block_stm_;
     std::unique_ptr<metal::BlsVerifier> bls_;
 #endif
-#if defined(EVMONE_CUDA)
+#if defined(EVM_CUDA)
     std::unique_ptr<cuda::EvmKernel> cuda_kernel_;
     bool cuda_kernel_init_attempted_ = false;
 #endif
@@ -512,7 +513,7 @@ private:
     std::mutex gpu_mu_;
     std::mutex block_stm_mu_;
     std::mutex bls_mu_;
-#if defined(EVMONE_CUDA)
+#if defined(EVM_CUDA)
     std::mutex cuda_mu_;
 #endif
 
