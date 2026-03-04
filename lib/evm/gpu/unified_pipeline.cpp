@@ -14,6 +14,15 @@
 ///     synchronous GPU calls for K blocks concurrently. Pipeline depth is
 ///     bounded by UnifiedConfig::max_concurrent_blocks to keep memory bounded.
 ///
+/// EVM execution path selection:
+///   - APPLE: Metal Block-STM if available, else kernel CPU interpreter.
+///   - EVMONE_CUDA: CUDA EvmKernel if available, else kernel CPU interpreter.
+///   - Otherwise: kernel CPU interpreter (the same reference interpreter the
+///     Metal/CUDA kernels emulate). Gas, status, and output match byte-for-byte
+///     for opcodes the CPU interpreter implements; opcodes not yet implemented
+///     surface as TxStatus::Error (see feat/v0.25-cpu-interpreter-opcodes for
+///     the in-flight coverage work).
+///
 /// Note on post-quantum signatures (ML-DSA-65, lattice round of Quasar):
 /// `lux_gpu_mldsa_verify_batch` is declared in lux/gpu.h but its C entry-point
 /// is not yet linked into luxgpu_core_static — only the vtable hook exists,
@@ -27,10 +36,15 @@
 #include "unified_pipeline.hpp"
 
 #include "gpu_state_hasher.hpp"
+#include "kernel/evm_kernel_host.hpp"
 
 #if defined(__APPLE__)
 #include "metal/block_stm_host.hpp"
 #include "metal/bls_host.hpp"
+#endif
+
+#if defined(EVMONE_CUDA)
+#include "cuda/evm_kernel_host.hpp"
 #endif
 
 #include <lux/gpu.h>
@@ -64,6 +78,81 @@ inline double ms_since(const Clock::time_point& t0) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
+// ---- Transaction translation ----------------------------------------------
+
+/// Convert a dispatch-layer Transaction into the kernel CPU interpreter's
+/// HostTransaction. Mirrors the converter in gpu_dispatch.cpp so all backends
+/// consume the same shape.
+inline kernel::HostTransaction to_kernel_tx(const Transaction& tx) {
+    kernel::HostTransaction h;
+    h.code      = tx.code;
+    h.calldata  = tx.data;
+    h.gas_limit = tx.gas_limit;
+
+    auto pack_addr = [](kernel::uint256& dst, const std::vector<uint8_t>& addr) {
+        std::memset(&dst, 0, sizeof(dst));
+        if (addr.size() >= 20)
+            std::memcpy(&dst, addr.data(), 20);
+    };
+    auto pack_u64 = [](kernel::uint256& dst, uint64_t v) {
+        std::memset(&dst, 0, sizeof(dst));
+        auto* limbs = reinterpret_cast<uint64_t*>(&dst);
+        limbs[0] = v;
+    };
+
+    pack_addr(h.caller, tx.from);
+    pack_addr(h.address, tx.to);
+    pack_u64(h.value, tx.value);
+    return h;
+}
+
+inline TxStatus convert_kernel_status(kernel::TxStatus s) {
+    switch (s) {
+    case kernel::TxStatus::Stop:             return TxStatus::Stop;
+    case kernel::TxStatus::Return:           return TxStatus::Return;
+    case kernel::TxStatus::Revert:           return TxStatus::Revert;
+    case kernel::TxStatus::OutOfGas:         return TxStatus::OutOfGas;
+    case kernel::TxStatus::Error:            return TxStatus::Error;
+    case kernel::TxStatus::CallNotSupported: return TxStatus::CallNotSupported;
+    }
+    return TxStatus::Error;
+}
+
+#if defined(EVMONE_CUDA)
+/// Convert a dispatch-layer Transaction into the CUDA host's HostTransaction.
+/// The CUDA backend uses uint256_host (different layout from kernel::uint256),
+/// so this is a separate converter.
+inline cuda::HostTransaction to_cuda_tx(const Transaction& tx) {
+    cuda::HostTransaction h;
+    h.code      = tx.code;
+    h.calldata  = tx.data;
+    h.gas_limit = tx.gas_limit;
+
+    auto pack_addr = [](cuda::uint256_host& dst, const std::vector<uint8_t>& addr) {
+        std::memset(&dst, 0, sizeof(dst));
+        if (addr.size() >= 20)
+            std::memcpy(&dst, addr.data(), 20);
+    };
+
+    pack_addr(h.caller, tx.from);
+    pack_addr(h.address, tx.to);
+    h.value = cuda::uint256_host(tx.value);
+    return h;
+}
+
+inline TxStatus convert_cuda_status(cuda::TxStatus s) {
+    switch (s) {
+    case cuda::TxStatus::Stop:             return TxStatus::Stop;
+    case cuda::TxStatus::Return:           return TxStatus::Return;
+    case cuda::TxStatus::Revert:           return TxStatus::Revert;
+    case cuda::TxStatus::OutOfGas:         return TxStatus::OutOfGas;
+    case cuda::TxStatus::Error:            return TxStatus::Error;
+    case cuda::TxStatus::CallNotSupported: return TxStatus::CallNotSupported;
+    }
+    return TxStatus::Error;
+}
+#endif  // EVMONE_CUDA
+
 // ---- Concrete implementation ----------------------------------------------
 
 class UnifiedPipelineImpl final : public UnifiedPipeline {
@@ -93,10 +182,6 @@ public:
             bls_ = metal::BlsVerifier::create();
         }
 #endif
-        // CUDA implementations of Block-STM and BLS verify will hook in here
-        // under #if defined(EVMONE_CUDA) once the CUDA host classes land.
-        // Until then, on non-Apple platforms run_evm() takes the CPU fallback
-        // path and verify_signatures() leaves bls_verifies at 0.
         return true;
     }
 
@@ -175,7 +260,7 @@ private:
         verify_signatures(ctx, r);
         r.sig_verify_ms = ms_since(t_sigs);
 
-        // Stage 2: EVM execution (Block-STM on GPU).
+        // Stage 2: EVM execution (Block-STM on GPU, CUDA EVM kernel, or kernel CPU).
         const auto t_evm = Clock::now();
         run_evm(txs, accounts, r);
         r.evm_ms = ms_since(t_evm);
@@ -203,7 +288,9 @@ private:
         std::span<const AccountInfo> accounts,
         PipelineResult& r) {
         if (txs.empty()) {
-            r.evm.gas_used.assign(0, 0);
+            r.evm.gas_used.clear();
+            r.evm.status.clear();
+            r.evm.output.clear();
             r.evm.total_gas = 0;
             r.evm.state_root.assign(32, 0);
             return;
@@ -226,13 +313,68 @@ private:
             r.evm = block_stm_->execute_block(txs, gpu_accounts);
             return;
         }
+        run_evm_cpu(txs, r);
+        return;
+#elif defined(EVMONE_CUDA)
+        (void)accounts;
+        {
+            std::lock_guard<std::mutex> lock(cuda_mu_);
+            if (!cuda_kernel_init_attempted_) {
+                cuda_kernel_init_attempted_ = true;
+                if (cuda::evm_kernel_cuda_available()) {
+                    cuda_kernel_ = cuda::EvmKernel::create();
+                }
+            }
+            if (cuda_kernel_) {
+                std::vector<cuda::HostTransaction> ctxs;
+                ctxs.reserve(txs.size());
+                for (const auto& tx : txs)
+                    ctxs.push_back(to_cuda_tx(tx));
+
+                auto results = cuda_kernel_->execute(ctxs);
+                r.evm.gas_used.resize(results.size());
+                r.evm.status.resize(results.size(), TxStatus::Error);
+                r.evm.output.resize(results.size());
+                r.evm.total_gas = 0;
+                for (size_t i = 0; i < results.size(); ++i) {
+                    r.evm.gas_used[i] = results[i].gas_used;
+                    r.evm.status[i]   = convert_cuda_status(results[i].status);
+                    r.evm.output[i]   = std::move(results[i].output);
+                    r.evm.total_gas  += results[i].gas_used;
+                }
+                r.evm.state_root.assign(32, 0);
+                return;
+            }
+        }
+        run_evm_cpu(txs, r);
+        return;
 #else
         (void)accounts;
+        run_evm_cpu(txs, r);
+        return;
 #endif
-        // CPU fallback: charge 21000 gas per tx so callers see a realistic
-        // shape even on machines without Metal.
-        r.evm.gas_used.assign(txs.size(), 21000);
-        r.evm.total_gas = 21000ULL * txs.size();
+    }
+
+    /// Execute every tx through the kernel CPU interpreter — the same
+    /// reference interpreter the GPU kernels emulate. Gas, status, and
+    /// output match the GPU backends byte-for-byte for opcodes the CPU
+    /// interpreter implements; opcodes not yet implemented surface as
+    /// TxStatus::Error (see feat/v0.25-cpu-interpreter-opcodes for the
+    /// in-flight coverage work).
+    void run_evm_cpu(std::span<const Transaction> txs, PipelineResult& r) {
+        const size_t n = txs.size();
+        r.evm.gas_used.resize(n);
+        r.evm.status.resize(n, TxStatus::Error);
+        r.evm.output.resize(n);
+        r.evm.total_gas = 0;
+        for (size_t i = 0; i < n; ++i) {
+            auto kt = to_kernel_tx(txs[i]);
+            auto kr = kernel::execute_cpu(kt);
+            r.evm.gas_used[i] = kr.gas_used;
+            r.evm.status[i]   = convert_kernel_status(kr.status);
+            r.evm.output[i]   = std::move(kr.output);
+            r.evm.total_gas  += kr.gas_used;
+        }
         r.evm.state_root.assign(32, 0);
     }
 
@@ -345,12 +487,19 @@ private:
     std::unique_ptr<metal::BlockStmGpu> block_stm_;
     std::unique_ptr<metal::BlsVerifier> bls_;
 #endif
+#if defined(EVMONE_CUDA)
+    std::unique_ptr<cuda::EvmKernel> cuda_kernel_;
+    bool cuda_kernel_init_attempted_ = false;
+#endif
 
-    // Subsystem mutexes — each Metal host owns its own command queue and is
-    // not safe to call from multiple worker threads concurrently.
+    // Subsystem mutexes — each Metal/CUDA host owns its own command queue
+    // and is not safe to call from multiple worker threads concurrently.
     std::mutex gpu_mu_;
     std::mutex block_stm_mu_;
     std::mutex bls_mu_;
+#if defined(EVMONE_CUDA)
+    std::mutex cuda_mu_;
+#endif
 
     const char* backend_name_ = "uninit";
     const char* device_name_ = "uninit";
