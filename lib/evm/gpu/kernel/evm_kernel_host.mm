@@ -486,6 +486,11 @@ private:
             if (invalid[i])
                 continue;
             total_blob += txs[i].code.size() + txs[i].calldata.size();
+            // EIP-2929 warm sets share the blob: 20 bytes/addr,
+            // 52 bytes/(addr,slot) pair. We append per-tx so each TxInput
+            // can point at its own range.
+            total_blob += txs[i].warm_addresses.size();
+            total_blob += txs[i].warm_storage_keys.size();
         }
         if (total_blob == 0)
             total_blob = 1;
@@ -516,6 +521,10 @@ private:
                 inputs[i].caller = uint256{};
                 inputs[i].address = uint256{};
                 inputs[i].value = uint256{};
+                inputs[i].warm_addr_offset = offset;
+                inputs[i].warm_addr_count = 0;
+                inputs[i].warm_slot_offset = offset;
+                inputs[i].warm_slot_count = 0;
                 continue;
             }
             inputs[i].code_offset = offset;
@@ -529,6 +538,21 @@ private:
             if (!tx.calldata.empty())
                 std::memcpy(blob.data() + offset, tx.calldata.data(), tx.calldata.size());
             offset += static_cast<uint32_t>(tx.calldata.size());
+
+            // EIP-2929 caller-supplied warm sets. Pack 20-byte addrs and
+            // (20+32)-byte slot pairs into the same blob, recording each
+            // tx's offset/count so the kernel can read them at startup.
+            inputs[i].warm_addr_offset = offset;
+            inputs[i].warm_addr_count = static_cast<uint32_t>(tx.warm_addresses.size() / 20);
+            if (!tx.warm_addresses.empty())
+                std::memcpy(blob.data() + offset, tx.warm_addresses.data(), tx.warm_addresses.size());
+            offset += static_cast<uint32_t>(tx.warm_addresses.size());
+
+            inputs[i].warm_slot_offset = offset;
+            inputs[i].warm_slot_count = static_cast<uint32_t>(tx.warm_storage_keys.size() / 52);
+            if (!tx.warm_storage_keys.empty())
+                std::memcpy(blob.data() + offset, tx.warm_storage_keys.data(), tx.warm_storage_keys.size());
+            offset += static_cast<uint32_t>(tx.warm_storage_keys.size());
 
             inputs[i].gas_limit = tx.gas_limit;
             inputs[i].caller = tx.caller;
