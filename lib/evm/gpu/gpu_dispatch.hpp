@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <evmc/evmc.h>
+
 #include <cstdint>
 #include <vector>
 #include <memory>
@@ -40,6 +42,12 @@ struct Config
     uint32_t gpu_device = 0;   ///< GPU device index
     bool enable_state_trie_gpu = false;  ///< Offload Keccak-256 trie hashing to GPU
     bool enable_precompile_gpu = false;  ///< Offload precompiles to GPU
+    /// EVM revision for the evmone fallback path. The kernel CPU/GPU paths
+    /// implement the Cancun opcode set unconditionally — this field only
+    /// governs the evmone code path, which must agree with the kernel set
+    /// or the same transaction routes to a different result depending on
+    /// backend. Default = Cancun, matching Lux mainnet.
+    evmc_revision revision = EVMC_CANCUN;
 };
 
 /// Per-tx execution status. Mirrors kernel::TxStatus so all backends
