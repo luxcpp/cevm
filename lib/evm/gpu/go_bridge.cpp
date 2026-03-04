@@ -69,7 +69,8 @@ CGpuBlockResultV2 gpu_execute_block_v2(
     const CGpuTx* txs,
     uint32_t      num_txs,
     uint8_t       backend,
-    uint32_t      num_threads
+    uint32_t      num_threads,
+    uint8_t       revision
 ) {
     CGpuBlockResultV2 cresult;
     std::memset(&cresult, 0, sizeof(cresult));
@@ -100,6 +101,7 @@ CGpuBlockResultV2 gpu_execute_block_v2(
     config.backend = static_cast<evm::gpu::Backend>(backend);
     config.num_threads = num_threads;
     config.enable_state_trie_gpu = true;
+    config.revision = static_cast<evmc_revision>(revision);
 
     evm::gpu::BlockResult result = evm::gpu::execute_block(config, evm_txs, nullptr);
 

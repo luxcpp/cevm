@@ -108,10 +108,10 @@ static BlockResult execute_via_engine(const Config& config,
         auto* host = static_cast<evmc::Host*>(state);
         if (parallel)
         {
-            return execute_parallel_evmone(evm_txs, *host, EVMC_SHANGHAI,
+            return execute_parallel_evmone(evm_txs, *host, config.revision,
                 config.num_threads);
         }
-        return execute_sequential_evmone(evm_txs, *host, EVMC_SHANGHAI);
+        return execute_sequential_evmone(evm_txs, *host, config.revision);
     }
 
     // No host provided: run gas-estimation-only mode (no state access).
