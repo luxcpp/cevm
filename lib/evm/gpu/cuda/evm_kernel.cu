@@ -808,8 +808,12 @@ __global__ void evm_execute_kernel(
 
     #define CODE_BYTE(idx) ((idx) < cached_size ? code_cache[(idx)] : code_dev[(idx)])
 
-    // 32-entry stack — same as Metal V1.
-    uint256 stack[32];
+    // EVM Yellow Paper: 1024-deep stack. Solidity-emitted bytecode regularly
+    // hits 30-50 entries; the previous 32-cap silently truncated real
+    // contracts and diverged from CPU evmone. nvcc places the array in
+    // per-thread local memory, backed by global memory with L1/L2 caching
+    // (32 KB/thread).
+    uint256 stack[1024];
     unsigned int       sp  = 0;
     unsigned long long gas = inp.gas_limit;
     unsigned long long refund_counter = 0;
@@ -1063,7 +1067,7 @@ __global__ void evm_execute_kernel(
 
         case 0x30: // ADDRESS
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = inp.address; ++pc; continue;
         case 0x31: { // BALANCE — no Host plumbing: return 0 (account has no
                      // balance in this kernel's view). Cost: warm slot.
@@ -1074,15 +1078,15 @@ __global__ void evm_execute_kernel(
         }
         case 0x32: // ORIGIN
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = ctx->origin; ++pc; continue;
         case 0x33: // CALLER
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = inp.caller; ++pc; continue;
         case 0x34: // CALLVALUE
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = inp.value; ++pc; continue;
         case 0x35: { // CALLDATALOAD
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
@@ -1105,7 +1109,7 @@ __global__ void evm_execute_kernel(
         }
         case 0x36: // CALLDATASIZE
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from((unsigned long long)calldata_size);
             ++pc; continue;
         case 0x37: { // CALLDATACOPY
@@ -1136,7 +1140,7 @@ __global__ void evm_execute_kernel(
         }
         case 0x38: // CODESIZE
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from((unsigned long long)code_size);
             ++pc; continue;
         case 0x39: { // CODECOPY
@@ -1166,7 +1170,7 @@ __global__ void evm_execute_kernel(
         }
         case 0x3a: // GASPRICE
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(ctx->gas_price);
             ++pc; continue;
         case 0x3b: { // EXTCODESIZE — no Host: return 0 (no code).
@@ -1196,7 +1200,7 @@ __global__ void evm_execute_kernel(
         }
         case 0x3d: // RETURNDATASIZE
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_zero();          // no prior call: empty
             ++pc; continue;
         case 0x3e: { // RETURNDATACOPY — any nonzero size is invalid (returndata empty).
@@ -1228,35 +1232,35 @@ __global__ void evm_execute_kernel(
         }
         case 0x41: // COINBASE
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = ctx->coinbase; ++pc; continue;
         case 0x42: // TIMESTAMP
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(ctx->timestamp); ++pc; continue;
         case 0x43: // NUMBER
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(ctx->number); ++pc; continue;
         case 0x44: // PREVRANDAO (formerly DIFFICULTY)
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = ctx->prevrandao; ++pc; continue;
         case 0x45: // GASLIMIT (block)
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(ctx->gas_limit); ++pc; continue;
         case 0x46: // CHAINID
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(ctx->chain_id); ++pc; continue;
         case 0x47: // SELFBALANCE — no Host: zero
             if (gas < GAS_SELFBALANCE) OOG(); gas -= GAS_SELFBALANCE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_zero(); ++pc; continue;
         case 0x48: // BASEFEE
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(ctx->base_fee); ++pc; continue;
         case 0x49: { // BLOBHASH
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
@@ -1277,7 +1281,7 @@ __global__ void evm_execute_kernel(
         }
         case 0x4a: // BLOBBASEFEE
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(ctx->blob_base_fee); ++pc; continue;
 
         case 0x50: // POP
@@ -1417,17 +1421,17 @@ __global__ void evm_execute_kernel(
 
         case 0x58: // PC
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from((unsigned long long)pc);
             ++pc; continue;
         case 0x59: // MSIZE
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from((unsigned long long)mem_size);
             ++pc; continue;
         case 0x5a: // GAS
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_from(gas);
             ++pc; continue;
         case 0x5b: // JUMPDEST
@@ -1506,14 +1510,14 @@ __global__ void evm_execute_kernel(
         }
         case 0x5f: // PUSH0
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             stack[sp++] = u256_zero();
             ++pc; continue;
 
         // PUSH1 with opcode fusion (PUSH1 + ADD).
         case 0x60: {
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             unsigned long long push_val =
                 (unsigned long long)((pc + 1 < code_size) ? CODE_BYTE(pc + 1) : 0);
 
@@ -1539,7 +1543,7 @@ __global__ void evm_execute_kernel(
         case 0x8c: case 0x8d: case 0x8e: case 0x8f: {
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
             unsigned int n = op - 0x80 + 1;
-            if (n > sp || sp >= 32) ERR();
+            if (n > sp || sp >= 1024) ERR();
             stack[sp] = stack[sp - n];
             ++sp; ++pc; continue;
         }
@@ -1634,7 +1638,7 @@ __global__ void evm_execute_kernel(
         if (op >= 0x61 && op <= 0x7f)
         {
             if (gas < GAS_VERYLOW) OOG(); gas -= GAS_VERYLOW;
-            if (sp >= 32) ERR();
+            if (sp >= 1024) ERR();
             unsigned int n = op - 0x60 + 1;
             uint256 val = u256_zero();
             unsigned int start = pc + 1;
