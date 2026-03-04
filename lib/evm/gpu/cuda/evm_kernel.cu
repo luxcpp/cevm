@@ -522,6 +522,14 @@ struct TxInput
     uint256             caller;
     uint256             address;
     uint256             value;
+    // EIP-2929 caller-supplied warm sets. Offsets index into the same
+    // `blob` buffer that holds code+calldata. Layouts:
+    //   warm_addrs blob: 20-byte addresses, packed.
+    //   warm_slots blob: (20-byte addr | 32-byte slot key) pairs, packed.
+    unsigned int        warm_addr_offset;
+    unsigned int        warm_addr_count;
+    unsigned int        warm_slot_offset;
+    unsigned int        warm_slot_count;
 };
 
 // gas_refund is signed: SSTORE may transiently subtract refund credit
@@ -575,7 +583,7 @@ struct LogEntry
 
 // Validate that the device-side wire layout matches the host expectations.
 static_assert(sizeof(uint256)      == 32,  "device uint256 size");
-static_assert(sizeof(TxInput)      == 120, "device TxInput size");
+static_assert(sizeof(TxInput)      == 136, "device TxInput size");
 static_assert(sizeof(TxOutput)     == 32,  "device TxOutput size");
 static_assert(sizeof(StorageEntry) == 64,  "device StorageEntry size");
 static_assert(sizeof(BlockContext) == 32 + 8 + 8 + 8 + 32 + 8 + 8 + 8 + 8 + 32 + 8*32 + 4 + 4,
@@ -600,7 +608,12 @@ __device__ static constexpr unsigned long long GAS_MID        = 8;
 __device__ static constexpr unsigned long long GAS_HIGH       = 10;
 __device__ static constexpr unsigned long long GAS_BASE       = 2;
 __device__ static constexpr unsigned long long GAS_JUMPDEST   = 1;
-__device__ static constexpr unsigned long long GAS_SLOAD      = 2100;
+// EIP-2929 (Berlin) cold/warm pricing for state-access opcodes.
+__device__ static constexpr unsigned long long GAS_SLOAD_COLD = 2100;
+__device__ static constexpr unsigned long long GAS_SLOAD_WARM = 100;
+__device__ static constexpr unsigned long long GAS_ACCOUNT_COLD = 2600;
+__device__ static constexpr unsigned long long GAS_ACCOUNT_WARM = 100;
+__device__ static constexpr unsigned long long GAS_SLOAD = GAS_SLOAD_COLD;  // legacy
 __device__ static constexpr unsigned long long GAS_SSTORE_SET   = 20000;
 __device__ static constexpr unsigned long long GAS_SSTORE_RESET = 2900;
 __device__ static constexpr unsigned long long GAS_SSTORE_NOOP   = 100;
@@ -614,12 +627,16 @@ __device__ static constexpr unsigned long long GAS_COPY         = 3;
 __device__ static constexpr unsigned long long GAS_LOG_BASE     = 375;
 __device__ static constexpr unsigned long long GAS_LOG_TOPIC    = 375;
 __device__ static constexpr unsigned long long GAS_LOG_DATA     = 8;
-__device__ static constexpr unsigned long long GAS_BALANCE      = 100;   // warm
-__device__ static constexpr unsigned long long GAS_EXTCODE      = 100;   // warm
 __device__ static constexpr unsigned long long GAS_SELFBALANCE  = 5;
 __device__ static constexpr unsigned long long GAS_TLOAD        = 100;
 __device__ static constexpr unsigned long long GAS_TSTORE       = 100;
 __device__ static constexpr unsigned long long GAS_BLOCKHASH    = 20;
+// EIP-2929 per-tx warm-set caps. Saturation falls back to cold pricing.
+__device__ static constexpr unsigned int MAX_WARM_ADDRS_2929 = 64;
+__device__ static constexpr unsigned int MAX_WARM_SLOTS_2929 = 128;
+// Pre-warmed precompile range (Cancun→Prague superset).
+__device__ static constexpr unsigned int PRECOMPILE_FIRST = 1;
+__device__ static constexpr unsigned int PRECOMPILE_LAST  = 0x11;
 
 // keccak256 of empty input (hex). EXTCODEHASH of an account with no code.
 __device__ static const unsigned char KECCAK_EMPTY[32] = {
@@ -688,6 +705,25 @@ __device__ void original_value_record(OriginalEntry* o, unsigned int& n,
         o[n].valid = true;
         n++;
     }
+}
+
+// EIP-2929 warm-set helpers. Returns true iff the key was already warm.
+__device__ __forceinline__ bool warm_addr_mark_2929(uint256* set, unsigned int& n,
+                                                    const uint256& a)
+{
+    for (unsigned int i = 0; i < n; ++i) if (u256_eq(set[i], a)) return true;
+    if (n < MAX_WARM_ADDRS_2929) { set[n++] = a; }
+    return false;
+}
+__device__ __forceinline__ bool warm_slot_mark_2929(uint256* addrs, uint256* keys,
+                                                    unsigned int& n,
+                                                    const uint256& addr,
+                                                    const uint256& slot)
+{
+    for (unsigned int i = 0; i < n; ++i)
+        if (u256_eq(addrs[i], addr) && u256_eq(keys[i], slot)) return true;
+    if (n < MAX_WARM_SLOTS_2929) { addrs[n] = addr; keys[n] = slot; n++; }
+    return false;
 }
 
 // EIP-2200 net gas SSTORE accounting. `rc` accumulates the *signed* refund
@@ -835,6 +871,45 @@ __global__ void evm_execute_kernel(
     OriginalEntry orig_storage[MAX_STORAGE_PER_TX];
     unsigned int  orig_count = 0;
     for (unsigned int i = 0; i < MAX_STORAGE_PER_TX; ++i) orig_storage[i].valid = false;
+
+    // EIP-2929 per-tx warm sets. Seed with caller, recipient,
+    // precompiles 0x01..0x11, and any caller-supplied entries.
+    uint256 warm_addrs[MAX_WARM_ADDRS_2929];
+    unsigned int warm_addr_count = 0;
+    uint256 warm_slot_addrs[MAX_WARM_SLOTS_2929];
+    uint256 warm_slot_keys[MAX_WARM_SLOTS_2929];
+    unsigned int warm_slot_count = 0;
+    warm_addr_mark_2929(warm_addrs, warm_addr_count, inp.caller);
+    warm_addr_mark_2929(warm_addrs, warm_addr_count, inp.address);
+    for (unsigned int p = PRECOMPILE_FIRST; p <= PRECOMPILE_LAST; ++p) {
+        uint256 a = u256_zero(); a.w[0] = (unsigned long long)p;
+        warm_addr_mark_2929(warm_addrs, warm_addr_count, a);
+    }
+    {
+        const unsigned char* blob_warm_a = blob + inp.warm_addr_offset;
+        for (unsigned int i = 0; i < inp.warm_addr_count; ++i) {
+            uint256 a = u256_zero();
+            for (unsigned int b = 0; b < 20; ++b) {
+                a.w[b / 8] |= (unsigned long long)blob_warm_a[i * 20 + b] << ((b % 8) * 8);
+            }
+            warm_addr_mark_2929(warm_addrs, warm_addr_count, a);
+        }
+    }
+    {
+        const unsigned char* blob_warm_s = blob + inp.warm_slot_offset;
+        for (unsigned int i = 0; i < inp.warm_slot_count; ++i) {
+            uint256 a = u256_zero();
+            for (unsigned int b = 0; b < 20; ++b) {
+                a.w[b / 8] |= (unsigned long long)blob_warm_s[i * 52 + b] << ((b % 8) * 8);
+            }
+            uint256 k = u256_zero();
+            for (unsigned int b = 0; b < 32; ++b) {
+                unsigned int pfr = 31 - b;
+                k.w[pfr / 8] |= (unsigned long long)blob_warm_s[i * 52 + 20 + b] << ((pfr % 8) * 8);
+            }
+            warm_slot_mark_2929(warm_slot_addrs, warm_slot_keys, warm_slot_count, a, k);
+        }
+    }
 
     #define EMIT(st, gu, gr, os) do { \
         out.status     = (st); \
@@ -1080,10 +1155,12 @@ __global__ void evm_execute_kernel(
             if (gas < GAS_BASE) OOG(); gas -= GAS_BASE;
             if (sp >= 1024) ERR();
             stack[sp++] = inp.address; ++pc; continue;
-        case 0x31: { // BALANCE — no Host plumbing: return 0 (account has no
-                     // balance in this kernel's view). Cost: warm slot.
-            if (gas < GAS_BALANCE) OOG(); gas -= GAS_BALANCE;
+        case 0x31: { // BALANCE — EIP-2929 cold 2600 / warm 100; no Host → 0.
             if (sp < 1) ERR();
+            uint256 a = stack[sp - 1];
+            unsigned long long cost = warm_addr_mark_2929(warm_addrs, warm_addr_count, a)
+                                       ? GAS_ACCOUNT_WARM : GAS_ACCOUNT_COLD;
+            if (gas < cost) OOG(); gas -= cost;
             stack[sp - 1] = u256_zero();
             ++pc; continue;
         }
@@ -1200,16 +1277,18 @@ __global__ void evm_execute_kernel(
             if (sp >= 1024) ERR();
             stack[sp++] = u256_from(ctx->gas_price);
             ++pc; continue;
-        case 0x3b: { // EXTCODESIZE — no Host: return 0 (no code).
-            if (gas < GAS_EXTCODE) OOG(); gas -= GAS_EXTCODE;
+        case 0x3b: { // EXTCODESIZE — EIP-2929 cold 2600 / warm 100; no Host → 0.
             if (sp < 1) ERR();
+            uint256 a = stack[sp - 1];
+            unsigned long long cost = warm_addr_mark_2929(warm_addrs, warm_addr_count, a)
+                                       ? GAS_ACCOUNT_WARM : GAS_ACCOUNT_COLD;
+            if (gas < cost) OOG(); gas -= cost;
             stack[sp - 1] = u256_zero();
             ++pc; continue;
         }
-        case 0x3c: { // EXTCODECOPY — no Host: zero-pad. Pop 4 args.
+        case 0x3c: { // EXTCODECOPY — EIP-2929 cold 2600 / warm 100 + 3*ceil(size/32).
             if (sp < 4) ERR();
-            // Pop addr, dest, src, size.
-            (void)stack[--sp];                 // addr (unused)
+            uint256 addr_v = stack[--sp];      // addr — EIP-2929 access subject
             uint256 dv = stack[--sp];
             (void)stack[--sp];                 // src offset (unused — pads 0)
             uint256 lv = stack[--sp];
@@ -1219,7 +1298,9 @@ __global__ void evm_execute_kernel(
             unsigned int dest = (unsigned int)dv.w[0];
             unsigned int size = (unsigned int)sz;
             unsigned long long words = (sz + 31) / 32;
-            unsigned long long total_gas = GAS_EXTCODE + GAS_COPY * words;
+            unsigned long long access_cost = warm_addr_mark_2929(warm_addrs, warm_addr_count, addr_v)
+                                              ? GAS_ACCOUNT_WARM : GAS_ACCOUNT_COLD;
+            unsigned long long total_gas = access_cost + GAS_COPY * words;
             if (gas < total_gas) OOG(); gas -= total_gas;
             if (!expand_mem_range(mem, mem_size, gas, dest, size)) OOG();
             for (unsigned int i = 0; i < size; ++i) mem[dest + i] = 0;
@@ -1239,9 +1320,12 @@ __global__ void evm_execute_kernel(
             if (lv.w[1] | lv.w[2] | lv.w[3] || lv.w[0] != 0) ERRA();
             ++pc; continue;
         }
-        case 0x3f: { // EXTCODEHASH — no Host: return keccak256("") for any addr.
-            if (gas < GAS_EXTCODE) OOG(); gas -= GAS_EXTCODE;
+        case 0x3f: { // EXTCODEHASH — EIP-2929 cold 2600 / warm 100; no Host → keccak256("").
             if (sp < 1) ERR();
+            uint256 a = stack[sp - 1];
+            unsigned long long cost = warm_addr_mark_2929(warm_addrs, warm_addr_count, a)
+                                       ? GAS_ACCOUNT_WARM : GAS_ACCOUNT_COLD;
+            if (gas < cost) OOG(); gas -= cost;
             uint256 r = u256_zero();
             for (unsigned int i = 0; i < 32; ++i)
             {
@@ -1373,10 +1457,13 @@ __global__ void evm_execute_kernel(
             mem[off] = (unsigned char)(val.w[0] & 0xFFULL);
             ++pc; continue;
         }
-        case 0x54: { // SLOAD
-            if (gas < GAS_SLOAD) OOG(); gas -= GAS_SLOAD;
+        case 0x54: { // SLOAD — EIP-2929: cold 2100 / warm 100, keyed on (contract, slot).
             if (sp < 1) ERR();
             uint256 slot = stack[sp - 1];
+            unsigned long long cost = warm_slot_mark_2929(warm_slot_addrs, warm_slot_keys,
+                                                          warm_slot_count, inp.address, slot)
+                                       ? GAS_SLOAD_WARM : GAS_SLOAD_COLD;
+            if (gas < cost) OOG(); gas -= cost;
             uint256 val = u256_zero();
             for (unsigned int i = stor_count; i > 0; --i)
             {
@@ -1389,10 +1476,13 @@ __global__ void evm_execute_kernel(
             stack[sp - 1] = val;
             ++pc; continue;
         }
-        case 0x55: { // SSTORE
+        case 0x55: { // SSTORE — EIP-2200 base + EIP-2929 cold surcharge on first slot access.
             if (sp < 2) ERR();
             uint256 slot = stack[--sp];
             uint256 val  = stack[--sp];
+            unsigned long long access_surcharge = warm_slot_mark_2929(warm_slot_addrs, warm_slot_keys,
+                                                                       warm_slot_count, inp.address, slot)
+                                                    ? 0ULL : GAS_SLOAD_COLD;
             uint256 current = u256_zero();
             bool found = false;
             for (unsigned int i = stor_count; i > 0; --i)
@@ -1414,7 +1504,8 @@ __global__ void evm_execute_kernel(
             uint256 original = u256_zero();
             original_value_lookup(orig_storage, orig_count, slot, original);
             unsigned long long sc = sstore_gas_eip2200(original, current, val, refund_counter);
-            if (gas < sc) OOG(); gas -= sc;
+            unsigned long long total_cost = sc + access_surcharge;
+            if (gas < total_cost) OOG(); gas -= total_cost;
             if (found)
             {
                 for (unsigned int i = stor_count; i > 0; --i)
