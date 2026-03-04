@@ -282,6 +282,25 @@ if(GTest_FOUND)
             evm-metal-hosts evm-kernel-metal
         )
     endif()
+
+    # Stack-depth parity test: targets bytecode with stack depth >32 to
+    # prove the Metal/CUDA kernels match CPU evmone now that the spec's
+    # 1024-deep stack is wired through (was capped at 32, silently failing).
+    add_executable(stack-depth-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/stack_depth_test.cpp
+    )
+    target_compile_features(stack-depth-test PRIVATE cxx_std_20)
+    target_include_directories(stack-depth-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${include_dir}
+    )
+    target_link_libraries(stack-depth-test PRIVATE
+        evm-gpu evm evmc::evmc GTest::gtest GTest::gtest_main
+    )
+    if(APPLE)
+        target_link_libraries(stack-depth-test PRIVATE
+            evm-metal-hosts evm-kernel-metal
+        )
+    endif()
 endif()
 
 # GPU EVM kernel interpreter (header-only library for CPU path)
