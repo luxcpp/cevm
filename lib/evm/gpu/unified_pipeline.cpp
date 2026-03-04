@@ -283,6 +283,14 @@ private:
         return r;
     }
 
+    /// True when at least one tx has bytecode — i.e. the caller wants real
+    /// EVM execution, not a pure value-transfer Block-STM batch.
+    static bool any_has_code(std::span<const Transaction> txs) {
+        for (const auto& tx : txs)
+            if (!tx.code.empty()) return true;
+        return false;
+    }
+
     void run_evm(
         std::span<const Transaction> txs,
         std::span<const AccountInfo> accounts,
@@ -296,8 +304,15 @@ private:
             return;
         }
 
+        // Block-STM (Metal) and the CUDA Block-STM kernel are pure
+        // value-transfer schedulers — they ignore tx.code. For any batch with
+        // bytecode, route through the kernel CPU interpreter so the gas /
+        // status / output reflect actual EVM execution, identical across
+        // Apple and non-Apple paths.
+        const bool has_code = any_has_code(txs);
+
 #if defined(__APPLE__)
-        if (block_stm_) {
+        if (block_stm_ && !has_code) {
             std::vector<metal::GpuAccountState> gpu_accounts(accounts.size());
             for (size_t i = 0; i < accounts.size(); i++) {
                 auto& ga = gpu_accounts[i];
