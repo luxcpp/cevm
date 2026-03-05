@@ -638,9 +638,14 @@ struct EvmInterpreter
             }
 
             // -- Environment (0x30 - 0x37) ------------------------------------
+            // Per Yellow Paper: ADDRESS/CALLER/CALLVALUE/CALLDATASIZE charge
+            // BASE(2); CALLDATALOAD/CALLDATACOPY charge VERYLOW(3). Charge
+            // per-opcode rather than the lower BASE bound for the whole range.
             if (op >= 0x30 && op <= 0x37)
             {
-                if (!consume_gas(GasCost::BASE))
+                gpu_u64 env_base_gas = (op == 0x35 || op == 0x37)
+                    ? GasCost::VERYLOW : GasCost::BASE;
+                if (!consume_gas(env_base_gas))
                     return {ExecStatus::OutOfGas, gas_start, 0, 0};
 
                 ExecStatus s;
@@ -733,9 +738,10 @@ struct EvmInterpreter
             }
 
             // -- Memory (0x51 - 0x53, 0x59) -----------------------------------
+            // Spec: MLOAD/MSTORE/MSTORE8 = VERYLOW(3); MSIZE (0x59) = BASE(2).
             if (op == 0x51 || op == 0x52 || op == 0x53 || op == 0x59)
             {
-                if (!consume_gas(GasCost::VERYLOW))
+                if (!consume_gas(op == 0x59 ? GasCost::BASE : GasCost::VERYLOW))
                     return {ExecStatus::OutOfGas, gas_start, 0, 0};
 
                 ExecStatus s;
@@ -1084,8 +1090,9 @@ struct EvmInterpreter
                 return {ExecStatus::CallNotSupported, gas_start - gas, gas, 0};
             }
 
-            // Any other opcode is invalid.
-            return {ExecStatus::InvalidOpcode, gas_start - gas, gas, 0};
+            // Any other opcode is invalid. Yellow Paper §9.4.2: an
+            // exceptional halt consumes all remaining gas.
+            return {ExecStatus::InvalidOpcode, gas_start, 0, 0};
 
         }  // while (pc < code_size)
 

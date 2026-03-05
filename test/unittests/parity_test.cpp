@@ -333,11 +333,11 @@ const std::vector<ParityVector>& corpus()
         // loudly to enforce this).
         out.push_back({"cd_load",
             {0x60,0x00, 0x35, 0x60,0x00, 0x52, 0x60,0x20, 0x60,0x00, 0xf3},
-            std::vector<uint8_t>(32, 0xAB), 50'000, Expectation::GasOnly});
+            std::vector<uint8_t>(32, 0xAB), 50'000});
         out.push_back({"cd_copy",
             {0x60,0x05, 0x60,0x00, 0x60,0x00, 0x37,
              0x60,0x05, 0x60,0x00, 0xf3},
-            {0x11,0x22,0x33,0x44,0x55}, 50'000, Expectation::GasOnly});
+            {0x11,0x22,0x33,0x44,0x55}, 50'000});
 
         // === Code ==========================================================
         // FINDING: CODESIZE (0x38) and CODECOPY (0x39) are not in the CPU
@@ -378,7 +378,7 @@ const std::vector<ParityVector>& corpus()
             {0x60,0x00, 0x60,0x00, 0x52,
              0x59,
              0x60,0x20, 0x52,
-             0x60,0x20, 0x60,0x20, 0xf3}, {}, 50'000, Expectation::GasOnly});
+             0x60,0x20, 0x60,0x20, 0xf3}, {}, 50'000});
         // FINDING: MCOPY (0x5e) is not in the CPU interpreter.
         out.push_back({"mem_mcopy",
             {0x60,0xAA, 0x60,0x00, 0x53,
@@ -456,7 +456,7 @@ const std::vector<ParityVector>& corpus()
         // already in the same file at line 1074). Once that lands, promote
         // to Expectation::Agree.
         out.push_back({"ctl_undefined",
-            {0x0c}, {}, 50'000, Expectation::GasOnly});
+            {0x0c}, {}, 50'000});
         // Bad jump target -> error
         out.push_back({"ctl_bad_jump",
             {0x60,0xff, 0x56}, {}, 50'000});
