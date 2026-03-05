@@ -35,6 +35,32 @@ enum class Backend : uint8_t
     GPU_CUDA = 3,        ///< NVIDIA CUDA kernels
 };
 
+/// Block-level context shared by every tx in a block. Field layout matches
+/// kernel::BlockContext (lib/evm/gpu/kernel/evm_kernel_host.hpp) and the
+/// Metal kernel's BlockContext (evm_kernel.metal) byte-for-byte so the
+/// dispatcher can forward this struct to either backend without translation.
+///
+/// All-zero is the documented "no context provided" default — every backend
+/// treats a zero ctx as it did before BlockContext existed (TIMESTAMP, NUMBER,
+/// etc. resolve to zero, CHAINID resolves to zero, GASPRICE resolves to the
+/// per-tx gas_price). Production callers MUST populate this from the block
+/// header before invoking execute_block.
+struct BlockContext
+{
+    uint8_t  origin[20];                ///< tx originator (msg.sender at top frame)
+    uint64_t gas_price;                 ///< effective gas price for the tx
+    uint64_t timestamp;                 ///< block timestamp (TIMESTAMP)
+    uint64_t number;                    ///< block number (NUMBER)
+    uint8_t  prevrandao[32];            ///< PREVRANDAO / DIFFICULTY (post-Merge)
+    uint64_t gas_limit;                 ///< block gas limit (GASLIMIT)
+    uint64_t chain_id;                  ///< chain ID (CHAINID)
+    uint64_t base_fee;                  ///< EIP-1559 base fee (BASEFEE)
+    uint64_t blob_base_fee;             ///< EIP-4844 blob base fee (BLOBBASEFEE)
+    uint8_t  coinbase[20];              ///< miner address (COINBASE)
+    uint8_t  blob_hashes[8][32];        ///< EIP-4844 versioned hashes
+    uint32_t num_blob_hashes;           ///< 0..8
+};
+
 /// Configuration for the GPU execution engine.
 ///
 /// New fields are placed at the bottom and default to values that preserve
@@ -74,6 +100,12 @@ struct Config
     /// Cancun unconditionally; this field aligns the evmone path so the
     /// same tx produces the same result regardless of backend.
     evmc_revision revision = EVMC_CANCUN;
+
+    /// Block-level context (chain id, timestamp, base fee, etc.) forwarded
+    /// to every backend. Zero-initialised by default — that matches the
+    /// dispatcher's pre-v0.26 behaviour where chain-id/timestamp/etc. all
+    /// resolved to zero. Populated by callers that own a real block header.
+    BlockContext block_context = {};
 };
 
 /// Per-tx execution status. Mirrors kernel::TxStatus so all backends
