@@ -579,11 +579,13 @@ kernel void evm_execute(
     {
         device const uchar* blob_warm_a = blob + inp.warm_addr_offset;
         for (uint i = 0; i < inp.warm_addr_count; ++i) {
+            // 20 BE address bytes → big-int uint256. Byte 19 (LSB) →
+            // bits 0..7 of w[0]; byte 0 (top of address) → bits
+            // 152..159 of w[2]. Matches PUSH-derived addresses.
             uint256 a = u256_zero();
             for (uint b = 0; b < 20; ++b) {
-                uint limb = b / 8;
-                uint shift = (b % 8) * 8;
-                a.w[limb] |= ulong(blob_warm_a[i * 20 + b]) << shift;
+                uint pfr = 19 - b;
+                a.w[pfr / 8] |= ulong(blob_warm_a[i * 20 + b]) << ((pfr % 8) * 8);
             }
             warm_addr_mark(warm_addrs, warm_addr_count, a);
         }
@@ -591,11 +593,11 @@ kernel void evm_execute(
     {
         device const uchar* blob_warm_s = blob + inp.warm_slot_offset;
         for (uint i = 0; i < inp.warm_slot_count; ++i) {
+            // Address is 20 BE bytes (same convention as above).
             uint256 a = u256_zero();
             for (uint b = 0; b < 20; ++b) {
-                uint limb = b / 8;
-                uint shift = (b % 8) * 8;
-                a.w[limb] |= ulong(blob_warm_s[i * 52 + b]) << shift;
+                uint pfr = 19 - b;
+                a.w[pfr / 8] |= ulong(blob_warm_s[i * 52 + b]) << ((pfr % 8) * 8);
             }
             // Slot key is big-endian on the wire: byte 0 is most
             // significant. Reverse to fit kernel uint256 limb layout.
