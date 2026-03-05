@@ -281,7 +281,21 @@ static kernel::HostTransaction to_kernel_tx(const Transaction& tx, const Config&
     auto pack_addr = [](kernel::uint256& dst, const std::vector<uint8_t>& addr) {
         std::memset(&dst, 0, sizeof(dst));
         if (addr.size() >= 20)
-            std::memcpy(&dst, addr.data(), 20);
+        {
+            // Address is 20 BE bytes. Decode into the kernel uint256
+            // (w[0]=low). Byte 19 (LSB) → low 8 bits of w[0]; byte 0
+            // (top of address) → bits 152..159 of w[2]. This matches
+            // the big-int representation produced by PUSH so warm-set
+            // comparisons against on-stack addresses work.
+            auto* limbs = reinterpret_cast<uint64_t*>(&dst);
+            for (int b = 0; b < 20; ++b)
+            {
+                int pos_from_right = 19 - b;
+                int limb = pos_from_right / 8;
+                int shift = (pos_from_right % 8) * 8;
+                limbs[limb] |= static_cast<uint64_t>(addr[b]) << shift;
+            }
+        }
     };
     auto pack_u64 = [](kernel::uint256& dst, uint64_t v) {
         std::memset(&dst, 0, sizeof(dst));
@@ -663,10 +677,22 @@ static BlockResult run_cuda(const Config& config,
                 h.code = tx.code;
                 h.calldata = tx.data;
                 h.gas_limit = tx.gas_limit;
-                std::memcpy(&h.caller, tx.from.data(),
-                            std::min<size_t>(tx.from.size(), sizeof(h.caller)));
-                std::memcpy(&h.address, tx.to.data(),
-                            std::min<size_t>(tx.to.size(), sizeof(h.address)));
+                // Address is 20 BE bytes; pack into uint256 with
+                // big-endian semantics so PUSH-derived addresses can
+                // be compared against caller/address.
+                auto pack_be = [](void* dst, const uint8_t* src, size_t n) {
+                    std::memset(dst, 0, 32);
+                    auto* limbs = reinterpret_cast<uint64_t*>(dst);
+                    for (size_t b = 0; b < n; ++b)
+                    {
+                        size_t pfr = (n - 1) - b;
+                        limbs[pfr / 8] |= static_cast<uint64_t>(src[b]) << ((pfr % 8) * 8);
+                    }
+                };
+                pack_be(&h.caller, tx.from.data(),
+                        std::min<size_t>(tx.from.size(), 20));
+                pack_be(&h.address, tx.to.data(),
+                        std::min<size_t>(tx.to.size(), 20));
                 auto* val_lo = reinterpret_cast<uint64_t*>(&h.value);
                 val_lo[0] = tx.value;
                 // EIP-2929 caller-supplied warm sets — same per-call set

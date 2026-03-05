@@ -254,23 +254,30 @@ inline TxResult execute_cpu(const HostTransaction& tx)
     interp.warm_slot_count = &warm_slot_count;
     interp.warm_slot_capacity = MAX_WARM_SLOTS;
 
+    // 20 BE address bytes → big-int uint256 matching the canonical
+    // Ethereum representation. PUSH-derived addresses on the stack use
+    // this same layout, so warm-set comparisons work.
+    auto unpack_addr_be = [](const uint8_t* src) {
+        uint256 v = uint256::zero();
+        for (int b = 0; b < 20; ++b)
+        {
+            int pos_from_right = 19 - b;
+            v.w[pos_from_right / 8] |= static_cast<uint64_t>(src[b]) << ((pos_from_right % 8) * 8);
+        }
+        return v;
+    };
     {
         const uint8_t* a = tx.warm_addresses.data();
         size_t n = tx.warm_addresses.size() / 20;
         for (size_t i = 0; i < n && warm_addr_count < MAX_WARM_ADDRESSES; ++i)
-        {
-            uint256 v = uint256::zero();
-            std::memcpy(&v, a + i * 20, 20);
-            warm_addrs[warm_addr_count++] = v;
-        }
+            warm_addrs[warm_addr_count++] = unpack_addr_be(a + i * 20);
     }
     {
         const uint8_t* p = tx.warm_storage_keys.data();
         size_t n = tx.warm_storage_keys.size() / 52;
         for (size_t i = 0; i < n && warm_slot_count < MAX_WARM_SLOTS; ++i)
         {
-            uint256 a = uint256::zero();
-            std::memcpy(&a, p + i * 52, 20);
+            uint256 a = unpack_addr_be(p + i * 52);
             uint256 k = uint256::zero();
             // Slot key is stored big-endian on the wire; load into the
             // limb layout used by the kernel uint256 (w[0]=low) by

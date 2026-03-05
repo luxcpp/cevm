@@ -888,9 +888,11 @@ __global__ void evm_execute_kernel(
     {
         const unsigned char* blob_warm_a = blob + inp.warm_addr_offset;
         for (unsigned int i = 0; i < inp.warm_addr_count; ++i) {
+            // 20 BE address bytes → big-int uint256 (matches PUSH).
             uint256 a = u256_zero();
             for (unsigned int b = 0; b < 20; ++b) {
-                a.w[b / 8] |= (unsigned long long)blob_warm_a[i * 20 + b] << ((b % 8) * 8);
+                unsigned int pfr = 19 - b;
+                a.w[pfr / 8] |= (unsigned long long)blob_warm_a[i * 20 + b] << ((pfr % 8) * 8);
             }
             warm_addr_mark_2929(warm_addrs, warm_addr_count, a);
         }
@@ -898,9 +900,11 @@ __global__ void evm_execute_kernel(
     {
         const unsigned char* blob_warm_s = blob + inp.warm_slot_offset;
         for (unsigned int i = 0; i < inp.warm_slot_count; ++i) {
+            // Address is 20 BE bytes (matches PUSH-derived addresses).
             uint256 a = u256_zero();
             for (unsigned int b = 0; b < 20; ++b) {
-                a.w[b / 8] |= (unsigned long long)blob_warm_s[i * 52 + b] << ((b % 8) * 8);
+                unsigned int pfr = 19 - b;
+                a.w[pfr / 8] |= (unsigned long long)blob_warm_s[i * 52 + b] << ((pfr % 8) * 8);
             }
             uint256 k = u256_zero();
             for (unsigned int b = 0; b < 32; ++b) {
