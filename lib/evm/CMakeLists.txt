@@ -381,6 +381,20 @@ if(GTest_FOUND)
     if(APPLE)
         target_link_libraries(access-list-test PRIVATE evm-metal-hosts evm-kernel-metal)
     endif()
+
+    # Per-opcode spec test for the kernel CPU interpreter. Each new opcode in
+    # evm_interpreter.hpp gets a vector here; passing means status, gas, and
+    # output match the EIP-cited cost (cross-checked against evmone CANCUN).
+    add_executable(cpu-interpreter-spec-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/cpu_interpreter_spec_test.cpp
+    )
+    target_compile_features(cpu-interpreter-spec-test PRIVATE cxx_std_20)
+    target_include_directories(cpu-interpreter-spec-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${include_dir}
+    )
+    target_link_libraries(cpu-interpreter-spec-test PRIVATE
+        evm-kernel evm evmc::evmc GTest::gtest GTest::gtest_main
+    )
 endif()
 
 # GPU EVM kernel interpreter (header-only library for CPU path)

@@ -62,23 +62,8 @@ struct StorageEntry
     uint256 value;
 };
 
-/// Block-level context — same for every tx in a block. ABI v3 addition.
-struct BlockContext
-{
-    uint256  origin;
-    uint64_t gas_price;
-    uint64_t timestamp;
-    uint64_t number;
-    uint256  prevrandao;
-    uint64_t gas_limit;
-    uint64_t chain_id;
-    uint64_t base_fee;
-    uint64_t blob_base_fee;
-    uint256  coinbase;
-    uint8_t  blob_hashes[8][32];
-    uint32_t num_blob_hashes;
-    uint32_t _pad0;
-};
+// BlockContext is declared in evm_interpreter.hpp (already #included above)
+// so callers of evm_kernel_host.hpp pick it up via this same namespace.
 
 /// Per-tx log entry written by LOG0..LOG4.
 struct GpuLogEntry
@@ -203,7 +188,17 @@ protected:
     EvmKernelHost& operator=(const EvmKernelHost&) = delete;
 };
 
-inline TxResult execute_cpu(const HostTransaction& tx)
+/// Optional per-execution context: block fields (chain id, timestamp, etc.)
+/// the interpreter reads via ORIGIN/COINBASE/TIMESTAMP/.../BLOBHASH. Default-
+/// constructed = all zeros, which matches the GPU "no host" behaviour the
+/// parity tests assert on.
+struct CpuExecOptions
+{
+    BlockContext block_ctx{};
+};
+
+inline TxResult execute_cpu(const HostTransaction& tx,
+                            const CpuExecOptions& opts = {})
 {
     EvmInterpreter interp{};
     interp.code = tx.code.data();
@@ -214,6 +209,7 @@ inline TxResult execute_cpu(const HostTransaction& tx)
     interp.caller = tx.caller;
     interp.address = tx.address;
     interp.value = tx.value;
+    interp.block_ctx = &opts.block_ctx;
 
     std::vector<uint8_t> memory(HOST_MAX_MEMORY_PER_TX, 0);
     std::vector<uint8_t> output(HOST_MAX_OUTPUT_PER_TX, 0);
@@ -221,8 +217,11 @@ inline TxResult execute_cpu(const HostTransaction& tx)
     std::vector<uint256> storage_values(HOST_MAX_STORAGE_PER_TX);
     std::vector<uint256> orig_keys(HOST_MAX_STORAGE_PER_TX);
     std::vector<uint256> orig_values(HOST_MAX_STORAGE_PER_TX);
+    std::vector<uint256> trans_keys(HOST_MAX_STORAGE_PER_TX);
+    std::vector<uint256> trans_values(HOST_MAX_STORAGE_PER_TX);
     uint32_t storage_count = 0;
     uint32_t orig_count = 0;
+    uint32_t trans_count = 0;
     std::vector<LogEntry> log_entries(MAX_LOGS);
     uint32_t log_count = 0;
 
@@ -233,6 +232,9 @@ inline TxResult execute_cpu(const HostTransaction& tx)
     interp.orig_keys = orig_keys.data();
     interp.orig_values = orig_values.data();
     interp.orig_count = &orig_count;
+    interp.transient_keys = trans_keys.data();
+    interp.transient_values = trans_values.data();
+    interp.transient_count = &trans_count;
     interp.logs = log_entries.data();
     interp.log_count = &log_count;
     interp.log_capacity = MAX_LOGS;
@@ -312,6 +314,20 @@ inline TxResult execute_cpu(const HostTransaction& tx)
     r.gas_refund = result.gas_refund;
     if (result.output_size > 0)
         r.output.assign(output.data(), output.data() + result.output_size);
+
+    // Resolve LOG entries against the memory image *after* execution. The
+    // kernel records data_offset+data_size only; we copy the bytes here
+    // (the GPU dispatcher does the analogous step out of mem_pool).
+    for (uint32_t i = 0; i < log_count && i < log_entries.size(); ++i)
+    {
+        const auto& e = log_entries[i];
+        HostLog hl;
+        hl.topics.assign(e.topics, e.topics + e.num_topics);
+        if (e.data_size > 0 && e.data_offset + e.data_size <= memory.size())
+            hl.data.assign(memory.data() + e.data_offset,
+                           memory.data() + e.data_offset + e.data_size);
+        r.logs.push_back(std::move(hl));
+    }
 
     return r;
 }
