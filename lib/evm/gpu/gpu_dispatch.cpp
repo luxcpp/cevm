@@ -329,6 +329,45 @@ static TxStatus convert_status(kernel::TxStatus s)
     return TxStatus::Error;
 }
 
+/// Convert a dispatch-layer BlockContext into the kernel's BlockContext.
+/// Both layouts carry the same logical fields; only the address-shaped
+/// members (`origin`, `coinbase`) differ in width — the dispatcher's wire
+/// format is 20-byte right-aligned, the kernel uses uint256 to match its
+/// stack ABI. PREVRANDAO and blob hashes are 32-byte already and copy as-is.
+///
+/// Address packing uses the same big-endian convention as `to_kernel_tx`'s
+/// `pack_addr` lambda so an `origin` or `coinbase` compares equal to the
+/// uint256 PUSH would produce for the same address.
+static kernel::BlockContext to_kernel_block_ctx(const BlockContext& ctx)
+{
+    kernel::BlockContext k{};
+    auto pack_addr = [](kernel::uint256& dst, const uint8_t addr[20]) {
+        std::memset(&dst, 0, sizeof(dst));
+        auto* limbs = reinterpret_cast<uint64_t*>(&dst);
+        for (int b = 0; b < 20; ++b)
+        {
+            int pos_from_right = 19 - b;
+            int limb = pos_from_right / 8;
+            int shift = (pos_from_right % 8) * 8;
+            limbs[limb] |= static_cast<uint64_t>(addr[b]) << shift;
+        }
+    };
+    pack_addr(k.origin, ctx.origin);
+    k.gas_price     = ctx.gas_price;
+    k.timestamp     = ctx.timestamp;
+    k.number        = ctx.number;
+    std::memcpy(&k.prevrandao, ctx.prevrandao, 32);
+    k.gas_limit     = ctx.gas_limit;
+    k.chain_id      = ctx.chain_id;
+    k.base_fee      = ctx.base_fee;
+    k.blob_base_fee = ctx.blob_base_fee;
+    pack_addr(k.coinbase, ctx.coinbase);
+    std::memcpy(k.blob_hashes, ctx.blob_hashes, sizeof(k.blob_hashes));
+    k.num_blob_hashes = std::min<uint32_t>(ctx.num_blob_hashes, 8);
+    k._pad0 = 0;
+    return k;
+}
+
 /// Run every tx through the kernel CPU interpreter (kernel::execute_cpu),
 /// which is the same interpreter that the Metal/CUDA kernels emulate. This
 /// is the CPU reference path for parity testing — gas, status, and output
@@ -585,10 +624,16 @@ static BlockResult run_metal(const Config& config,
         if (engine)
         {
             auto host_txs = to_host_transactions(txs, config);
+            const auto kctx = to_kernel_block_ctx(config.block_context);
             auto t0 = std::chrono::high_resolution_clock::now();
+            // V2 path drives the V2 kernel which still reads the bound
+            // BlockContext buffer directly; call it with the empty-ctx
+            // overload there. V1 path reads ctx through the same buffer
+            // binding — pass it through so CHAINID, TIMESTAMP, etc. are
+            // honoured on the GPU.
             auto results = engine->has_v2()
                 ? engine->execute_v2(host_txs)
-                : engine->execute(host_txs);
+                : engine->execute(host_txs, kctx);
             auto t1 = std::chrono::high_resolution_clock::now();
 
             BlockResult br;

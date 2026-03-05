@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define EVM_GPU_ABI_VERSION 4
+#define EVM_GPU_ABI_VERSION 5
 
 // Backend constants — must match evm::gpu::Backend.
 #define EVM_GPU_BACKEND_CPU_SEQUENTIAL 0
@@ -84,6 +84,24 @@ typedef struct {
     int       ok;
 } CGpuBlockResultV2;
 
+// Block-level context shared by every tx in a block. Field layout matches
+// evm::gpu::BlockContext (gpu_dispatch.hpp) byte-for-byte. All-zero ⇒
+// "no context provided", matching the dispatcher's default Config behaviour.
+typedef struct {
+    uint8_t  origin[20];
+    uint64_t gas_price;
+    uint64_t timestamp;
+    uint64_t number;
+    uint8_t  prevrandao[32];
+    uint64_t gas_limit;
+    uint64_t chain_id;
+    uint64_t base_fee;
+    uint64_t blob_base_fee;
+    uint8_t  coinbase[20];
+    uint8_t  blob_hashes[8][32];
+    uint32_t num_blob_hashes;
+} CBlockContext;
+
 // Original block execution (kept for ABI stability).
 CGpuBlockResult gpu_execute_block(
     const CGpuTx* txs,
@@ -103,6 +121,19 @@ CGpuBlockResultV2 gpu_execute_block_v2(
     uint8_t       backend,
     uint32_t      num_threads,
     uint8_t       revision
+);
+
+// V3 block execution: V2 + block context (CHAINID, TIMESTAMP, NUMBER,
+// BASEFEE, COINBASE, etc.). Pass NULL for `block_ctx` to get V2 semantics
+// (zero-initialised context). The result struct is the same V2 shape; the
+// abi_version field reports the loaded library's EVM_GPU_ABI_VERSION (5+).
+CGpuBlockResultV2 gpu_execute_block_v3(
+    const CGpuTx*         txs,
+    uint32_t              num_txs,
+    uint8_t               backend,
+    uint32_t              num_threads,
+    uint8_t               revision,
+    const CBlockContext*  block_ctx
 );
 
 void gpu_free_result(CGpuBlockResult* result);
