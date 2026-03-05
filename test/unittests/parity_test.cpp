@@ -18,6 +18,26 @@
 // The CUDA branch is gated on EVM_CUDA. On macOS that define is absent so the
 // CUDA assertions are compiled out (Apple GPU stays in the loop). On Linux/CUDA
 // CI the build flips it on and all four backends are checked.
+//
+// === v0.26 carve-out status =================================================
+// Today the corpus has 133 vectors split:
+//   103 Agree            — true 4-way parity
+//    26 KernelCpuMissing — CPU interpreter doesn't implement the opcode;
+//                          GPU kernels do. Tracked so a regression on either
+//                          side fails loudly.
+//     4 GasOnly          — CPU interpreter charges the wrong gas (vs the
+//                          Yellow Paper); GPU kernels charge correctly.
+//                          status & output already match.
+//
+// Both carve-outs are temporary scaffolding for known CPU interpreter bugs.
+// The v0.26 cpu-interpreter-26-opcodes branch fixes them. Once that lands:
+//   * KernelCpuMissing handler: CPU now succeeds → forces ADD_FAILURE asking
+//     for promotion to Agree.
+//   * GasOnly handler: CPU gas matches Metal → forces ADD_FAILURE asking
+//     for promotion to Agree.
+// After both groups are empty the GasOnly and KernelCpuMissing arms (and the
+// enum values) are removed and the test becomes a pure Agree-or-fail loop.
+// See per-vector FINDING comments for the exact spec citations.
 
 #include "gpu/gpu_dispatch.hpp"
 
@@ -66,10 +86,24 @@ inline void emit_return(std::vector<uint8_t>& c, uint8_t off, uint8_t sz)
 ///                    CPU returns Error/0-gas while GPU executes correctly.
 ///                    A new opcode joining the missing list is a regression.
 ///
-/// `GasOnly`:        The four backends agree on status and output but their
-///                    gas accounting differs by a small constant (typically
-///                    the cost of MSTORE memory expansion in different
-///                    revisions). Asserted only on status+output.
+/// `GasOnly`:         The four backends agree on status and output but the
+///                    CPU interpreter charges incorrect gas vs the spec
+///                    (Metal/CUDA charge correctly). The test asserts on
+///                    status+output and FAILS LOUDLY if gas converges — that
+///                    is the signal to promote the vector to Agree.
+///
+/// === v0.26 → v0.27 retirement plan ==========================================
+/// Both `KernelCpuMissing` and `GasOnly` are scaffolding around four CPU
+/// interpreter bugs that the v0.26 cpu-interpreter PR is fixing. When that
+/// PR lands:
+///   1. The 26 `KernelCpuMissing` vectors must auto-promote to Agree
+///      (the test catches CPU returning Return for a missing opcode and
+///      forces re-classification).
+///   2. The 4 `GasOnly` vectors must auto-promote to Agree
+///      (the gas-converged hard-failure below catches them).
+///   3. After both groups are empty, this enum collapses to a single value
+///      and should be removed entirely along with the GasOnly/MissingCpu
+///      switch arms in the loop. Final state: 133 Agree, 0 carve-outs.
 enum class Expectation : uint8_t
 {
     Agree            = 0,
@@ -283,10 +317,20 @@ const std::vector<ParityVector>& corpus()
         out.push_back({"cd_size_empty",
             {0x36, 0x60,0x00, 0x52, 0x60,0x20,0x60,0x00,0xf3},
             {}, 50'000});
-        // FINDING: cd_load and cd_copy report status+output identically across
-        // all backends, but gas accounting is off-by-one on the CPU
-        // interpreter. Likely the kernel CPU does not charge memory-expansion
-        // gas for the destination word the way Metal does.
+        // FINDING (v0.26 GAS DRIFT, blocks v0.27): the kernel CPU interpreter
+        // (evm_interpreter.hpp line 643) charges GasCost::BASE (2) for the
+        // entire 0x30..0x37 environment range, but the Yellow Paper assigns
+        // VERYLOW (3) to CALLDATALOAD (0x35) and CALLDATACOPY (0x37). Metal
+        // (evm_kernel.metal line 646, 660) charges VERYLOW correctly.
+        //
+        // Measured: cd_load CPU=20, Metal=21 (off by 1). cd_copy CPU=23,
+        // Metal=24 (off by 1). Status & output already agree.
+        //
+        // Resolution path: the CPU interpreter must split the W_verylow set
+        // (CALLDATALOAD, CALLDATACOPY) out of the BASE bucket and charge
+        // VERYLOW. Once that lands, gas converges and these vectors must be
+        // promoted to Expectation::Agree (the GasOnly check below will fail
+        // loudly to enforce this).
         out.push_back({"cd_load",
             {0x60,0x00, 0x35, 0x60,0x00, 0x52, 0x60,0x20, 0x60,0x00, 0xf3},
             std::vector<uint8_t>(32, 0xAB), 50'000, Expectation::GasOnly});
@@ -319,9 +363,17 @@ const std::vector<ParityVector>& corpus()
              0x60,0x00, 0x51,
              0x60,0x20, 0x52,
              0x60,0x20, 0x60,0x20, 0xf3}, {}, 50'000});
-        // FINDING: MSIZE diverges in gas accounting (Metal=29, CPU=30) — the
-        // CPU charges one extra word of memory expansion. Status & output
-        // agree, so we mark this GasOnly.
+        // FINDING (v0.26 GAS DRIFT, blocks v0.27): MSIZE (0x59) is BASE (2)
+        // per the Yellow Paper. The CPU interpreter (evm_interpreter.hpp
+        // line 738) lumps MSIZE into the same VERYLOW (3) bucket as
+        // MLOAD/MSTORE/MSTORE8 and overcharges by 1. Metal (evm_kernel.metal
+        // line 928) charges BASE correctly.
+        //
+        // Measured: CPU=30, Metal=29.
+        //
+        // Resolution path: split MSIZE out of the (0x51..0x53,0x59) gas
+        // group in the CPU interpreter and charge BASE. Once that lands,
+        // promote to Expectation::Agree.
         out.push_back({"mem_msize",
             {0x60,0x00, 0x60,0x00, 0x52,
              0x59,
@@ -387,12 +439,22 @@ const std::vector<ParityVector>& corpus()
         // INVALID
         out.push_back({"ctl_invalid",
             {0xfe}, {}, 50'000});
-        // FINDING: undefined-opcode handling differs in gas: CPU returns
-        // gas_used=0 (returns gas_start - gas before consuming anything
-        // for the unknown op), Metal consumes all remaining gas. Both report
-        // status=Error so the program-visible behaviour matches; only gas
-        // accounting differs. GasOnly until the CPU path matches Metal's
-        // "consume all gas on undefined" rule.
+        // FINDING (v0.26 GAS DRIFT, blocks v0.27): undefined opcodes (here
+        // 0x0c) MUST consume all remaining gas per Yellow Paper §9.4.2 (an
+        // exceptional halt zeros the remaining gas before propagation). The
+        // CPU interpreter (evm_interpreter.hpp line 1088) returns
+        // {InvalidOpcode, gas_start - gas, gas, 0} — i.e. only the gas spent
+        // *up to* the invalid opcode is reported as used; remaining gas is
+        // preserved. Metal (evm_kernel.metal undefined-opcode path) zeroes
+        // gas correctly.
+        //
+        // Measured: gas_limit=50000, CPU gas_used=0, Metal gas_used=50000.
+        //
+        // Resolution path: change the trailing `return {InvalidOpcode,
+        // gas_start - gas, gas, 0}` in evm_interpreter.hpp to `gas = 0;
+        // return {InvalidOpcode, gas_start, 0, 0};` (mirror the 0xfe path
+        // already in the same file at line 1074). Once that lands, promote
+        // to Expectation::Agree.
         out.push_back({"ctl_undefined",
             {0x0c}, {}, 50'000, Expectation::GasOnly});
         // Bad jump target -> error
@@ -718,14 +780,16 @@ TEST(Parity, AllBackendsAgreeOnEveryVector)
                 ok = false;
             }
 #endif
-            // Documented: gas may differ. Catch the case where it
-            // unexpectedly converges (good news — promote to Agree).
-            if (r_seq.gas_used[0] == r_metal.gas_used[0] && ok)
+            // Documented: gas may differ. If gas now matches, the kernel bug
+            // has been fixed — the carve-out must be retired by promoting to
+            // Expectation::Agree. Make this a hard failure so the next agent
+            // is forced to remove the tag rather than silently masking parity.
+            if (r_seq.gas_used[0] == r_metal.gas_used[0])
             {
-                std::printf("[parity] %s: gas now matches (%llu) — "
-                            "consider promoting to Expectation::Agree\n",
-                            v.name,
-                            static_cast<unsigned long long>(r_seq.gas_used[0]));
+                ADD_FAILURE() << v.name
+                    << ": gas converged at " << r_seq.gas_used[0]
+                    << " — kernel bug appears fixed; promote to Expectation::Agree";
+                ok = false;
             }
             if (ok) ++gasonly_ok; else ++gasonly_fail;
             break;
