@@ -1,0 +1,54 @@
+# command-line-arguments
+ld: warning: ignoring duplicate libraries: '-levm-gpu'
+=== Lux cevm v0.27.0 — Native EVM Benchmark Sweep ===
+Hardware: Apple M1 Max, 10-core CPU, 32-core GPU, unified memory
+
+Backends: [cpu-sequential cpu-parallel gpu-metal]
+Auto-detect: gpu-metal
+
+─── Workload: compute_50 (bytecode 301 bytes) ───
+N          CPU-Seq(ms)    CPU-Par(ms)    GPU-Met(ms)   par-vs-seq   gpu-vs-par
+32               0.096          0.183         31.267        0.53x        0.01x ✓
+256              0.758          0.615         55.346        1.23x        0.01x ✓
+2048             6.213          4.083         80.070        1.52x        0.05x ✓
+16384           49.664         30.253        197.078        1.64x        0.15x ✓
+
+─── Workload: compute_500 (bytecode 3001 bytes) ───
+N          CPU-Seq(ms)    CPU-Par(ms)    GPU-Met(ms)   par-vs-seq   gpu-vs-par
+32               0.363          0.234         88.822        1.55x        0.00x ✓
+256              2.852          0.797        156.364        3.58x        0.01x ✓
+2048            23.369          6.166        231.605        3.79x        0.03x ✓
+16384          185.596         43.885        340.419        4.23x        0.13x ✓
+
+─── Workload: keccak_10 (bytecode 97 bytes) ───
+N          CPU-Seq(ms)    CPU-Par(ms)    GPU-Met(ms)   par-vs-seq   gpu-vs-par
+Context leak detected, CoreAnalytics returned false
+32               0.183          0.176         85.527        1.04x        0.00x ✓
+256              1.397          0.647        159.313        2.16x        0.00x ✓
+2048            12.188          4.310        253.775        2.83x        0.02x ✓
+16384           93.152         32.949        327.562        2.83x        0.10x ✓
+
+─── Workload: storage_5 (bytecode 46 bytes) ───
+N          CPU-Seq(ms)    CPU-Par(ms)    GPU-Met(ms)   par-vs-seq   gpu-vs-par
+Context leak detected, CoreAnalytics returned false
+32               0.078          0.150         81.229        0.52x        0.00x ✓
+256              0.608          0.592        161.837        1.03x        0.00x ✓
+2048             4.881          3.801        233.114        1.28x        0.02x ✓
+16384           39.903         29.647        312.136        1.35x        0.09x ✓
+
+─── Workload: erc20_transfer (bytecode 38 bytes) ───
+N          CPU-Seq(ms)    CPU-Par(ms)    GPU-Met(ms)   par-vs-seq   gpu-vs-par
+Context leak detected, CoreAnalytics returned false
+32               0.066          0.164         83.193        0.40x        0.00x ✗ seq=1471936 par=1471936 gpu=1415648
+256              0.558          0.583        152.867        0.96x        0.00x ✗ seq=11775488 par=11775488 gpu=11325184
+2048             4.663          3.996        240.503        1.17x        0.02x ✗ seq=94203904 par=94203904 gpu=90601472
+16384           35.732         28.721        315.974        1.24x        0.09x ✗ seq=753631232 par=753631232 gpu=724811776
+
+─── Workload: amm_swap (bytecode 19 bytes) ───
+N          CPU-Seq(ms)    CPU-Par(ms)    GPU-Met(ms)   par-vs-seq   gpu-vs-par
+Context leak detected, CoreAnalytics returned false
+32               0.063          0.163         83.790        0.39x        0.00x ✓
+256              0.551          0.568        160.591        0.97x        0.00x ✓
+2048             4.491          4.052        241.430        1.11x        0.02x ✓
+16384           37.123         30.714        327.255        1.21x        0.09x ✓
+
