@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2024 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2024 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
@@ -7,7 +7,7 @@
 #include <intx/intx.hpp>
 #include <optional>
 
-namespace evmone::state
+namespace cevm::state
 {
 using evmc::address;
 using evmc::bytes;
@@ -41,4 +41,4 @@ public:
     /// Returns the hash of the block header of the given block number.
     virtual bytes32 get_block_hash(int64_t block_number) const noexcept = 0;
 };
-}  // namespace evmone::state
+}  // namespace cevm::state

@@ -17,7 +17,7 @@
 ///     PUSH20 <addr> ; gas ; mstore stuff ; CALL
 ///
 /// Anything else (CALLDATALOAD, SLOAD, arithmetic, MLOAD …) is dynamic and
-/// makes the bridge bail out so evmone can take over.
+/// makes the bridge bail out so cevm can take over.
 ///
 /// We're not building a full data-flow analyzer here. We only walk forwards
 /// from each CALL/CREATE site and look at the stack picture immediately
@@ -67,7 +67,7 @@ CodeAnalysis analyze(std::span<const uint8_t> code);
 
 /// GPU kernel resource caps. Hitting any of these means the kernel either
 /// silently truncates (storage, output), silently OOGs (memory), or hits an
-/// ERR (logs). All four are consensus divergences vs evmone, so the
+/// ERR (logs). All four are consensus divergences vs cevm, so the
 /// dispatcher must spot them up front and fall back to CPU.
 ///
 /// The numbers come from `lib/evm/gpu/kernel/evm_kernel_host.hpp` and the
@@ -125,7 +125,7 @@ TxRequirements analyze_requirements(std::span<const uint8_t> code);
 
 /// Bitmask describing why a tx cannot run safely on the GPU kernel. Used
 /// by the dispatcher to populate `BlockResult::warnings[i]` so callers
-/// can tell whether their per-tx result is consensus-equivalent to evmone.
+/// can tell whether their per-tx result is consensus-equivalent to cevm.
 enum TxWarning : uint32_t
 {
     /// Tx reads account state (BALANCE / EXTCODE* / SELFBALANCE / BLOCKHASH)

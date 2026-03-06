@@ -7,7 +7,7 @@
 ///
 /// All Cancun-era opcodes in mainnet today are implemented here EXCEPT the
 /// CALL/CREATE family (0xf0/f1/f2/f4/f5/fa/ff). Those return status=5
-/// (CallNotSupported) so the host falls back to CPU evmone.
+/// (CallNotSupported) so the host falls back to CPU cevm.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -546,7 +546,7 @@ kernel void evm_execute(
 
     // EVM Yellow Paper: 1024-deep stack. Solidity-emitted bytecode regularly
     // hits 30-50 entries; the previous 32-cap silently truncated real
-    // contracts and diverged from CPU evmone. The array lives in thread-
+    // contracts and diverged from CPU cevm. The array lives in thread-
     // local storage; Metal automatically backs it with device memory when
     // it exceeds the register file (32 KB per thread here).
     uint256 stack[1024];
@@ -990,7 +990,7 @@ kernel void evm_execute(
             // Cap check before any state mutation: appending a new slot when
             // the per-tx buffer is full would silently corrupt state. Signal
             // INVALID-style (status=Error, all gas consumed). With a host the
-            // dispatcher routes this tx to evmone CPU (which has no cap);
+            // dispatcher routes this tx to cevm CPU (which has no cap);
             // without one the Error is honest — the GPU can't process this tx.
             if (!found && stor_count >= MAX_STORAGE_PER_TX) ERRA();
             original_value_record(orig_storage,orig_count,slot,current);
@@ -1166,8 +1166,8 @@ kernel void evm_execute(
             ulong size = sv.w[0];
             if (!offset_in_bounds(ov, size)) ERR();
             // Output buffer is fixed at MAX_OUTPUT_PER_TX. Silently
-            // truncating would diverge from CPU evmone (no cap there);
-            // the dispatcher routes Error txs to evmone CPU as the
+            // truncating would diverge from CPU cevm (no cap there);
+            // the dispatcher routes Error txs to cevm CPU as the
             // unbounded fallback so legitimate large RETURN payloads
             // still execute correctly.
             if (size > MAX_OUTPUT_PER_TX) ERR();
@@ -1183,7 +1183,7 @@ kernel void evm_execute(
             ulong size = sv.w[0];
             if (!offset_in_bounds(ov, size)) ERR();
             // Same cap as RETURN: fail-loud on output > MAX_OUTPUT_PER_TX
-            // so the dispatcher falls back to evmone (no cap) instead of
+            // so the dispatcher falls back to cevm (no cap) instead of
             // silently truncating REVERT data.
             if (size > MAX_OUTPUT_PER_TX) ERR();
             uint off = uint(ov.w[0]); uint sz = uint(size);

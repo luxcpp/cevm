@@ -8,7 +8,7 @@
 
 #include "internal.hpp"
 
-#include <evmone_precompiles/kzg.hpp>
+#include <cevm_precompiles/kzg.hpp>
 
 #include <intx/intx.hpp>
 
@@ -24,13 +24,13 @@ Result point_eval_cpu(std::span<const uint8_t> input, uint64_t gas_limit)
         return make_failure(kGas);
 
     const auto p = reinterpret_cast<const std::byte*>(input.data());
-    const bool ok = evmone::crypto::kzg_verify_proof(p, p + 32, p + 64, p + 96, p + 144);
+    const bool ok = cevm::crypto::kzg_verify_proof(p, p + 32, p + 64, p + 96, p + 144);
     if (!ok)
         return make_failure(kGas);
 
     std::vector<uint8_t> out(64);
-    intx::be::unsafe::store(out.data(), evmone::crypto::FIELD_ELEMENTS_PER_BLOB);
-    intx::be::unsafe::store(out.data() + 32, evmone::crypto::BLS_MODULUS);
+    intx::be::unsafe::store(out.data(), cevm::crypto::FIELD_ELEMENTS_PER_BLOB);
+    intx::be::unsafe::store(out.data() + 32, cevm::crypto::BLS_MODULUS);
     return make_ok(kGas, std::move(out));
 }
 }  // namespace evm::gpu::precompile

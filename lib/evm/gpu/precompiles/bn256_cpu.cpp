@@ -6,14 +6,14 @@
 // 0x08 BN256_PAIRING — gas 45000 + 34000*k
 //
 // (Istanbul+ pricing.) All implemented via the evmmax::bn254 primitives in
-// lib/evmone_precompiles. CPU is the only consensus-safe path here: the
+// lib/cevm_precompiles. CPU is the only consensus-safe path here: the
 // pairing kernel in luxcpp/gpu does not currently implement BN254 pairings
 // (only BLS12-381).
 
 #include "internal.hpp"
 
-#include <evmone_precompiles/bn254.hpp>
-#include <evmone_precompiles/ecc.hpp>
+#include <cevm_precompiles/bn254.hpp>
+#include <cevm_precompiles/ecc.hpp>
 
 #include <intx/intx.hpp>
 

@@ -9,7 +9,7 @@
 // optional Config flags were enabled. These tests exercise:
 //
 //   1. CallNotSupported fallback: GPU kernel rejects CALL/CREATE; the
-//      dispatcher must intercept and re-execute on evmone using the real
+//      dispatcher must intercept and re-execute on cevm using the real
 //      host. The internal CallNotSupported status MUST never leak to the
 //      consumer.
 //
@@ -38,7 +38,7 @@
 #include <string>
 #include <vector>
 
-extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
+extern "C" struct evmc_vm* evmc_create_cevm(void) noexcept;
 
 namespace {
 
@@ -65,7 +65,7 @@ inline void emit_return(std::vector<uint8_t>& c, uint8_t off, uint8_t sz)
 }
 
 // 0xF1 — CALL. The GPU/CPU kernel surfaces CallNotSupported here. With a
-// host the dispatcher must fall back to evmone (which actually services
+// host the dispatcher must fall back to cevm (which actually services
 // CALL via host->call()).
 const uint8_t OP_CALL = 0xf1;
 
@@ -100,7 +100,7 @@ Transaction make_tx_no_code(uint64_t gas_limit = 21'000)
 // -- shared host --------------------------------------------------------------
 
 /// Set up a MockedHost where calling any address succeeds with a small
-/// pre-baked result. Lets the CallNotSupported fallback path through evmone
+/// pre-baked result. Lets the CallNotSupported fallback path through cevm
 /// reach a deterministic outcome.
 evmc::MockedHost make_call_friendly_host()
 {
@@ -127,13 +127,13 @@ evmc::MockedHost make_call_friendly_host()
 
 // -- 1. CallNotSupported fallback ---------------------------------------------
 
-TEST(Dispatch, CallNotSupported_HostProvided_RoutesThroughEvmone)
+TEST(Dispatch, CallNotSupported_HostProvided_RoutesThroughCevm)
 {
     // When the caller passes a host, the dispatcher routes CALL bytecode
-    // through evmone — bypassing the GPU kernel entirely (and therefore
+    // through cevm — bypassing the GPU kernel entirely (and therefore
     // never hitting the kernel's CallNotSupported branch). The result has
-    // no per-tx status array (evmone path doesn't populate it) but the
-    // gas accounting is the canonical evmone reference. Both CPU_Sequential
+    // no per-tx status array (cevm path doesn't populate it) but the
+    // gas accounting is the canonical cevm reference. Both CPU_Sequential
     // and GPU_Metal must agree on gas_used.
     std::vector<uint8_t> code;
     code.push_back(OP_CALL);
@@ -158,7 +158,7 @@ TEST(Dispatch, CallNotSupported_HostProvided_RoutesThroughEvmone)
 
     ASSERT_EQ(cpu_result.gas_used.size(), 1u);
     EXPECT_EQ(cpu_result.gas_used[0], gpu_result.gas_used[0])
-        << "CPU and GPU must agree on gas when both route through evmone";
+        << "CPU and GPU must agree on gas when both route through cevm";
     for (auto s : cpu_result.status)
         EXPECT_NE(s, TxStatus::CallNotSupported);
     EXPECT_TRUE(cpu_result.error_message.empty());
@@ -304,8 +304,8 @@ void run_cell(const MatrixCell& cell)
     }
     if (cell.has_host && !cell.has_code)
     {
-        // Value-transfer through evmone: gas_used should be small (no
-        // bytecode means evmone runs an empty program).
+        // Value-transfer through cevm: gas_used should be small (no
+        // bytecode means cevm runs an empty program).
         EXPECT_LE(result.gas_used[0], tx.gas_limit);
     }
     if (!cell.has_host && !cell.has_code)
@@ -480,7 +480,7 @@ TEST(Dispatch, GasEstimation_NotInvoked_WhenHostPresent)
     evmc::MockedHost host;
     auto r = evm::gpu::execute_block(cfg, {tx}, &host);
 
-    // gas_used should NOT be the full gas_limit — evmone ran an empty
+    // gas_used should NOT be the full gas_limit — cevm ran an empty
     // program (no code installed) and returned without consuming gas.
     ASSERT_EQ(r.gas_used.size(), 1u);
     EXPECT_LT(r.gas_used[0], tx.gas_limit);

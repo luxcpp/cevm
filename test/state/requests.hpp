@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2024 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2024 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -9,7 +9,7 @@
 #include <evmc/evmc.hpp>
 #include <span>
 
-namespace evmone::state
+namespace cevm::state
 {
 /// The address of the deposit contract.
 ///
@@ -69,4 +69,4 @@ hash256 calculate_requests_hash(std::span<const Requests> requests_list);
 ///
 /// @return The collected deposit requests or std::nullopt if the collection has failed.
 std::optional<Requests> collect_deposit_requests(std::span<const TransactionReceipt> receipts);
-}  // namespace evmone::state
+}  // namespace cevm::state

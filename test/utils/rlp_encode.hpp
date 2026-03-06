@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -7,7 +7,7 @@
 #include <test/state/block.hpp>
 #include <test/state/transaction.hpp>
 
-namespace evmone::state
+namespace cevm::state
 {
 /// Defines how to RLP-encode a Transaction.
 [[nodiscard]] bytes rlp_encode(const Transaction& tx);
@@ -23,4 +23,4 @@ namespace evmone::state
 
 /// Defines how to RLP-encode a Withdrawal.
 [[nodiscard]] bytes rlp_encode(const Withdrawal& withdrawal);
-}  // namespace evmone::state
+}  // namespace cevm::state

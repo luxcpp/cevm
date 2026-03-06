@@ -1,19 +1,19 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "precompiles.hpp"
 #include "../utils/stdx/utility.hpp"
-#include "evmone_precompiles/secp256r1.hpp"
+#include "cevm_precompiles/secp256r1.hpp"
 #include "precompiles_internal.hpp"
-#include <evmone_precompiles/blake2b.hpp>
-#include <evmone_precompiles/bls.hpp>
-#include <evmone_precompiles/bn254.hpp>
-#include <evmone_precompiles/kzg.hpp>
-#include <evmone_precompiles/modexp.hpp>
-#include <evmone_precompiles/ripemd160.hpp>
-#include <evmone_precompiles/secp256k1.hpp>
-#include <evmone_precompiles/sha256.hpp>
+#include <cevm_precompiles/blake2b.hpp>
+#include <cevm_precompiles/bls.hpp>
+#include <cevm_precompiles/bn254.hpp>
+#include <cevm_precompiles/kzg.hpp>
+#include <cevm_precompiles/modexp.hpp>
+#include <cevm_precompiles/ripemd160.hpp>
+#include <cevm_precompiles/secp256k1.hpp>
+#include <cevm_precompiles/sha256.hpp>
 #include <intx/intx.hpp>
 #include <array>
 #include <bit>
@@ -21,15 +21,15 @@
 #include <limits>
 #include <span>
 
-#ifdef EVMONE_PRECOMPILES_LIBSECP256K1
+#ifdef CEVM_PRECOMPILES_LIBSECP256K1
 #include "precompiles_libsecp256k1.hpp"
 #endif
 
-#ifdef EVMONE_PRECOMPILES_GMP
+#ifdef CEVM_PRECOMPILES_GMP
 #include "precompiles_gmp.hpp"
 #endif
 
-namespace evmone::state
+namespace cevm::state
 {
 using evmc::bytes;
 using evmc::bytes_view;
@@ -324,7 +324,7 @@ public:
 
 }  // namespace
 
-ExecutionResult ecrecover_execute_evmone(const uint8_t* input, size_t input_size, uint8_t* output,
+ExecutionResult ecrecover_execute_cevm(const uint8_t* input, size_t input_size, uint8_t* output,
     [[maybe_unused]] size_t output_size) noexcept
 {
     const EcrecoverInput input_buffer{std::span{input, input_size}};
@@ -343,7 +343,7 @@ ExecutionResult ecrecover_execute_evmone(const uint8_t* input, size_t input_size
     return {EVMC_SUCCESS, 32};
 }
 
-#ifdef EVMONE_PRECOMPILES_LIBSECP256K1
+#ifdef CEVM_PRECOMPILES_LIBSECP256K1
 ExecutionResult ecrecover_execute_libsecp256k1(const uint8_t* input, size_t input_size,
     uint8_t* output, [[maybe_unused]] size_t output_size) noexcept
 {
@@ -369,10 +369,10 @@ ExecutionResult ecrecover_execute(
 {
     assert(output_size >= 32);
 // Select better implementation.
-#ifdef EVMONE_PRECOMPILES_LIBSECP256K1
+#ifdef CEVM_PRECOMPILES_LIBSECP256K1
     return ecrecover_execute_libsecp256k1(input, input_size, output, output_size);
 #else
-    return ecrecover_execute_evmone(input, input_size, output, output_size);
+    return ecrecover_execute_cevm(input, input_size, output, output_size);
 #endif
 }
 
@@ -451,7 +451,7 @@ expmod_parse_input(
     return {base, exp, mod};
 }
 
-ExecutionResult expmod_execute_evmone(
+ExecutionResult expmod_execute_cevm(
     const uint8_t* input, size_t input_size, uint8_t* output, size_t output_size) noexcept
 {
     const auto [base, exp, mod] = expmod_parse_input(input, input_size, output, output_size);
@@ -462,7 +462,7 @@ ExecutionResult expmod_execute_evmone(
     return {EVMC_SUCCESS, output_size};
 }
 
-#ifdef EVMONE_PRECOMPILES_GMP
+#ifdef CEVM_PRECOMPILES_GMP
 ExecutionResult expmod_execute_gmp(
     const uint8_t* input, size_t input_size, uint8_t* output, size_t output_size) noexcept
 {
@@ -478,10 +478,10 @@ ExecutionResult expmod_execute_gmp(
 ExecutionResult expmod_execute(
     const uint8_t* input, size_t input_size, uint8_t* output, size_t output_size) noexcept
 {
-#ifdef EVMONE_PRECOMPILES_GMP
+#ifdef CEVM_PRECOMPILES_GMP
     return expmod_execute_gmp(input, input_size, output, output_size);
 #else
-    return expmod_execute_evmone(input, input_size, output, output_size);
+    return expmod_execute_cevm(input, input_size, output, output_size);
 #endif
 }
 
@@ -870,4 +870,4 @@ evmc::Result call_precompile(evmc_revision rev, const evmc_message& msg) noexcep
         [](const evmc_result* res) noexcept { delete[] res->output_data; }};
     return evmc::Result{result};
 }
-}  // namespace evmone::state
+}  // namespace cevm::state

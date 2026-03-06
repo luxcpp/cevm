@@ -1,4 +1,4 @@
-// Copyright (C) 2026, The evmone Authors. All rights reserved.
+// Copyright (C) 2026, The cevm Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "gpu_dispatch.hpp"
@@ -92,7 +92,7 @@ bool set_backend(Config& config, Backend b)
     return false;
 }
 
-/// Run every tx through evmone using the caller-provided host.
+/// Run every tx through cevm using the caller-provided host.
 /// `parallel` selects between sequential and Block-STM execution.
 /// Caller MUST pass a valid evmc::Host&; the host-less path is handled by
 /// the routing helpers (kernel::execute_cpu, gas_estimation_only) instead.
@@ -108,10 +108,10 @@ static BlockResult execute_via_engine(const Config& config,
 
     if (parallel)
     {
-        return execute_parallel_evmone(evm_txs, host, config.revision,
+        return execute_parallel_cevm(evm_txs, host, config.revision,
             config.num_threads);
     }
-    return execute_sequential_evmone(evm_txs, host, config.revision);
+    return execute_sequential_cevm(evm_txs, host, config.revision);
 }
 
 /// Build a result that signals an early bail-out. Every status is Error,
@@ -506,7 +506,7 @@ synthesize_base_state_cuda(const std::vector<Transaction>& txs)
 
 /// Single source of truth for the CallNotSupported fallback policy.
 /// Walks `results` and replaces every `CallNotSupported` entry with the
-/// outcome of running tx[i] through evmone (sequential) against the real
+/// outcome of running tx[i] through cevm (sequential) against the real
 /// host. Increments `gpu_fallback_count` for each rewritten slot.
 ///
 /// When `host == nullptr` the dispatcher cannot service the fallback, so
@@ -546,13 +546,13 @@ static void apply_call_not_supported_fallback(BlockResult& br,
             continue;
         }
 
-        // Re-execute this single tx on evmone using the caller's host.
+        // Re-execute this single tx on cevm using the caller's host.
         std::vector<EvmTransaction> one;
         one.push_back(to_evm_transaction(txs[i]));
-        auto fb = execute_sequential_evmone(one, *host, EVMC_SHANGHAI);
+        auto fb = execute_sequential_cevm(one, *host, EVMC_SHANGHAI);
 
-        // execute_sequential_evmone fills gas_used per tx. It does not yet
-        // populate per-tx status/output — we surface Stop because evmone has
+        // execute_sequential_cevm fills gas_used per tx. It does not yet
+        // populate per-tx status/output — we surface Stop because cevm has
         // already reflected the success/revert outcome through state changes
         // on the caller's host. (This is the same contract that the host
         // bridge tests rely on.)
@@ -567,7 +567,7 @@ static void apply_call_not_supported_fallback(BlockResult& br,
 }
 
 /// CPU sequential and CPU parallel collapse to the same routing tree:
-///   has-host                → evmone (seq/par)
+///   has-host                → cevm (seq/par)
 ///   no-host + bytecode      → kernel::execute_cpu (seq/par) — parity path
 ///   no-host + no-bytecode   → gas estimation if opted in, else error
 static BlockResult run_cpu(const Config& config,
@@ -604,12 +604,12 @@ static BlockResult run_cpu(const Config& config,
 }
 
 /// GPU_Metal routing:
-///   has-host               → evmone Block-STM (parallel) — Metal is reserved
+///   has-host               → cevm Block-STM (parallel) — Metal is reserved
 ///                            for benches that supply their own state. The
 ///                            mainline GPU consensus path is feat/gpu-host-
 ///                            bridge, not this dispatcher.
 ///   no-host + bytecode     → Metal EvmKernelHost (V1 or V2) + CallNotSupported
-///                            fallback to evmone CPU when host present, else
+///                            fallback to cevm CPU when host present, else
 ///                            Error with a clear message.
 ///   no-host + no-bytecode  → BlockStmGpu scheduler-only.
 ///   gas-estimation         → opt-in via Config::gas_estimation_mode.

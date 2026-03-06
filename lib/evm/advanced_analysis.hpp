@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2019 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2019 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
@@ -95,7 +95,7 @@ static_assert(
 /// The pointer to function implementing an instruction execution.
 using instruction_exec_fn = const Instruction* (*)(const Instruction*, AdvancedExecutionState&);
 
-/// The evmone intrinsic opcodes.
+/// The cevm intrinsic opcodes.
 ///
 /// These intrinsic instructions may be injected to the code in the analysis phase.
 /// They contain additional and required logic to be executed by the interpreter.

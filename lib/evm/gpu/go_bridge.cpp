@@ -100,7 +100,7 @@ collect_txs(const CGpuTx* txs, uint32_t num_txs)
 // `surface_kernel_status` controls how per-tx status is reported:
 //   - false (V2 wire shape): every tx reports EVM_GPU_TX_OK as long as the
 //     dispatcher returned without error. This is the legacy ABI v4 contract
-//     callers depend on for the dispatcher's evmone path which doesn't yet
+//     callers depend on for the dispatcher's cevm path which doesn't yet
 //     populate result.status[].
 //   - true (V3+ wire shape): tx[i].status comes straight from
 //     result.status[i] when populated, falling back to EVM_GPU_TX_OK only

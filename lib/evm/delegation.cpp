@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2025 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2025 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #include "delegation.hpp"
 #include <cassert>

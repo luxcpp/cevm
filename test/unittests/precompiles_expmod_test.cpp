@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2025 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2025 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <evmc/hex.hpp>
@@ -7,13 +7,13 @@
 #include <intx/intx.hpp>
 #include <test/state/precompiles_internal.hpp>
 #include <test/utils/utils.hpp>
-#ifdef EVMONE_PRECOMPILES_GMP
+#ifdef CEVM_PRECOMPILES_GMP
 #include <test/state/precompiles_gmp.hpp>
 #endif
 
 namespace
 {
-using evmone::state::ExecutionResult;
+using cevm::state::ExecutionResult;
 
 /// Builds a big-endian value of given size with MSB, optional LSB, and fill byte.
 evmc::bytes make_val(size_t size, uint8_t msb, uint8_t lsb = 0, uint8_t fill = 0)
@@ -70,9 +70,9 @@ protected:
 };
 
 const ExpmodImpl EXPMOD_IMPLS[] = {
-    {"evmone", &evmone::state::expmod_execute_evmone},
-#ifdef EVMONE_PRECOMPILES_GMP
-    {"gmp", &evmone::state::expmod_execute_gmp},
+    {"cevm", &cevm::state::expmod_execute_cevm},
+#ifdef CEVM_PRECOMPILES_GMP
+    {"gmp", &cevm::state::expmod_execute_gmp},
 #endif
 };
 
@@ -366,7 +366,7 @@ TEST(expmod, analysis_oog)
     for (const auto& input_hex : inputs)
     {
         const auto input = evmc::from_spaced_hex(input_hex).value();
-        const auto [gas_cost, max_output_size] = evmone::state::expmod_analyze(input, EVMC_PRAGUE);
+        const auto [gas_cost, max_output_size] = cevm::state::expmod_analyze(input, EVMC_PRAGUE);
         EXPECT_GT(gas_cost, GAS_LIMIT);
     }
 }
@@ -406,10 +406,10 @@ TEST(expmod, incomplete_inputs)
     for (const auto& [input_hex, expected_result_hex] : inputs)
     {
         const auto input = evmc::from_spaced_hex(input_hex).value();
-        const auto [gas_cost, max_output_size] = evmone::state::expmod_analyze(input, EVMC_PRAGUE);
+        const auto [gas_cost, max_output_size] = cevm::state::expmod_analyze(input, EVMC_PRAGUE);
         ASSERT_LT(gas_cost, GAS_LIMIT);
         auto output = std::make_unique_for_overwrite<uint8_t[]>(max_output_size);
-        const auto [status, output_size] = evmone::state::expmod_execute(
+        const auto [status, output_size] = cevm::state::expmod_execute(
             input.data(), input.size(), output.get(), max_output_size);
         EXPECT_EQ(status, EVMC_SUCCESS);
         const auto result_hex = evmc::hex({output.get(), output_size});
@@ -450,7 +450,7 @@ TEST(expmod, huge_inputs_analysis)
     for (const auto& [input_hex, expected_output_size] : inputs)
     {
         const auto input = evmc::from_spaced_hex(input_hex).value();
-        const auto [gas_cost, max_output_size] = evmone::state::expmod_analyze(input, REV);
+        const auto [gas_cost, max_output_size] = cevm::state::expmod_analyze(input, REV);
         EXPECT_LT(gas_cost, GAS_LIMIT);
         EXPECT_EQ(max_output_size, expected_output_size);
     }

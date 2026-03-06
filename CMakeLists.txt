@@ -1,5 +1,5 @@
 # evm: Ethereum Virtual Machine
-# Copyright 2019 The evmone Authors.
+# Copyright 2019 The cevm Authors.
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.19...4.2)
@@ -11,9 +11,9 @@ endif()
 option(BUILD_SHARED_LIBS "Build evm as a shared library" ON)
 option(COVERAGE "Build with coverage instrumentation" OFF)
 option(ASSERTIONS "Force enable the assertions in the code ignoring the CMAKE_BUILD_TYPE default" OFF)
-option(EVMONE_TESTING "Build tests and test tools" OFF)
-option(EVMONE_FUZZING "Instrument libraries and build fuzzing tools" OFF)
-option(EVMONE_CUDA "Enable CUDA backend (NVIDIA GPU acceleration)" OFF)
+option(CEVM_TESTING "Build tests and test tools" OFF)
+option(CEVM_FUZZING "Instrument libraries and build fuzzing tools" OFF)
+option(CEVM_CUDA "Enable CUDA backend (NVIDIA GPU acceleration)" OFF)
 # luxcpp/evm targeted coverage. Distinct from -DCOVERAGE which instruments
 # every TU in the project; LUXCPP_EVM_COVERAGE only instruments the targets
 # that constitute the four-backend parity surface (evm, evm-gpu,
@@ -38,7 +38,7 @@ set(PROJECT_VERSION 0.19.0)
 
 # CUDA backend (optional). Requires CUDA Toolkit 11.8+.
 # Targets compute capability 7.0+ (Turing, Ampere, Hopper, Ada).
-if(EVMONE_CUDA)
+if(CEVM_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit 11.8 REQUIRED)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
@@ -50,7 +50,7 @@ if(EVMONE_CUDA)
     set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
     message(STATUS "CUDA backend: ENABLED (CUDA ${CUDAToolkit_VERSION}, archs: ${CMAKE_CUDA_ARCHITECTURES})")
 else()
-    message(STATUS "CUDA backend: DISABLED (-DEVMONE_CUDA=ON to enable)")
+    message(STATUS "CUDA backend: DISABLED (-DCEVM_CUDA=ON to enable)")
 endif()
 
 string(REGEX MATCH "([0-9]+)\\.([0-9]+)" _ ${PROJECT_VERSION})
@@ -62,7 +62,7 @@ if(PROJECT_VERSION_MAJOR EQUAL 0)
     set(PROJECT_SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR})
 endif()
 
-option(EVMC_TOOLS "Build EVMC test tools" ${EVMONE_TESTING})
+option(EVMC_TOOLS "Build EVMC test tools" ${CEVM_TESTING})
 option(EVMC_INSTALL "Install EVMC" OFF)
 
 if(COMMAND block) # TODO(cmake-3.25)
@@ -136,28 +136,28 @@ if(CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64)
     # Setup options for x86_64 micro-architecture levels.
     # https://clang.llvm.org/docs/UsersManual.html#x86
 
-    set(EVMONE_X86_64_ARCH_LEVEL_INIT 2)
+    set(CEVM_X86_64_ARCH_LEVEL_INIT 2)
     if(APPLE)
         # On macos with Apple Silicon CPU (arm64) the x86 is emulated and SSE4.2 is not available.
-        set(EVMONE_X86_64_ARCH_LEVEL_INIT 1)
+        set(CEVM_X86_64_ARCH_LEVEL_INIT 1)
     endif()
 
-    set(EVMONE_X86_64_ARCH_LEVEL ${EVMONE_X86_64_ARCH_LEVEL_INIT} CACHE STRING "The x86_64 micro-architecture level")
-    if(EVMONE_X86_64_ARCH_LEVEL GREATER_EQUAL 1 AND EVMONE_X86_64_ARCH_LEVEL LESS_EQUAL 4)
-        message(STATUS "x86_64 micro-architecture level: ${EVMONE_X86_64_ARCH_LEVEL}")
-        if(EVMONE_X86_64_ARCH_LEVEL GREATER_EQUAL 2)
-            add_compile_options(-march=x86-64-v${EVMONE_X86_64_ARCH_LEVEL})
+    set(CEVM_X86_64_ARCH_LEVEL ${CEVM_X86_64_ARCH_LEVEL_INIT} CACHE STRING "The x86_64 micro-architecture level")
+    if(CEVM_X86_64_ARCH_LEVEL GREATER_EQUAL 1 AND CEVM_X86_64_ARCH_LEVEL LESS_EQUAL 4)
+        message(STATUS "x86_64 micro-architecture level: ${CEVM_X86_64_ARCH_LEVEL}")
+        if(CEVM_X86_64_ARCH_LEVEL GREATER_EQUAL 2)
+            add_compile_options(-march=x86-64-v${CEVM_X86_64_ARCH_LEVEL})
         endif()
     else()
-        message(FATAL_ERROR "Invalid EVMONE_X86_64_ARCH_LEVEL: ${EVMONE_X86_64_ARCH_LEVEL}")
+        message(FATAL_ERROR "Invalid CEVM_X86_64_ARCH_LEVEL: ${CEVM_X86_64_ARCH_LEVEL}")
     endif()
 endif()
 
 include(GNUInstallDirs)
 
-if(EVMONE_FUZZING)
+if(CEVM_FUZZING)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build evm as a shared library" FORCE)
-    set(EVMONE_TESTING ON CACHE BOOL "Build tests and test tools" FORCE)
+    set(CEVM_TESTING ON CACHE BOOL "Build tests and test tools" FORCE)
 
     if(NOT COVERAGE)
         # Add fuzzing instrumentation only for non-coverage builds.
@@ -169,9 +169,9 @@ if(EVMONE_FUZZING)
     endif()
 endif()
 
-set(EVMONE_INTX_DIR "" CACHE PATH "Path to local intx source directory")
-if(EVMONE_INTX_DIR)
-    add_subdirectory(${EVMONE_INTX_DIR} intx)
+set(CEVM_INTX_DIR "" CACHE PATH "Path to local intx source directory")
+if(CEVM_INTX_DIR)
+    add_subdirectory(${CEVM_INTX_DIR} intx)
 else()
     hunter_add_package(intx)
     find_package(intx CONFIG REQUIRED)
@@ -181,7 +181,7 @@ set(include_dir ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_subdirectory(lib)
 
-if(EVMONE_TESTING)
+if(CEVM_TESTING)
     enable_testing()
     add_subdirectory(test)
 endif()

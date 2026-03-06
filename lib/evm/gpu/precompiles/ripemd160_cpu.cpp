@@ -6,7 +6,7 @@
 
 #include "internal.hpp"
 
-#include <evmone_precompiles/ripemd160.hpp>
+#include <cevm_precompiles/ripemd160.hpp>
 
 namespace evm::gpu::precompile
 {
@@ -18,7 +18,7 @@ Result ripemd160_cpu(std::span<const uint8_t> input, uint64_t gas_limit)
         return make_oog();
 
     std::vector<uint8_t> out(32, 0);
-    evmone::crypto::ripemd160(reinterpret_cast<std::byte*>(out.data() + 12),
+    cevm::crypto::ripemd160(reinterpret_cast<std::byte*>(out.data() + 12),
         reinterpret_cast<const std::byte*>(input.data()), input.size());
     return make_ok(gas, std::move(out));
 }

@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
@@ -12,7 +12,7 @@
 #include <test/utils/utils.hpp>
 #include <vector>
 
-namespace evmone::test
+namespace cevm::test
 {
 struct UnsupportedTestFeature : std::runtime_error
 {
@@ -76,4 +76,4 @@ struct BlockchainTest
 };
 
 std::vector<BlockchainTest> load_blockchain_tests(std::istream& input);
-}  // namespace evmone::test
+}  // namespace cevm::test

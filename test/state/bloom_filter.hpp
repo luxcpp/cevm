@@ -1,12 +1,12 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 #include "hash_utils.hpp"
 #include <span>
 
-namespace evmone::state
+namespace cevm::state
 {
 struct Log;
 struct TransactionReceipt;
@@ -33,4 +33,4 @@ struct BloomFilter
 /// Loads BloomFilter from bytes_view
 BloomFilter bloom_filter_from_bytes(const bytes_view& data) noexcept;
 
-}  // namespace evmone::state
+}  // namespace cevm::state

@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file evmc_host.hpp
-/// EVMC Host adapter that wires evmone's execute() to StateDB.
+/// EVMC Host adapter that wires cevm's execute() to StateDB.
 ///
-/// This is the critical bridge: evmone calls Host methods during execution,
+/// This is the critical bridge: cevm calls Host methods during execution,
 /// and this adapter translates them into StateDB operations on real account state.
 
 #pragma once

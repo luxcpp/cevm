@@ -1,12 +1,12 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gmock/gmock.h>
 #include <intx/intx.hpp>
 #include <test/utils/statetest.hpp>
 
-using namespace evmone;
+using namespace cevm;
 using namespace intx::literals;
 using namespace testing;
 
@@ -362,13 +362,13 @@ TEST(statetest_loader, invalid_tx_type)
     }
 }
 
-namespace evmone::test
+namespace cevm::test
 {
 // This function is used only by the following test case and in `statetest_loader.cpp` where it is
 // defined.
 template <>
 uint8_t from_json<uint8_t>(const json::json& j);
-}  // namespace evmone::test
+}  // namespace cevm::test
 
 TEST(statetest_loader, load_uint8_t)
 {

@@ -1,14 +1,14 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2024 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2024 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <evmc/bytes.hpp>
-#include <evmone_precompiles/bls.hpp>
+#include <cevm_precompiles/bls.hpp>
 #include <gtest/gtest.h>
 #include <test/utils/utils.hpp>
 #include <array>
 
-using evmone::test::operator""_hex;
+using cevm::test::operator""_hex;
 
 namespace
 {
@@ -51,7 +51,7 @@ TEST(bls, g1_add)
     uint8_t rx[64];
     uint8_t ry[64];
 
-    EXPECT_TRUE(evmone::crypto::bls::g1_add(rx, ry, x0.data(), y0.data(), x1.data(), y1.data()));
+    EXPECT_TRUE(cevm::crypto::bls::g1_add(rx, ry, x0.data(), y0.data(), x1.data(), y1.data()));
 
     const auto expected_x =
         "000000000000000000000000000000000a40300ce2dec9888b60690e9a41d3004fda4886854573974fab73b046d3147ba5b7a5bde85279ffede1b45b3918d82d"_hex;
@@ -78,7 +78,7 @@ TEST(bls, g1_add_not_on_curve)
         uint8_t ry[64];
 
         EXPECT_FALSE(
-            evmone::crypto::bls::g1_add(rx, ry, x0.data(), y0.data(), x1.data(), y1.data()));
+            cevm::crypto::bls::g1_add(rx, ry, x0.data(), y0.data(), x1.data(), y1.data()));
     }
     {
         const auto x0 =
@@ -94,7 +94,7 @@ TEST(bls, g1_add_not_on_curve)
         uint8_t ry[64];
 
         EXPECT_FALSE(
-            evmone::crypto::bls::g1_add(rx, ry, x0.data(), y0.data(), x1.data(), y1.data()));
+            cevm::crypto::bls::g1_add(rx, ry, x0.data(), y0.data(), x1.data(), y1.data()));
     }
 }
 
@@ -109,7 +109,7 @@ TEST(bls, g1_mul)
     uint8_t rx[64];
     uint8_t ry[64];
 
-    EXPECT_TRUE(evmone::crypto::bls::g1_mul(rx, ry, x.data(), y.data(), c.data()));
+    EXPECT_TRUE(cevm::crypto::bls::g1_mul(rx, ry, x.data(), y.data(), c.data()));
 
     const auto expected_x =
         "000000000000000000000000000000000572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e"_hex;
@@ -134,7 +134,7 @@ TEST(bls, g2_add)
     uint8_t rx[128];
     uint8_t ry[128];
 
-    EXPECT_TRUE(evmone::crypto::bls::g2_add(rx, ry, x0.data(), y0.data(), x1.data(), y1.data()));
+    EXPECT_TRUE(cevm::crypto::bls::g2_add(rx, ry, x0.data(), y0.data(), x1.data(), y1.data()));
 
     const auto expected_x =
         "000000000000000000000000000000000b54a8a7b08bd6827ed9a797de216b8c9057b3a9ca93e2f88e7f04f19accc42da90d883632b9ca4dc38d013f71ede4db00000000000000000000000000000000077eba4eecf0bd764dce8ed5f45040dd8f3b3427cb35230509482c14651713282946306247866dfe39a8e33016fcbe52"_hex;
@@ -156,7 +156,7 @@ TEST(bls, g2_mul)
     uint8_t rx[128];
     uint8_t ry[128];
 
-    EXPECT_TRUE(evmone::crypto::bls::g2_mul(rx, ry, x.data(), y.data(), c.data()));
+    EXPECT_TRUE(cevm::crypto::bls::g2_mul(rx, ry, x.data(), y.data(), c.data()));
 
     const auto expected_x =
         "000000000000000000000000000000001638533957d540a9d2370f17cc7ed5863bc0b995b8825e0ee1ea1e1e4d00dbae81f14b0bf3611b78c952aacab827a053000000000000000000000000000000000a4edef9c1ed7f729f520e47730a124fd70662a904ba1074728114d1031e1572c6c886f6b57ec72a6178288c47c33577"_hex;
@@ -178,7 +178,7 @@ TEST(bls, g1_msm)
     uint8_t rx[64];
     uint8_t ry[64];
 
-    EXPECT_TRUE(evmone::crypto::bls::g1_msm(rx, ry, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::g1_msm(rx, ry, input.data(), input.size()));
 
     const auto expected_x =
         "000000000000000000000000000000000572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e"_hex;
@@ -197,7 +197,7 @@ TEST(bls, g1_msm_inf_0)
     uint8_t rx[64];
     uint8_t ry[64];
 
-    EXPECT_TRUE(evmone::crypto::bls::g1_msm(rx, ry, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::g1_msm(rx, ry, input.data(), input.size()));
 
     const auto expected_x =
         "000000000000000000000000000000000572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e"_hex;
@@ -216,7 +216,7 @@ TEST(bls, g1_msm_inf_2)
     uint8_t rx[64];
     uint8_t ry[64];
 
-    EXPECT_TRUE(evmone::crypto::bls::g1_msm(rx, ry, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::g1_msm(rx, ry, input.data(), input.size()));
 
     const auto expected_x =
         "000000000000000000000000000000000572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e"_hex;
@@ -244,7 +244,7 @@ TEST(bls, g1_msm_inf_3)
     uint8_t rx[64];
     uint8_t ry[64];
 
-    EXPECT_TRUE(evmone::crypto::bls::g1_msm(rx, ry, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::g1_msm(rx, ry, input.data(), input.size()));
 
     const auto expected_x =
         "000000000000000000000000000000000572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e"_hex;
@@ -263,7 +263,7 @@ TEST(bls, g2_msm)
     uint8_t rx[128];
     uint8_t ry[128];
 
-    EXPECT_TRUE(evmone::crypto::bls::g2_msm(rx, ry, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::g2_msm(rx, ry, input.data(), input.size()));
 
     const auto expected_x =
         "000000000000000000000000000000001638533957d540a9d2370f17cc7ed5863bc0b995b8825e0ee1ea1e1e4d00dbae81f14b0bf3611b78c952aacab827a053000000000000000000000000000000000a4edef9c1ed7f729f520e47730a124fd70662a904ba1074728114d1031e1572c6c886f6b57ec72a6178288c47c33577"_hex;
@@ -282,7 +282,7 @@ TEST(bls, g2_msm_inf_0)
     uint8_t rx[128];
     uint8_t ry[128];
 
-    EXPECT_TRUE(evmone::crypto::bls::g2_msm(rx, ry, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::g2_msm(rx, ry, input.data(), input.size()));
 
     const auto expected_x =
         "000000000000000000000000000000001638533957d540a9d2370f17cc7ed5863bc0b995b8825e0ee1ea1e1e4d00dbae81f14b0bf3611b78c952aacab827a053000000000000000000000000000000000a4edef9c1ed7f729f520e47730a124fd70662a904ba1074728114d1031e1572c6c886f6b57ec72a6178288c47c33577"_hex;
@@ -301,7 +301,7 @@ TEST(bls, g2_msm_inf_2)
     uint8_t rx[128];
     uint8_t ry[128];
 
-    EXPECT_TRUE(evmone::crypto::bls::g2_msm(rx, ry, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::g2_msm(rx, ry, input.data(), input.size()));
 
     const auto expected_x =
         "000000000000000000000000000000001638533957d540a9d2370f17cc7ed5863bc0b995b8825e0ee1ea1e1e4d00dbae81f14b0bf3611b78c952aacab827a053000000000000000000000000000000000a4edef9c1ed7f729f520e47730a124fd70662a904ba1074728114d1031e1572c6c886f6b57ec72a6178288c47c33577"_hex;
@@ -332,7 +332,7 @@ TEST(bls, g2_msm_inf_3)
     uint8_t rx[128];
     uint8_t ry[128];
 
-    EXPECT_TRUE(evmone::crypto::bls::g2_msm(rx, ry, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::g2_msm(rx, ry, input.data(), input.size()));
 
     const auto expected_x =
         "000000000000000000000000000000001638533957d540a9d2370f17cc7ed5863bc0b995b8825e0ee1ea1e1e4d00dbae81f14b0bf3611b78c952aacab827a053000000000000000000000000000000000a4edef9c1ed7f729f520e47730a124fd70662a904ba1074728114d1031e1572c6c886f6b57ec72a6178288c47c33577"_hex;
@@ -351,7 +351,7 @@ TEST(bls, map_fp_to_g1)
     uint8_t rx[64];
     uint8_t ry[64];
 
-    EXPECT_TRUE(evmone::crypto::bls::map_fp_to_g1(rx, ry, input.data()));
+    EXPECT_TRUE(cevm::crypto::bls::map_fp_to_g1(rx, ry, input.data()));
 
     const auto expected_x =
         "00000000000000000000000000000000184bb665c37ff561a89ec2122dd343f20e0f4cbcaec84e3c3052ea81d1834e192c426074b02ed3dca4e7676ce4ce48ba"_hex;
@@ -370,7 +370,7 @@ TEST(bls, map_fp2_to_g2)
     uint8_t rx[128];
     uint8_t ry[128];
 
-    EXPECT_TRUE(evmone::crypto::bls::map_fp2_to_g2(rx, ry, input.data()));
+    EXPECT_TRUE(cevm::crypto::bls::map_fp2_to_g2(rx, ry, input.data()));
 
     const auto expected_x =
         "0000000000000000000000000000000000e7f4568a82b4b7dc1f14c6aaa055edf51502319c723c4dc2688c7fe5944c213f510328082396515734b6612c4e7bb700000000000000000000000000000000126b855e9e69b1f691f816e48ac6977664d24d99f8724868a184186469ddfd4617367e94527d4b74fc86413483afb35b"_hex;
@@ -389,7 +389,7 @@ TEST(bls, pairing_input_test)
         const auto input = G1_1 + G1_2;
 
         uint8_t r[128];
-        EXPECT_TRUE(evmone::crypto::bls::g1_add(
+        EXPECT_TRUE(cevm::crypto::bls::g1_add(
             r, &r[64], input.data(), &input[64], &input[128], &input[192]));
 
         EXPECT_EQ(evmc::bytes_view(r, 64), evmc::bytes_view(G1_3.data(), 64));
@@ -401,7 +401,7 @@ TEST(bls, pairing_input_test)
         const auto input = G2_1 + G2_m1;
 
         uint8_t r[256];
-        EXPECT_TRUE(evmone::crypto::bls::g2_add(
+        EXPECT_TRUE(cevm::crypto::bls::g2_add(
             r, &r[128], input.data(), &input[128], &input[256], &input[384]));
 
         EXPECT_EQ(evmc::bytes_view(r, 128), evmc::bytes_view(G2_inf.data(), 128));
@@ -416,7 +416,7 @@ TEST(bls, paring_check_three_pairs_correct)
     // e(G1_1, G2_m1)^-1 * e(G1_2, G2_m1)^-1 * e(G1_1, G2_m1) * e(G1_2, G2_m1) == 1
     const auto input = (G1_1 + G2_1) + (G1_2 + G2_1) + (G1_3 + G2_m1);
     uint8_t r[32];
-    EXPECT_TRUE(evmone::crypto::bls::pairing_check(r, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::pairing_check(r, input.data(), input.size()));
     EXPECT_EQ(evmc::bytes_view(r, std::size(r)), RESULT_ONE);
 }
 
@@ -424,7 +424,7 @@ TEST(bls, paring_check_two_pairs_incorrect)
 {
     const auto input = (G1_1 + G2_1) + (G1_2 + G2_m1);
     uint8_t r[32];
-    EXPECT_TRUE(evmone::crypto::bls::pairing_check(r, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::pairing_check(r, input.data(), input.size()));
     EXPECT_EQ(evmc::bytes_view(r, std::size(r)), RESULT_ZERO);
 }
 
@@ -432,7 +432,7 @@ TEST(bls, paring_check_one_pair_g1_inf)
 {
     const auto input = G1_inf + G2_1;
     uint8_t r[32];
-    EXPECT_TRUE(evmone::crypto::bls::pairing_check(r, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::pairing_check(r, input.data(), input.size()));
     EXPECT_EQ(evmc::bytes_view(r, sizeof r), RESULT_ONE);
 }
 
@@ -440,7 +440,7 @@ TEST(bls, paring_check_one_pair_g2_inf)
 {
     const auto input = G1_1 + G2_inf;
     uint8_t r[32];
-    EXPECT_TRUE(evmone::crypto::bls::pairing_check(r, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::pairing_check(r, input.data(), input.size()));
     EXPECT_EQ(evmc::bytes_view(r, sizeof r), RESULT_ONE);
 }
 
@@ -448,7 +448,7 @@ TEST(bls, paring_check_two_pairs_g1_inf)
 {
     const auto input = (G1_1 + G2_1) + (G1_inf + G2_1);
     uint8_t r[32];
-    EXPECT_TRUE(evmone::crypto::bls::pairing_check(r, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::pairing_check(r, input.data(), input.size()));
     EXPECT_EQ(evmc::bytes_view(r, sizeof r), RESULT_ZERO);
 }
 
@@ -456,6 +456,6 @@ TEST(bls, paring_check_two_pairs_g2_inf)
 {
     const auto input = (G1_1 + G2_inf) + (G1_2 + G2_1);
     uint8_t r[32];
-    EXPECT_TRUE(evmone::crypto::bls::pairing_check(r, input.data(), input.size()));
+    EXPECT_TRUE(cevm::crypto::bls::pairing_check(r, input.data(), input.size()));
     EXPECT_EQ(evmc::bytes_view(r, sizeof r), RESULT_ZERO);
 }

@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2019 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2019 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../utils/statetest.hpp"
@@ -8,7 +8,7 @@
 #include <benchmark/benchmark.h>
 #include <evmc/evmc.hpp>
 #include <evmc/loader.h>
-#include <evmone/evmone.h>
+#include <cevm/cevm.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -18,7 +18,7 @@ namespace fs = std::filesystem;
 
 using namespace benchmark;
 
-namespace evmone::test
+namespace cevm::test
 {
 std::map<std::string_view, evmc::VM> registered_vms;
 
@@ -171,22 +171,22 @@ void register_benchmarks(std::span<const BenchmarkCase> benchmark_cases)
 }
 
 
-/// The error code for CLI arguments parsing error in evmone-bench.
+/// The error code for CLI arguments parsing error in cevm-bench.
 /// The number tries to be different from EVMC loading error codes.
 constexpr auto cli_parsing_error = -3;
 
-/// Parses evmone-bench CLI arguments and registers benchmark cases.
+/// Parses cevm-bench CLI arguments and registers benchmark cases.
 ///
 /// The following variants of number arguments are supported (including argv[0]):
 ///
-/// 1: evmone-bench
-///    Uses evmone VMs, only synthetic benchmarks are available.
-/// 2: evmone-bench benchmarks_dir
-///    Uses evmone VMs, loads all benchmarks from benchmarks_dir.
-/// 3: evmone-bench evmc_config benchmarks_dir
+/// 1: cevm-bench
+///    Uses cevm VMs, only synthetic benchmarks are available.
+/// 2: cevm-bench benchmarks_dir
+///    Uses cevm VMs, loads all benchmarks from benchmarks_dir.
+/// 3: cevm-bench evmc_config benchmarks_dir
 ///    The same as (2) but loads additional custom EVMC VM.
-/// 4: evmone-bench code_hex_file input_hex expected_output_hex.
-///    Uses evmone VMs, registers custom benchmark with the code from the given file,
+/// 4: cevm-bench code_hex_file input_hex expected_output_hex.
+///    Uses cevm VMs, registers custom benchmark with the code from the given file,
 ///    and the given input. The benchmark will compare the output with the provided
 ///    expected one.
 std::tuple<int, std::vector<BenchmarkCase>> parseargs(int argc, char** argv)
@@ -256,13 +256,13 @@ std::tuple<int, std::vector<BenchmarkCase>> parseargs(int argc, char** argv)
     return {0, {}};
 }
 }  // namespace
-}  // namespace evmone::test
+}  // namespace cevm::test
 
 int main(int argc, char** argv)
 {
     MaybeReenterWithoutASLR(argc, argv);
 
-    using namespace evmone::test;
+    using namespace cevm::test;
     try
     {
         Initialize(&argc, argv);  // Consumes --benchmark_ options.
@@ -273,9 +273,9 @@ int main(int argc, char** argv)
         if (ec != 0)
             return ec;
 
-        registered_vms["advanced"] = evmc::VM{evmc_create_evmone(), {{"advanced", ""}}};
-        registered_vms["baseline"] = evmc::VM{evmc_create_evmone()};
-        registered_vms["bnocgoto"] = evmc::VM{evmc_create_evmone(), {{"cgoto", "no"}}};
+        registered_vms["advanced"] = evmc::VM{evmc_create_cevm(), {{"advanced", ""}}};
+        registered_vms["baseline"] = evmc::VM{evmc_create_cevm()};
+        registered_vms["bnocgoto"] = evmc::VM{evmc_create_cevm(), {{"cgoto", "no"}}};
         register_benchmarks(benchmark_cases);
         register_synthetic_benchmarks();
         RunSpecifiedBenchmarks();

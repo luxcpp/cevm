@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2021 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2021 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-namespace evmone::rlp
+namespace cevm::rlp
 {
 using evmc::bytes;
 using evmc::bytes_view;
@@ -114,4 +114,4 @@ inline bytes internal::encode_container(InputIterator begin, InputIterator end)
         content += encode(*it);
     return wrap_list(content);
 }
-}  // namespace evmone::rlp
+}  // namespace cevm::rlp

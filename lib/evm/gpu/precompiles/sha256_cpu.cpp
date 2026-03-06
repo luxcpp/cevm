@@ -5,7 +5,7 @@
 
 #include "internal.hpp"
 
-#include <evmone_precompiles/sha256.hpp>
+#include <cevm_precompiles/sha256.hpp>
 
 namespace evm::gpu::precompile
 {
@@ -17,7 +17,7 @@ Result sha256_cpu(std::span<const uint8_t> input, uint64_t gas_limit)
         return make_oog();
 
     std::vector<uint8_t> out(32);
-    evmone::crypto::sha256(reinterpret_cast<std::byte*>(out.data()),
+    cevm::crypto::sha256(reinterpret_cast<std::byte*>(out.data()),
         reinterpret_cast<const std::byte*>(input.data()), input.size());
     return make_ok(gas, std::move(out));
 }

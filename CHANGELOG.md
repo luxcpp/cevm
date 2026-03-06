@@ -1,6 +1,6 @@
 # Changelog
 
-Documentation of all notable changes to the **evmone** project.
+Documentation of all notable changes to the **cevm** project.
 
 The format is based on [Keep a Changelog],
 and this project adheres to [Semantic Versioning].
@@ -10,74 +10,74 @@ and this project adheres to [Semantic Versioning].
 ### Added
 
 - Option to use [libsecp256k1] for `ecrecover` precompile.
-  [#1454](https://github.com/ipsilon/evmone/pull/1454)
+  [#1454](https://github.com/ipsilon/cevm/pull/1454)
 
 ### Changed
 
 - **Modular exponentiation (`modexp`) rewrite**: the precompile implementation has been substantially
   reworked to use variadic-length number representation and optimized algorithms.
-  [#1292](https://github.com/ipsilon/evmone/pull/1292)
-  [#1413](https://github.com/ipsilon/evmone/pull/1413)
-  [#1420](https://github.com/ipsilon/evmone/pull/1420)
-  [#1424](https://github.com/ipsilon/evmone/pull/1424)
-  [#1434](https://github.com/ipsilon/evmone/pull/1434)
-  [#1442](https://github.com/ipsilon/evmone/pull/1442)
-  [#1443](https://github.com/ipsilon/evmone/pull/1443)
-  [#1446](https://github.com/ipsilon/evmone/pull/1446)
-  [#1452](https://github.com/ipsilon/evmone/pull/1452)
-  [#1457](https://github.com/ipsilon/evmone/pull/1457)
-  [#1460](https://github.com/ipsilon/evmone/pull/1460)
-  [#1461](https://github.com/ipsilon/evmone/pull/1461)
-  [#1462](https://github.com/ipsilon/evmone/pull/1462)
+  [#1292](https://github.com/ipsilon/cevm/pull/1292)
+  [#1413](https://github.com/ipsilon/cevm/pull/1413)
+  [#1420](https://github.com/ipsilon/cevm/pull/1420)
+  [#1424](https://github.com/ipsilon/cevm/pull/1424)
+  [#1434](https://github.com/ipsilon/cevm/pull/1434)
+  [#1442](https://github.com/ipsilon/cevm/pull/1442)
+  [#1443](https://github.com/ipsilon/cevm/pull/1443)
+  [#1446](https://github.com/ipsilon/cevm/pull/1446)
+  [#1452](https://github.com/ipsilon/cevm/pull/1452)
+  [#1457](https://github.com/ipsilon/cevm/pull/1457)
+  [#1460](https://github.com/ipsilon/cevm/pull/1460)
+  [#1461](https://github.com/ipsilon/cevm/pull/1461)
+  [#1462](https://github.com/ipsilon/cevm/pull/1462)
   - Almost Montgomery Multiplication (AMM) is now used instead of standard Montgomery multiplication.
-    [#1427](https://github.com/ipsilon/evmone/pull/1427)
-    [#1425](https://github.com/ipsilon/evmone/pull/1425)
-    [#1426](https://github.com/ipsilon/evmone/pull/1426)
-    [#1435](https://github.com/ipsilon/evmone/pull/1435)
-    [#1436](https://github.com/ipsilon/evmone/pull/1436)
+    [#1427](https://github.com/ipsilon/cevm/pull/1427)
+    [#1425](https://github.com/ipsilon/cevm/pull/1425)
+    [#1426](https://github.com/ipsilon/cevm/pull/1426)
+    [#1435](https://github.com/ipsilon/cevm/pull/1435)
+    [#1436](https://github.com/ipsilon/cevm/pull/1436)
   - Newton–Raphson method is used for modular inversion.
-    [#1359](https://github.com/ipsilon/evmone/pull/1359)
-    [#1420](https://github.com/ipsilon/evmone/pull/1420)
-    [#1432](https://github.com/ipsilon/evmone/pull/1432)
+    [#1359](https://github.com/ipsilon/cevm/pull/1359)
+    [#1420](https://github.com/ipsilon/cevm/pull/1420)
+    [#1432](https://github.com/ipsilon/cevm/pull/1432)
 - **ECC optimizations**:
   - BN254 `ecmul` optimized with the field endomorphism.
-    [#1389](https://github.com/ipsilon/evmone/pull/1389)
+    [#1389](https://github.com/ipsilon/cevm/pull/1389)
   - `ecrecover` and `p256verify` optimized with Shamir trick multi-scalar multiplication.
-    [#1390](https://github.com/ipsilon/evmone/pull/1390)
+    [#1390](https://github.com/ipsilon/cevm/pull/1390)
   - Field multiplications by constants optimized in ECC.
-    [#1393](https://github.com/ipsilon/evmone/pull/1393)
+    [#1393](https://github.com/ipsilon/cevm/pull/1393)
   - secp256k1 refactored to use `FieldElement` instead of `ModArith`.
-    [#1402](https://github.com/ipsilon/evmone/pull/1402)
-    [#1415](https://github.com/ipsilon/evmone/pull/1415)
-    [#1416](https://github.com/ipsilon/evmone/pull/1416)
-    [#1417](https://github.com/ipsilon/evmone/pull/1417)
-- Modexp precompile implementations ("evmone" and "gmp") are now split into separate source files.
-  [#1455](https://github.com/ipsilon/evmone/pull/1455)
+    [#1402](https://github.com/ipsilon/cevm/pull/1402)
+    [#1415](https://github.com/ipsilon/cevm/pull/1415)
+    [#1416](https://github.com/ipsilon/cevm/pull/1416)
+    [#1417](https://github.com/ipsilon/cevm/pull/1417)
+- Modexp precompile implementations ("cevm" and "gmp") are now split into separate source files.
+  [#1455](https://github.com/ipsilon/cevm/pull/1455)
 - Upgraded [intx] to 0.15.0.
-  [#1371](https://github.com/ipsilon/evmone/pull/1371)
-  [#1430](https://github.com/ipsilon/evmone/pull/1430)
-- Test utilities reorganized into a single `evmone.testutils` library.
-  [#1380](https://github.com/ipsilon/evmone/pull/1380)
-  [#1381](https://github.com/ipsilon/evmone/pull/1381)
-  [#1384](https://github.com/ipsilon/evmone/pull/1384)
-  [#1385](https://github.com/ipsilon/evmone/pull/1385)
-  [#1386](https://github.com/ipsilon/evmone/pull/1386)
+  [#1371](https://github.com/ipsilon/cevm/pull/1371)
+  [#1430](https://github.com/ipsilon/cevm/pull/1430)
+- Test utilities reorganized into a single `cevm.testutils` library.
+  [#1380](https://github.com/ipsilon/cevm/pull/1380)
+  [#1381](https://github.com/ipsilon/cevm/pull/1381)
+  [#1384](https://github.com/ipsilon/cevm/pull/1384)
+  [#1385](https://github.com/ipsilon/cevm/pull/1385)
+  [#1386](https://github.com/ipsilon/cevm/pull/1386)
 
 ### Removed
 
 - The optional "silkpre" precompile backend has been removed.
-  [#1456](https://github.com/ipsilon/evmone/pull/1456)
+  [#1456](https://github.com/ipsilon/cevm/pull/1456)
 - Modexp stubs removed — the local implementation is now used for all inputs.
-  [#1453](https://github.com/ipsilon/evmone/pull/1453)
+  [#1453](https://github.com/ipsilon/cevm/pull/1453)
 
 ### Fixed
 
 - Missing [EIP-7702] `y_parity` validation.
-  [#1450](https://github.com/ipsilon/evmone/pull/1450)
+  [#1450](https://github.com/ipsilon/cevm/pull/1450)
 - BN254 input point validation.
-  [#1399](https://github.com/ipsilon/evmone/pull/1399)
+  [#1399](https://github.com/ipsilon/cevm/pull/1399)
 - Missing `Transaction::gas_limit` initialization.
-  [#1382](https://github.com/ipsilon/evmone/pull/1382)
+  [#1382](https://github.com/ipsilon/cevm/pull/1382)
 
 ## [0.18.0] — 2025-10-31
 
@@ -87,7 +87,7 @@ Bye-bye, EOF.
 
 - The implementation of the [EVM Object Format version 1](https://eips.ethereum.org/EIPS/eip-7692) (EOFv1)
   has been completely removed.
-  [#1321](https://github.com/ipsilon/evmone/pull/1321)
+  [#1321](https://github.com/ipsilon/cevm/pull/1321)
   - implementation of EOF validation and execution,
   - implementation of DUPN, SWAPN and EXCHANGE instructions,
   - "initcodes" transaction type,
@@ -101,67 +101,67 @@ This release provides full [Osaka] compatibility by implementing 3 remaining EIP
 ### Added
 
 - Implementation of the `p256verify` ([EIP-7951]) precompile for the secp256r1/P256 signature verification.
-  [#1321](https://github.com/ipsilon/evmone/pull/1321)
-  [#1328](https://github.com/ipsilon/evmone/pull/1328)
+  [#1321](https://github.com/ipsilon/cevm/pull/1321)
+  [#1328](https://github.com/ipsilon/cevm/pull/1328)
 - Unit tests and benchmarks for the `p256verify` precompile.
-  [#1326](https://github.com/ipsilon/evmone/pull/1326)
-  [#1333](https://github.com/ipsilon/evmone/pull/1333)
+  [#1326](https://github.com/ipsilon/cevm/pull/1326)
+  [#1333](https://github.com/ipsilon/cevm/pull/1333)
 - Support for [EIP-7934]—MAX_RLP_BLOCK_SIZE in testing infrastructure.
-  [#1329](https://github.com/ipsilon/evmone/pull/1329)
+  [#1329](https://github.com/ipsilon/cevm/pull/1329)
 - Support for [EIP-7892]—Blob Parameter Only (BPO) forks in testing infrastructure.
-  [#1330](https://github.com/ipsilon/evmone/pull/1330)
+  [#1330](https://github.com/ipsilon/cevm/pull/1330)
 
 ### Changed
 
 - **Testing infrastructure improvements**:
   - State and blockchain test runners now discover tests by individual test cases.
-    [#1331](https://github.com/ipsilon/evmone/pull/1331)
+    [#1331](https://github.com/ipsilon/cevm/pull/1331)
   - Block header validation fixes.
-    [#1244](https://github.com/ipsilon/evmone/pull/1244)
+    [#1244](https://github.com/ipsilon/cevm/pull/1244)
   - Fix deposit log and system contract validations in t8n.
-    [#1339](https://github.com/ipsilon/evmone/pull/1339)
+    [#1339](https://github.com/ipsilon/cevm/pull/1339)
 - **Cryptography optimizations**:
   - Optimize bit test of scalars in ECC multiplication.
-    [#1336](https://github.com/ipsilon/evmone/pull/1336)
+    [#1336](https://github.com/ipsilon/cevm/pull/1336)
   - Add ECC doubling formula for curves with A coefficient of -3.
-    [#1321](https://github.com/ipsilon/evmone/pull/1321)
+    [#1321](https://github.com/ipsilon/cevm/pull/1321)
   - Use `g1_mul` and `g2_mul` for single-input multiplication in BLS precompiles.
-    [#1340](https://github.com/ipsilon/evmone/pull/1340)
+    [#1340](https://github.com/ipsilon/cevm/pull/1340)
 - **Code quality and coverage improvements**:
   - Refactor MPT implementation for more precise code coverage.
-    [#1341](https://github.com/ipsilon/evmone/pull/1341)
+    [#1341](https://github.com/ipsilon/cevm/pull/1341)
   - Filter relevant functionality in `call_impl` template.
-    [#1348](https://github.com/ipsilon/evmone/pull/1348)
+    [#1348](https://github.com/ipsilon/cevm/pull/1348)
   - Remove deprecated methods in `TestState`.
-    [#1352](https://github.com/ipsilon/evmone/pull/1352)
+    [#1352](https://github.com/ipsilon/cevm/pull/1352)
   - Remove dead code: `ethash_keccak256_32`, secp256k1 affine point multiplication, and RLP `encode(array)`.
-    [#1345](https://github.com/ipsilon/evmone/pull/1345)
-    [#1346](https://github.com/ipsilon/evmone/pull/1346)
-    [#1342](https://github.com/ipsilon/evmone/pull/1342)
+    [#1345](https://github.com/ipsilon/cevm/pull/1345)
+    [#1346](https://github.com/ipsilon/cevm/pull/1346)
+    [#1342](https://github.com/ipsilon/cevm/pull/1342)
   - Degrade always-true condition to assert in the `Host` code.
-    [#1344](https://github.com/ipsilon/evmone/pull/1344)
+    [#1344](https://github.com/ipsilon/cevm/pull/1344)
   - Remove potentially dead code in `ExecutionState`.
-    [#1338](https://github.com/ipsilon/evmone/pull/1338)
+    [#1338](https://github.com/ipsilon/cevm/pull/1338)
   - Move `BlobSchedule` from state library to test utilities.
-    [#1349](https://github.com/ipsilon/evmone/pull/1349)
+    [#1349](https://github.com/ipsilon/cevm/pull/1349)
 - **Build and dependencies**:
   - Upgrade minimum CMake version to 3.19.
-    [#1350](https://github.com/ipsilon/evmone/pull/1350)
+    [#1350](https://github.com/ipsilon/cevm/pull/1350)
   - Disable `-Werror` by default.
-    [#1351](https://github.com/ipsilon/evmone/pull/1351)
+    [#1351](https://github.com/ipsilon/cevm/pull/1351)
   - Upgrade minimum Xcode to 16.2.0.
-    [#1334](https://github.com/ipsilon/evmone/pull/1334)
+    [#1334](https://github.com/ipsilon/cevm/pull/1334)
 - **External test suites**:
   - [Execution Spec Tests] upgraded to [v5.3.0][Execution Spec Tests 5.3.0].
-    [#1334](https://github.com/ipsilon/evmone/pull/1334)
-    [#1327](https://github.com/ipsilon/evmone/pull/1327)
+    [#1334](https://github.com/ipsilon/cevm/pull/1334)
+    [#1327](https://github.com/ipsilon/cevm/pull/1327)
   - Adjust coverage report for EEST tests.
-    [#1318](https://github.com/ipsilon/evmone/pull/1318)
+    [#1318](https://github.com/ipsilon/cevm/pull/1318)
 
 ### Fixed
 
 - Fix handling of the input point-at-infinity in secp256r1 signature verification.
-  [#1328](https://github.com/ipsilon/evmone/pull/1328)
+  [#1328](https://github.com/ipsilon/cevm/pull/1328)
 
 
 ## [0.16.0] — 2025-09-25
@@ -170,63 +170,63 @@ This release provides full [Osaka] compatibility by implementing 3 remaining EIP
 
 - Partial **[Osaka]** support:
   - Add `CLZ` opcode ([EIP-7939]).
-    [#1264](https://github.com/ipsilon/evmone/pull/1264)
+    [#1264](https://github.com/ipsilon/cevm/pull/1264)
   - Implement blob count limit per transaction ([EIP-7594]).
-    [#1279](https://github.com/ipsilon/evmone/pull/1279)
+    [#1279](https://github.com/ipsilon/cevm/pull/1279)
   - Modify blob base fee calculation ([EIP-7918]).
-    [#1281](https://github.com/ipsilon/evmone/pull/1281)
-    [#1322](https://github.com/ipsilon/evmone/pull/1322)
+    [#1281](https://github.com/ipsilon/cevm/pull/1281)
+    [#1322](https://github.com/ipsilon/cevm/pull/1322)
   - Enforce max transaction gas limit ([EIP-7825]).
-    [#1285](https://github.com/ipsilon/evmone/pull/1285)
+    [#1285](https://github.com/ipsilon/cevm/pull/1285)
   - Add the `modexp` precompile changes from [EIP-7823] and [EIP-7883].
-    [#1242](https://github.com/ipsilon/evmone/pull/1242)
-    [#1268](https://github.com/ipsilon/evmone/pull/1268)
-    [#1294](https://github.com/ipsilon/evmone/pull/1294)
+    [#1242](https://github.com/ipsilon/cevm/pull/1242)
+    [#1268](https://github.com/ipsilon/cevm/pull/1268)
+    [#1294](https://github.com/ipsilon/cevm/pull/1294)
   - Add `p256verify` ([EIP-7951]) precompile ID/address (no implementation yet).
-    [#1309](https://github.com/ipsilon/evmone/pull/1309)
+    [#1309](https://github.com/ipsilon/cevm/pull/1309)
 
 ### Changed
 
 - **EVM Object Format (EOF)**:
   - New address hashing scheme for `EOFCREATE`.
-    [#1140](https://github.com/ipsilon/evmone/pull/1140)
+    [#1140](https://github.com/ipsilon/cevm/pull/1140)
   - `TXCREATE` and InitcodeTransaction type ([EIP-7873]).
-    [#1139](https://github.com/ipsilon/evmone/pull/1139)
-    [#1192](https://github.com/ipsilon/evmone/pull/1192)
+    [#1139](https://github.com/ipsilon/cevm/pull/1139)
+    [#1192](https://github.com/ipsilon/cevm/pull/1192)
   - Align `EOFCREATE` args with `EXT*CALL`.
-    [#1147](https://github.com/ipsilon/evmone/pull/1147)
+    [#1147](https://github.com/ipsilon/cevm/pull/1147)
   - Change container sections size to 4 bytes.
-    [#1171](https://github.com/ipsilon/evmone/pull/1171)
+    [#1171](https://github.com/ipsilon/cevm/pull/1171)
   - Caching of `TXCREATE` validation results.
-    [#1193](https://github.com/ipsilon/evmone/pull/1193)
+    [#1193](https://github.com/ipsilon/cevm/pull/1193)
   - Move EOF to `EVMC_EXPERIMENTAL`.
-    [#1243](https://github.com/ipsilon/evmone/pull/1243)
+    [#1243](https://github.com/ipsilon/cevm/pull/1243)
 - Improvements to Elliptic Curve Cryptography code:
   - Add mixed-add formula.
-    [#1170](https://github.com/ipsilon/evmone/pull/1170)
+    [#1170](https://github.com/ipsilon/cevm/pull/1170)
   - Better API for ECC.
-    [#1288](https://github.com/ipsilon/evmone/pull/1288)
-    [#1298](https://github.com/ipsilon/evmone/pull/1298)
-    [#1299](https://github.com/ipsilon/evmone/pull/1299)
+    [#1288](https://github.com/ipsilon/cevm/pull/1288)
+    [#1298](https://github.com/ipsilon/cevm/pull/1298)
+    [#1299](https://github.com/ipsilon/cevm/pull/1299)
   - Improve bn254 point "on curve".
-    [#1300](https://github.com/ipsilon/evmone/pull/1300)
+    [#1300](https://github.com/ipsilon/cevm/pull/1300)
   - Remove special case checks from point multiplication.
-    [#1301](https://github.com/ipsilon/evmone/pull/1301)
+    [#1301](https://github.com/ipsilon/cevm/pull/1301)
   - Avoid conversion to/from Montgomery form of `y` in secp256k1.
-    [#1303](https://github.com/ipsilon/evmone/pull/1303)
+    [#1303](https://github.com/ipsilon/cevm/pull/1303)
   - Reduce EC multiplication scalar by the order.
-    [#1305](https://github.com/ipsilon/evmone/pull/1305)
+    [#1305](https://github.com/ipsilon/cevm/pull/1305)
   - Switch to Jacobian coordinates in ECC.
-    [#1312](https://github.com/ipsilon/evmone/pull/1312)
+    [#1312](https://github.com/ipsilon/cevm/pull/1312)
 - Optimization to the Merkle Patricia Trie (MPT) implementation: "Extension node is a lie!"
-  [#703](https://github.com/ipsilon/evmone/pull/703)
+  [#703](https://github.com/ipsilon/cevm/pull/703)
 - Better EVM stack memory alignment and implementation:
   - Mark stack pointer as 32-byte aligned.
-    [#1233](https://github.com/ipsilon/evmone/pull/1233)
+    [#1233](https://github.com/ipsilon/cevm/pull/1233)
   - Track stack "end" instead of "top".
-    [#895](https://github.com/ipsilon/evmone/pull/895)
+    [#895](https://github.com/ipsilon/cevm/pull/895)
   - Use alignas to specify EVM stack space alignment.
-    [#1304](https://github.com/ipsilon/evmone/pull/1304)
+    [#1304](https://github.com/ipsilon/cevm/pull/1304)
 
 
 [0.15.0] — 2025-04-08
@@ -236,34 +236,34 @@ This release provides full [Osaka] compatibility by implementing 3 remaining EIP
 - EOF:
   The is the final version compatible with [EOF devnet-0](https://notes.ethereum.org/@ethpandaops/eof-devnet-0).
   - Rename RETURNCONTRACT to RETURNCODE
-    [#1153](https://github.com/ethereum/evmone/pull/1153)
+    [#1153](https://github.com/ethereum/cevm/pull/1153)
   - Optimize allocations when validating the header
-    [#1160](https://github.com/ethereum/evmone/pull/1160)
+    [#1160](https://github.com/ethereum/cevm/pull/1160)
 - EVMMAX:
   - evmmax: Add inversion method
-    [#1142](https://github.com/ethereum/evmone/pull/1142)
+    [#1142](https://github.com/ethereum/cevm/pull/1142)
   - evmmax: Use inv() instead of generated addchains
-    [#1143](https://github.com/ethereum/evmone/pull/1143)
+    [#1143](https://github.com/ethereum/cevm/pull/1143)
 - Precompiles:
   - Handle trivial inputs to the expmod precompile
-    [#1163](https://github.com/ethereum/evmone/pull/1163)
+    [#1163](https://github.com/ethereum/cevm/pull/1163)
   - Use classic EC point add formula for BN precompiles
-    [#1165](https://github.com/ethereum/evmone/pull/1165)
+    [#1165](https://github.com/ethereum/cevm/pull/1165)
   - Optimize EC point multiplication for BN precompiles
-    [#1166](https://github.com/ethereum/evmone/pull/1166)
+    [#1166](https://github.com/ethereum/cevm/pull/1166)
   - Refactor the BN254 ecpairing precompile
-    [#1175](https://github.com/ethereum/evmone/pull/1175)
+    [#1175](https://github.com/ethereum/cevm/pull/1175)
 - EIP-7702: Remove the check for empty in-state accounts
-  [#1141](https://github.com/ethereum/evmone/pull/1141)
+  [#1141](https://github.com/ethereum/cevm/pull/1141)
 - Add prestate validation checks to the state test loader
-  [#1134](https://github.com/ethereum/evmone/pull/1134)
+  [#1134](https://github.com/ethereum/cevm/pull/1134)
 - Upgrade the silkpre dependency
-  [#1173](https://github.com/ethereum/evmone/pull/1173)
+  [#1173](https://github.com/ethereum/cevm/pull/1173)
 
 ### Fixed
 
 - Fix incorrect output size in the BN254 ecpairing precompile
-  [#1174](https://github.com/ethereum/evmone/pull/1174)
+  [#1174](https://github.com/ethereum/cevm/pull/1174)
 
 
 [0.14.1] — 2025-03-11
@@ -271,20 +271,20 @@ This release provides full [Osaka] compatibility by implementing 3 remaining EIP
 ### Fixed
 
 - Fixes and improvements to BLS precompiles ([EIP-2537]).
-  [#1155](https://github.com/ethereum/evmone/pull/1155)
-  [#1154](https://github.com/ethereum/evmone/pull/1154)
-  [#1150](https://github.com/ethereum/evmone/pull/1150)
-  [#1151](https://github.com/ethereum/evmone/pull/1151)
-  [#1148](https://github.com/ethereum/evmone/pull/1148)
+  [#1155](https://github.com/ethereum/cevm/pull/1155)
+  [#1154](https://github.com/ethereum/cevm/pull/1154)
+  [#1150](https://github.com/ethereum/cevm/pull/1150)
+  [#1151](https://github.com/ethereum/cevm/pull/1151)
+  [#1148](https://github.com/ethereum/cevm/pull/1148)
 - Check for topic when parsing deposit contract logs ([EIP-6110]).
-  [#1152](https://github.com/ethereum/evmone/pull/1152)
+  [#1152](https://github.com/ethereum/cevm/pull/1152)
 
 ### Changed
 
 - Improvements to EOF validation.
-  [#1137](https://github.com/ethereum/evmone/pull/1137)
-  [#1144](https://github.com/ethereum/evmone/pull/1144)
-  [#1145](https://github.com/ethereum/evmone/pull/1145)
+  [#1137](https://github.com/ethereum/cevm/pull/1137)
+  [#1144](https://github.com/ethereum/cevm/pull/1144)
+  [#1145](https://github.com/ethereum/cevm/pull/1145)
   
 
 [0.14.0] — 2025-02-19
@@ -293,68 +293,68 @@ This release provides full [Osaka] compatibility by implementing 3 remaining EIP
 
 - Support for all remaining [Prague] EIPs:
   - [EIP-6110]: Supply validator deposits on chain.
-    [#1079](https://github.com/ethereum/evmone/pull/1079)
+    [#1079](https://github.com/ethereum/cevm/pull/1079)
   - [EIP-7002] and [EIP-7251]: Withdrawal and consolidation requests.
-    [#1084](https://github.com/ethereum/evmone/pull/1084)
+    [#1084](https://github.com/ethereum/cevm/pull/1084)
   - [EIP-7623]: Increase calldata cost.
-    [#1095](https://github.com/ethereum/evmone/pull/1095)
-    [#1108](https://github.com/ethereum/evmone/pull/1108)
+    [#1095](https://github.com/ethereum/cevm/pull/1095)
+    [#1108](https://github.com/ethereum/cevm/pull/1108)
   - [EIP-7685]: General purpose execution layer requests.
-    [#1083](https://github.com/ethereum/evmone/pull/1083)
+    [#1083](https://github.com/ethereum/cevm/pull/1083)
   - [EIP-7691]: Blob throughput increase.
-    [#1118](https://github.com/ethereum/evmone/pull/1118)
+    [#1118](https://github.com/ethereum/cevm/pull/1118)
   - [EIP-7702]: Set EOA account code.
-    [#961](https://github.com/ethereum/evmone/pull/961)
+    [#961](https://github.com/ethereum/cevm/pull/961)
 - EVMMAX-based BN254 pairing check precompile.
-    [#852](hptps://github.com/ethereum/evmone/pull/852)
+    [#852](hptps://github.com/ethereum/cevm/pull/852)
 - New API for transaction execution: `StateView` & `StateDiff`.
-  [#802](https://github.com/ethereum/evmone/pull/802)
+  [#802](https://github.com/ethereum/cevm/pull/802)
 - Introduce `BlockHashes` interface.
-  [#1059](https://github.com/ethereum/evmone/pull/1059)
-- Add option `-k` to filter tests by name in `evmone-statetest`.
-  [#1111](https://github.com/ethereum/evmone/pull/1111)
+  [#1059](https://github.com/ethereum/cevm/pull/1059)
+- Add option `-k` to filter tests by name in `cevm-statetest`.
+  [#1111](https://github.com/ethereum/cevm/pull/1111)
 - Add support for [EIP-4844] in blockchain tests.
-  [#1077](https://github.com/ethereum/evmone/pull/1077)
+  [#1077](https://github.com/ethereum/cevm/pull/1077)
 - Add GDB pretty printers for common bytes and uint256 types.
-  [#1024](https://github.com/ethereum/evmone/pull/1024)
+  [#1024](https://github.com/ethereum/cevm/pull/1024)
 
 ### Changed
 
 - Improvements to **EOF** validation and execution:
   - Move EOF to Osaka.
-    [#1060](https://github.com/ethereum/evmone/pull/1060)
+    [#1060](https://github.com/ethereum/cevm/pull/1060)
   - Optimized EOF validation using `std::move`.
-    [#1036](https://github.com/ethereum/evmone/pull/1036)
+    [#1036](https://github.com/ethereum/cevm/pull/1036)
   - Return constant hash of EXTCODEHASH of EOF.
-    [#1035](https://github.com/ethereum/evmone/pull/1035)
+    [#1035](https://github.com/ethereum/cevm/pull/1035)
   - Optimized EOF by reading types on demand.
-    [#1034](https://github.com/ethereum/evmone/pull/1034)
+    [#1034](https://github.com/ethereum/cevm/pull/1034)
   - Move EOF type validation outside of header validation.
-    [#1052](https://github.com/ethereum/evmone/pull/1052)
+    [#1052](https://github.com/ethereum/cevm/pull/1052)
   - Improve `has_full_data()` helper.
-    [#1097](https://github.com/ethereum/evmone/pull/1097)
+    [#1097](https://github.com/ethereum/cevm/pull/1097)
 - Updates to BLS precompiles ([EIP-2537]).
-  [#1089](https://github.com/ethereum/evmone/pull/1089)
+  [#1089](https://github.com/ethereum/cevm/pull/1089)
 - State and transaction execution improvements:
   - Split transaction and block related types.
-    [#1031](https://github.com/ethereum/evmone/pull/1031)
+    [#1031](https://github.com/ethereum/cevm/pull/1031)
   - Avoid returning bytes_view in system contracts.
-    [#1048](https://github.com/ethereum/evmone/pull/1048)
+    [#1048](https://github.com/ethereum/cevm/pull/1048)
   - Implement `CREATE` address scheme without RLP lib.
-    [#1055](https://github.com/ethereum/evmone/pull/1055)
+    [#1055](https://github.com/ethereum/cevm/pull/1055)
   - Separate transaction validation from transition.
-    [#1069](https://github.com/ethereum/evmone/pull/1069)
+    [#1069](https://github.com/ethereum/cevm/pull/1069)
   - Introduce TransactionProperties.
-    [#1098](https://github.com/ethereum/evmone/pull/1098)
+    [#1098](https://github.com/ethereum/cevm/pull/1098)
   - Simplify code modification indicator in StateDiff.
-    [#1117](https://github.com/ethereum/evmone/pull/1117)
+    [#1117](https://github.com/ethereum/cevm/pull/1117)
 - Requirements and dependencies updates:
   - [EVMC] [12.1.0][EVMC 12.1.0] with EIP-7702 support.
-    [#1125](https://github.com/ethereum/evmone/pull/1125)
+    [#1125](https://github.com/ethereum/cevm/pull/1125)
   - [intx] [0.12.1][intx 0.12.1]
-    [#1131](https://github.com/ethereum/evmone/pull/1131)
+    [#1131](https://github.com/ethereum/cevm/pull/1131)
   - [ethash] [1.1.0][ethash 1.1.0]
-    [#1131](https://github.com/ethereum/evmone/pull/1131)
+    [#1131](https://github.com/ethereum/cevm/pull/1131)
 
 
 ## [0.13.0] — 2024-09-23
@@ -365,67 +365,67 @@ and improves the interpreter API.
 ### Added
 
 - Implementation of all [EIP-2537] BLS precompiles, enabled in **Prague**:
-  [#984](https://github.com/ethereum/evmone/pull/984)
+  [#984](https://github.com/ethereum/cevm/pull/984)
   - uses [blst] [v0.3.13](https://github.com/supranational/blst/releases/tag/v0.3.13) library,
-    [#972](https://github.com/ethereum/evmone/pull/972)
-    [#986](https://github.com/ethereum/evmone/pull/986)
+    [#972](https://github.com/ethereum/cevm/pull/972)
+    [#986](https://github.com/ethereum/cevm/pull/986)
   - `bls12_g1add` (`0x0b`)
-    [#982](https://github.com/ethereum/evmone/pull/982)
+    [#982](https://github.com/ethereum/cevm/pull/982)
   - `bls12_g1mul` (`0x0c`)
-    [#994](https://github.com/ethereum/evmone/pull/994)
+    [#994](https://github.com/ethereum/cevm/pull/994)
   - `bls12_g1msm` (`0x0d`)
-    [#1010](https://github.com/ethereum/evmone/pull/1010)
+    [#1010](https://github.com/ethereum/cevm/pull/1010)
   - `bls12_g2add` (`0x0e`)
-    [#995](https://github.com/ethereum/evmone/pull/995)
+    [#995](https://github.com/ethereum/cevm/pull/995)
   - `bls12_g2mul` (`0x0f`)
-    [#999](https://github.com/ethereum/evmone/pull/999)
+    [#999](https://github.com/ethereum/cevm/pull/999)
   - `bls12_g2msm` (`0x10`)
-    [#1010](https://github.com/ethereum/evmone/pull/1010)
+    [#1010](https://github.com/ethereum/cevm/pull/1010)
   - `bls12_pairing_check` (`0x11`)
-    [#1016](https://github.com/ethereum/evmone/pull/1016)
+    [#1016](https://github.com/ethereum/cevm/pull/1016)
   - `bls12_map_fp_to_g1` (`0x12`)
-    [#1012](https://github.com/ethereum/evmone/pull/1012)
+    [#1012](https://github.com/ethereum/cevm/pull/1012)
   - `bls12_map_fp2_to_g2` (`0x13`)
-    [#1012](https://github.com/ethereum/evmone/pull/1012)
+    [#1012](https://github.com/ethereum/cevm/pull/1012)
 - Implementation of KZG proof verification (aka "point evaluation") precompile from [EIP-4844].
-  [#979](https://github.com/ethereum/evmone/pull/979)
+  [#979](https://github.com/ethereum/cevm/pull/979)
 - Implementation of [EIP-2935] "Serve historical block hashes from state".
-  [#953](https://github.com/ethereum/evmone/pull/953)
+  [#953](https://github.com/ethereum/cevm/pull/953)
 
 ### Changed
 
 - Refactor `system_call()` in preparation for more **Pectra** system contracts.
-  [#976](https://github.com/ethereum/evmone/pull/976)
+  [#976](https://github.com/ethereum/cevm/pull/976)
 - Improved Baseline code analysis API.
-  [#941](https://github.com/ethereum/evmone/pull/941)
+  [#941](https://github.com/ethereum/cevm/pull/941)
 - Provide execution states at VM object level and hide them from public API.
-  [#1005](https://github.com/ethereum/evmone/pull/1005)
+  [#1005](https://github.com/ethereum/cevm/pull/1005)
 - Requirements and dependencies updates:
   - Support for 32-bit MSVC compiler has been dropped.
-    [#973](https://github.com/ethereum/evmone/pull/973)
+    [#973](https://github.com/ethereum/cevm/pull/973)
   - [intx] [v0.12.0](https://github.com/chfast/intx/releases/tag/v0.12.0)
-    [#985](https://github.com/ethereum/evmone/pull/985)
+    [#985](https://github.com/ethereum/cevm/pull/985)
 - External test suites:
   - EEST EOF tests upgraded to [eip7692@v1.1.0](https://github.com/ethereum/execution-spec-tests/releases/tag/eip7692%40v1.1.0).
-    [#1025](https://github.com/ethereum/evmone/pull/1025)
+    [#1025](https://github.com/ethereum/cevm/pull/1025)
   - Added EEST tests for Pectra [pectra-devnet-3@v1.5.0](https://github.com/ethereum/execution-spec-tests/releases/tag/pectra-devnet-3%40v1.5.0)
-    [#997](https://github.com/ethereum/evmone/pull/997)
+    [#997](https://github.com/ethereum/cevm/pull/997)
   - [ethereum/tests] upgraded to [v14.1](https://github.com/ethereum/tests/releases/tag/v14.1).
-    [#980](https://github.com/ethereum/evmone/pull/980)
+    [#980](https://github.com/ethereum/cevm/pull/980)
 
 ### Fixed
 
 - Fixed EOF parsing bug allowing multiple subcontainer kinds in the header.
-  [#978](https://github.com/ethereum/evmone/pull/978)
+  [#978](https://github.com/ethereum/cevm/pull/978)
 - Ensure mandatory fields are included in the exported state tests.
-  [#993](https://github.com/ethereum/evmone/pull/993)
+  [#993](https://github.com/ethereum/cevm/pull/993)
 - Properly handle EOF additions in `ExecutionState::reset()`.
-  [#1004](https://github.com/ethereum/evmone/pull/1004)
+  [#1004](https://github.com/ethereum/cevm/pull/1004)
 
 ### Removed
 
 - The implementation of EOF's `TXCREATE` has been removed. It will be back when scheduled for a network upgrade.
-  [#992](https://github.com/ethereum/evmone/pull/992)
+  [#992](https://github.com/ethereum/cevm/pull/992)
 
 
 ## [0.12.0] — 2024-08-08
@@ -434,29 +434,29 @@ This release is focused on the Prague upgrade and EOF.
 
 ### Added
 
-- Added `evmone-precompiles-bench` tool to benchmark precompiles.
-  [#765](https://github.com/ethereum/evmone/pull/765)
+- Added `cevm-precompiles-bench` tool to benchmark precompiles.
+  [#765](https://github.com/ethereum/cevm/pull/765)
 - Added native implementations of the precompiled hash functions:
   - RIPEMD160
-    [#846](https://github.com/ethereum/evmone/pull/846)
+    [#846](https://github.com/ethereum/cevm/pull/846)
   - BLAKE2bf
-    [#857](https://github.com/ethereum/evmone/pull/857)
+    [#857](https://github.com/ethereum/cevm/pull/857)
   - SHA256
-    [#924](https://github.com/ethereum/evmone/pull/924)
+    [#924](https://github.com/ethereum/cevm/pull/924)
 - Added `validate_eof` EVMC option to validate EOF before execution.
   This option is enabled by default in `evmc run`.
-  [#768](https://github.com/ethereum/evmone/pull/768)
-  [#960](https://github.com/ethereum/evmone/pull/960)
+  [#768](https://github.com/ethereum/cevm/pull/768)
+  [#960](https://github.com/ethereum/cevm/pull/960)
 - Implemented [EIP-7610] "Revert creation in case of non-empty storage"
   in the testing infrastructure.
-  [#816](https://github.com/ethereum/evmone/pull/816)
+  [#816](https://github.com/ethereum/cevm/pull/816)
 - Added `--version` option to testing tools.
-  [#902](https://github.com/ethereum/evmone/pull/902)
+  [#902](https://github.com/ethereum/cevm/pull/902)
 - Introduce `TestState` and `TestAccount` to testing infrastructure.
-  [#811](https://github.com/ethereum/evmone/pull/811)
+  [#811](https://github.com/ethereum/cevm/pull/811)
 - Added support for validating "initcode" containers in `eofparse` and `eoftest`.
-  [#934](https://github.com/ethereum/evmone/pull/934)
-  [#943](https://github.com/ethereum/evmone/pull/943)
+  [#934](https://github.com/ethereum/cevm/pull/934)
+  [#943](https://github.com/ethereum/cevm/pull/943)
 
 ### Changed
 
@@ -464,48 +464,48 @@ This release is focused on the Prague upgrade and EOF.
   
   Completed implementation of the [EIP-7692]: EVM Object Format (EOFv1) Meta.
   - Added `EOFCREATE` and `RETURNCONTRACT` instructions.
-    [#553](https://github.com/ethereum/evmone/pull/553)
+    [#553](https://github.com/ethereum/cevm/pull/553)
   - Added `TXCREATE` instruction, later moved to the future EOF version (Osaka).
-    [#702](https://github.com/ethereum/evmone/pull/702)
-    [#889](https://github.com/ethereum/evmone/pull/889)
+    [#702](https://github.com/ethereum/cevm/pull/702)
+    [#889](https://github.com/ethereum/cevm/pull/889)
   - Make `EXT*CALL` instructions Address Space Expansion ready.
-    [#915](https://github.com/ethereum/evmone/pull/915)
+    [#915](https://github.com/ethereum/cevm/pull/915)
   - Added EOF validation of sub-container kinds.
-    [#876](https://github.com/ethereum/evmone/pull/876)
+    [#876](https://github.com/ethereum/cevm/pull/876)
   - Limit validated container size to `MAX_INITCODE_SIZE`.
-    [#930](https://github.com/ethereum/evmone/pull/930)
+    [#930](https://github.com/ethereum/cevm/pull/930)
   - Added `RETURNDATALOAD` instruction.
-    [#786](https://github.com/ethereum/evmone/pull/786)
+    [#786](https://github.com/ethereum/cevm/pull/786)
   - Implementation of "less restricted" stack validation.
-    [#676](https://github.com/ethereum/evmone/pull/676)
+    [#676](https://github.com/ethereum/cevm/pull/676)
   - Added implementation of `EXCHANGE` from [EIP-663].
-    [#839](https://github.com/ethereum/evmone/pull/839)
+    [#839](https://github.com/ethereum/cevm/pull/839)
   - Disallow unreachable code sections in EOF containers.
-    [#721](https://github.com/ethereum/evmone/pull/721)
-    [#866](https://github.com/ethereum/evmone/pull/866)
+    [#721](https://github.com/ethereum/cevm/pull/721)
+    [#866](https://github.com/ethereum/cevm/pull/866)
   - Restrict `DUPN` and `SWAPN` to EOF only in EOF only.
-    [#788](https://github.com/ethereum/evmone/pull/788)
+    [#788](https://github.com/ethereum/cevm/pull/788)
   - Change `DATA*` opcodes.
-    [#797](https://github.com/ethereum/evmone/pull/797)
+    [#797](https://github.com/ethereum/cevm/pull/797)
   - Disable EOF ↔ legacy cross-creation.
-    [#825](https://github.com/ethereum/evmone/pull/825)
+    [#825](https://github.com/ethereum/cevm/pull/825)
   - Deprecate and reject code/gas-observability in EOF.
-    [#834](https://github.com/ethereum/evmone/pull/834)
+    [#834](https://github.com/ethereum/cevm/pull/834)
   - Make EOF opaque for `EXTCODE*` instructions.
-    [#587](https://github.com/ethereum/evmone/pull/587)
+    [#587](https://github.com/ethereum/cevm/pull/587)
   - Implement EOF creation transactions.
-    [#878](https://github.com/ethereum/evmone/pull/878)
+    [#878](https://github.com/ethereum/cevm/pull/878)
   - Modify EOF `RETURNDATA*` to allow out-of-bounds reads (instead of failing execution).
-    [#909](https://github.com/ethereum/evmone/pull/909)
+    [#909](https://github.com/ethereum/cevm/pull/909)
   - Tune EOF validation: disallow truncated data in top-level EOF containers.
-    [#921](https://github.com/ethereum/evmone/pull/921)
+    [#921](https://github.com/ethereum/cevm/pull/921)
   - Disallow unreferenced sub-containers and sub-containers of conflicting kinds.
-    [#916](https://github.com/ethereum/evmone/pull/916)
+    [#916](https://github.com/ethereum/cevm/pull/916)
 
 - **Testing**
 
   There are a lot of improvements to the testing tools and test formats.
-  In particular, big portion of evmone's unit tests has been re-shaped
+  In particular, big portion of cevm's unit tests has been re-shaped
   to have a structure of State Tests or EOF Validation Tests.
 
   Moreover, we added the option to export these tests to JSON and the archive
@@ -517,70 +517,70 @@ This release is focused on the Prague upgrade and EOF.
 
   Other details:
   - Add some missing State Test export features.
-    [#807](https://github.com/ethereum/evmone/pull/807)
+    [#807](https://github.com/ethereum/cevm/pull/807)
   - Check for unexpected `EF` prefix in test code.
-    [#809](https://github.com/ethereum/evmone/pull/809)
+    [#809](https://github.com/ethereum/cevm/pull/809)
   - EOF Validation Test fixture.
-    [#810](https://github.com/ethereum/evmone/pull/810)
+    [#810](https://github.com/ethereum/cevm/pull/810)
   - Export EOF validation unit tests to JSON EOF Validation Tests.
-    [#818](https://github.com/ethereum/evmone/pull/818)
+    [#818](https://github.com/ethereum/cevm/pull/818)
   - Output failed test case index in EOF Validation Tests.
-    [#820](https://github.com/ethereum/evmone/pull/820)
+    [#820](https://github.com/ethereum/cevm/pull/820)
   - Add `ExportableFixture` for JSON tests exporting.
-    [#821](https://github.com/ethereum/evmone/pull/821)
+    [#821](https://github.com/ethereum/cevm/pull/821)
   - Recognize all official fork/revision names.
-    [#830](https://github.com/ethereum/evmone/pull/830)
+    [#830](https://github.com/ethereum/cevm/pull/830)
   - Export State Tests with invalid transactions.
-    [#858](https://github.com/ethereum/evmone/pull/858)
+    [#858](https://github.com/ethereum/cevm/pull/858)
   - Allow `"to": null` in JSON transactions.
-    [#927](https://github.com/ethereum/evmone/pull/927)
+    [#927](https://github.com/ethereum/cevm/pull/927)
   - EOF Validation Tests runner: support "initcode" flag.
-    [#936](https://github.com/ethereum/evmone/pull/936)
-  - `evmone-blockchaintest`: Simplify genesis handling.
-    [#954](https://github.com/ethereum/evmone/pull/954)
+    [#936](https://github.com/ethereum/cevm/pull/936)
+  - `cevm-blockchaintest`: Simplify genesis handling.
+    [#954](https://github.com/ethereum/cevm/pull/954)
   - Optimization: only empty accounts are marked "touched".
-    [#785](https://github.com/ethereum/evmone/pull/785)
+    [#785](https://github.com/ethereum/cevm/pull/785)
   - Adjust ethash difficulty if below minimum `0x20000`.
-    [#803](https://github.com/ethereum/evmone/pull/803)
+    [#803](https://github.com/ethereum/cevm/pull/803)
 
 - Requirements and dependencies updates:
   - CMake 3.18
-    [#840](https://github.com/ethereum/evmone/pull/840)
+    [#840](https://github.com/ethereum/cevm/pull/840)
   - Xcode 15.0
-    [#847](https://github.com/ethereum/evmone/pull/847)
+    [#847](https://github.com/ethereum/cevm/pull/847)
   - [EVMC] [12.0.0][EVMC 12.0.0]
-    [#966](https://github.com/ethereum/evmone/pull/966)
+    [#966](https://github.com/ethereum/cevm/pull/966)
   - [intx] [0.11.0][intx 0.11.0]
-    [#967](https://github.com/ethereum/evmone/pull/967)
+    [#967](https://github.com/ethereum/cevm/pull/967)
 
 - Use 32-byte aligned allocation for Baseline stack space.
-  [#907](https://github.com/ethereum/evmone/pull/907)
+  [#907](https://github.com/ethereum/cevm/pull/907)
 - Split Baseline analysis and execution into separate files.
-  [#946](https://github.com/ethereum/evmone/pull/946)
+  [#946](https://github.com/ethereum/cevm/pull/946)
 - Convert EVMMAX to header-only library with full `constexpr` capabilities.
-  [#864](https://github.com/ethereum/evmone/pull/864)
-  [#964](https://github.com/ethereum/evmone/pull/964)
+  [#864](https://github.com/ethereum/cevm/pull/864)
+  [#964](https://github.com/ethereum/cevm/pull/964)
 - Return number of errors from `eofparse`.
-  [#873](https://github.com/ethereum/evmone/pull/873)
+  [#873](https://github.com/ethereum/cevm/pull/873)
 
 ### Fixed
 
 - Implement Frontier behavior of failing code deployment (testing infrastructure).
-  [#824](https://github.com/ethereum/evmone/pull/824)
+  [#824](https://github.com/ethereum/cevm/pull/824)
 - Fix error messages for compatibility with external testing tools.
-  [#828](https://github.com/ethereum/evmone/pull/828)
-  [#886](https://github.com/ethereum/evmone/pull/886)
+  [#828](https://github.com/ethereum/cevm/pull/828)
+  [#886](https://github.com/ethereum/cevm/pull/886)
 - Fix initcode handling before EOF is enabled:
   an initcode staring with `EF00` should not be validated as EOF unconditionally.
-  [#893](https://github.com/ethereum/evmone/pull/893)
+  [#893](https://github.com/ethereum/cevm/pull/893)
 - Fix EOF header parsing bug (introduced by code refactoring).
-  [#957](https://github.com/ethereum/evmone/pull/957)
-  [#958](https://github.com/ethereum/evmone/pull/958)
+  [#957](https://github.com/ethereum/cevm/pull/957)
+  [#958](https://github.com/ethereum/cevm/pull/958)
 - Fix `eoftest` to run all tests from a JSON file.
-  [#935](https://github.com/ethereum/evmone/pull/935)
+  [#935](https://github.com/ethereum/cevm/pull/935)
 - Improve output buffer handling for precompiles in testing infrastructure.
   This fixes out-of-bound access for some fuzzing-generated state tests.
-  [#951](https://github.com/ethereum/evmone/pull/951)
+  [#951](https://github.com/ethereum/cevm/pull/951)
 
 
 ## [0.11.0] — 2023-12-21
@@ -592,61 +592,61 @@ This release is focused on [Cancun] and EOF.
 - **[Cancun] Network Upgrade fully supported**
   - [EIP-1153]: Transient storage opcodes
     - transient storage & `TLOAD` and `TSTORE` instructions
-      [#669](https://github.com/ethereum/evmone/pull/669)
+      [#669](https://github.com/ethereum/cevm/pull/669)
     - clearing of transient storage between transactions
-      [#715](https://github.com/ethereum/evmone/pull/715)
+      [#715](https://github.com/ethereum/cevm/pull/715)
   - [EIP-4788]: Beacon block root in the EVM
     - don't assume the transaction sender exists
-      [#731](https://github.com/ethereum/evmone/pull/731)
+      [#731](https://github.com/ethereum/cevm/pull/731)
     - system call to the _Beacon Roots_ contract
-      [#709](https://github.com/ethereum/evmone/pull/709)
+      [#709](https://github.com/ethereum/cevm/pull/709)
   - [EIP-4844]: Shard Blob Transactions
     - `BLOBHASH` instruction
-      [#668](https://github.com/ethereum/evmone/pull/668)
+      [#668](https://github.com/ethereum/cevm/pull/668)
     - blob transactions
-      [#713](https://github.com/ethereum/evmone/pull/713)
+      [#713](https://github.com/ethereum/cevm/pull/713)
     - stub of the `point_evaluation` precompile
-      [#730](https://github.com/ethereum/evmone/pull/730)
+      [#730](https://github.com/ethereum/cevm/pull/730)
   - [EIP-5656]: `MCOPY` - Memory copying instruction
-    [#629](https://github.com/ethereum/evmone/pull/629)
-    [#648](https://github.com/ethereum/evmone/pull/648)
+    [#629](https://github.com/ethereum/cevm/pull/629)
+    [#648](https://github.com/ethereum/cevm/pull/648)
   - [EIP-6780]: `SELFDESTRUCT` only in same transaction
-    [#735](https://github.com/ethereum/evmone/pull/735)
+    [#735](https://github.com/ethereum/cevm/pull/735)
   - [EIP-7516]: `BLOBBASEFEE` opcode
-    [#708](https://github.com/ethereum/evmone/pull/708)
+    [#708](https://github.com/ethereum/cevm/pull/708)
 - **EVM Modular Arithmetic Extensions ([EVMMAX])**
   - Added basic EVMMAX support in form of C++ API.
-    [#673](https://github.com/ethereum/evmone/pull/673)
+    [#673](https://github.com/ethereum/cevm/pull/673)
   - Implementation of secp256k1 ECDSA recovery (`ecrecovery` precompile) using EVMMAX
-    [#688](https://github.com/ethereum/evmone/pull/688)
+    [#688](https://github.com/ethereum/cevm/pull/688)
   - Implementation of `ecadd` and `ecmul` BN254 precompiles using EVMMAX
-    [#716](https://github.com/ethereum/evmone/pull/716)
+    [#716](https://github.com/ethereum/cevm/pull/716)
 - Initial support for [Blockchain Tests]
   - block execution
-    [#681](https://github.com/ethereum/evmone/pull/681)
-    [#679](https://github.com/ethereum/evmone/pull/679)
-    [#685](https://github.com/ethereum/evmone/pull/685)
-    [#701](https://github.com/ethereum/evmone/pull/701)
+    [#681](https://github.com/ethereum/cevm/pull/681)
+    [#679](https://github.com/ethereum/cevm/pull/679)
+    [#685](https://github.com/ethereum/cevm/pull/685)
+    [#701](https://github.com/ethereum/cevm/pull/701)
   - test format support & results encoding
-    [#680](https://github.com/ethereum/evmone/pull/680)
-    [#690](https://github.com/ethereum/evmone/pull/690)
-    [#694](https://github.com/ethereum/evmone/pull/694)
-    [#711](https://github.com/ethereum/evmone/pull/711)
-    [#736](https://github.com/ethereum/evmone/pull/736)
+    [#680](https://github.com/ethereum/cevm/pull/680)
+    [#690](https://github.com/ethereum/cevm/pull/690)
+    [#694](https://github.com/ethereum/cevm/pull/694)
+    [#711](https://github.com/ethereum/cevm/pull/711)
+    [#736](https://github.com/ethereum/cevm/pull/736)
   - PoW difficulty calculation
-    [#682](https://github.com/ethereum/evmone/pull/682)
-    [#718](https://github.com/ethereum/evmone/pull/718)
+    [#682](https://github.com/ethereum/cevm/pull/682)
+    [#718](https://github.com/ethereum/cevm/pull/718)
 - Optionally use [Silkworm] as the precompiles implementation.
-  [#660](https://github.com/ethereum/evmone/pull/660)
+  [#660](https://github.com/ethereum/cevm/pull/660)
 - Support for executing [JSON EOF Tests](https://github.com/ethereum/tests/tree/v13/EOFTests)
   (thanks @gzanitti)
-  [#678](https://github.com/ethereum/evmone/pull/678)
-- EVM tracing option `--trace` in `evmone-t8n`
-  [#616](https://github.com/ethereum/evmone/pull/616)
+  [#678](https://github.com/ethereum/cevm/pull/678)
+- EVM tracing option `--trace` in `cevm-t8n`
+  [#616](https://github.com/ethereum/cevm/pull/616)
 - Support for compiling for `riscv32` architecture
-  [#700](https://github.com/ethereum/evmone/pull/700)
-- Ability to export evmone's unit tests to the JSON State Test format
-  [#743](https://github.com/ethereum/evmone/pull/743)
+  [#700](https://github.com/ethereum/cevm/pull/700)
+- Ability to export cevm's unit tests to the JSON State Test format
+  [#743](https://github.com/ethereum/cevm/pull/743)
 
 ### Changed
 
@@ -655,58 +655,58 @@ This release is focused on [Cancun] and EOF.
   EOF implementation follows the [EOF spec] (aka _Mega EOF Endgame_)
   and is tentatively enabled in the **Prague** EVM revision.
   - Tests have been migrated to [ipsilon/tests/eof](https://github.com/ipsilon/tests/tree/eof)
-    [#651](https://github.com/ethereum/evmone/pull/651)
+    [#651](https://github.com/ethereum/cevm/pull/651)
   - Implementation of four new instructions for accessing _data sections_:
     `DATALOAD`, `DATALOADN`, `DATASIZE`, `DATACOPY`
-    [#586](https://github.com/ethereum/evmone/pull/586)
-    [#663](https://github.com/ethereum/evmone/pull/663)
-    [#717](https://github.com/ethereum/evmone/pull/717)
-    [#741](https://github.com/ethereum/evmone/pull/741)
+    [#586](https://github.com/ethereum/cevm/pull/586)
+    [#663](https://github.com/ethereum/cevm/pull/663)
+    [#717](https://github.com/ethereum/cevm/pull/717)
+    [#741](https://github.com/ethereum/cevm/pull/741)
   - Forbid `DELEGATECALL` from EOF to legacy contracts during execution
-    [#588](https://github.com/ethereum/evmone/pull/588)
+    [#588](https://github.com/ethereum/cevm/pull/588)
   - The data section kind has been changed to `0x04`
-    [#632](https://github.com/ethereum/evmone/pull/632)
+    [#632](https://github.com/ethereum/cevm/pull/632)
   - The `RJUMPV` immediate argument meaning has been changed to "max index"
-    [#640](https://github.com/ethereum/evmone/pull/640)
+    [#640](https://github.com/ethereum/cevm/pull/640)
   - Implementation of the `JUMPF` instruction and the _non-returning_ functions
-    [#644](https://github.com/ethereum/evmone/pull/644)
+    [#644](https://github.com/ethereum/cevm/pull/644)
 
 - Opcodes of new instructions have been assigned following
   [the execution-spec opcodes list](https://github.com/ethereum/execution-specs/tree/master/lists/evm)
-  [#665](https://github.com/ethereum/evmone/pull/665)
+  [#665](https://github.com/ethereum/cevm/pull/665)
 - State changes are now reverted with the journal
-  [#689](https://github.com/ethereum/evmone/pull/689)
-- Compatibility of `evmone-statetest` with [goevmlab] has been improved
-  [#658](https://github.com/ethereum/evmone/pull/658)
-  [#757](https://github.com/ethereum/evmone/pull/757)
+  [#689](https://github.com/ethereum/cevm/pull/689)
+- Compatibility of `cevm-statetest` with [goevmlab] has been improved
+  [#658](https://github.com/ethereum/cevm/pull/658)
+  [#757](https://github.com/ethereum/cevm/pull/757)
 - Minimal tested/supported compilers versions:
-  [#675](https://github.com/ethereum/evmone/pull/675)
+  [#675](https://github.com/ethereum/cevm/pull/675)
   - GCC 11
   - Clang 13
   - XCode 14.3.1 (bumped from 13.4)
   - Visual Studio 2022
   - CMake 3.16...3.27
 - [EVMC] has been upgraded to version [11.0.1][EVMC 11.0.1].
-  [#754](https://github.com/ethereum/evmone/pull/754)
-  [#738](https://github.com/ethereum/evmone/pull/738)
-  [#707](https://github.com/ethereum/evmone/pull/707)
-  [#669](https://github.com/ethereum/evmone/pull/669)
+  [#754](https://github.com/ethereum/cevm/pull/754)
+  [#738](https://github.com/ethereum/cevm/pull/738)
+  [#707](https://github.com/ethereum/cevm/pull/707)
+  [#669](https://github.com/ethereum/cevm/pull/669)
 - [intx] has been upgraded to version [0.10.1][intx 0.10.1].
-  [#674](https://github.com/ethereum/evmone/pull/674)
+  [#674](https://github.com/ethereum/cevm/pull/674)
 - [Ethereum Execution Tests] has been upgraded to version [13][tests 13]
   and [Execution Spec Tests] version [1.0.6][Execution Spec Tests 1.0.6] has been added.
-  [#737](https://github.com/ethereum/evmone/pull/737)
+  [#737](https://github.com/ethereum/cevm/pull/737)
 
 ### Fixed
 
 - EOF: Fix `CALLF` runtime stack overflow check
-  [#677](https://github.com/ethereum/evmone/pull/677)
+  [#677](https://github.com/ethereum/cevm/pull/677)
 - EOF: Fix missing `CALLF` stack overflow validation
-  [#619](https://github.com/ethereum/evmone/pull/619)
+  [#619](https://github.com/ethereum/cevm/pull/619)
 - Fixed processing of withdrawals with 0 amount (testing infrastructure)
-  [#630](https://github.com/ethereum/evmone/pull/630)
+  [#630](https://github.com/ethereum/cevm/pull/630)
 - Fixed handling of _short_ nodes in Merkle Patricia Trie (testing infrastructure)
-  [#686](https://github.com/ethereum/evmone/pull/686)
+  [#686](https://github.com/ethereum/cevm/pull/686)
 
 
 ## [0.10.0] — 2023-05-08
@@ -726,123 +726,123 @@ the Baseline interpreter is now:
 
 - **[Shanghai] support**:
   - [EIP-3651]: Warm COINBASE (testing infrastructure only).
-    [#560](https://github.com/ethereum/evmone/pull/560)
+    [#560](https://github.com/ethereum/cevm/pull/560)
   - [EIP-3860]: Limit and meter initcode.
-    [#545](https://github.com/ethereum/evmone/pull/545)
+    [#545](https://github.com/ethereum/cevm/pull/545)
   - [EIP-4895]: Beacon chain push withdrawals as operations (testing infrastructure only).
-    [#614](https://github.com/ethereum/evmone/pull/614)
+    [#614](https://github.com/ethereum/cevm/pull/614)
 - **EVM Object Format "EOF v1.0"**:
   - The implementation of the revisions of [EIP-3540], [EIP-3670], [EIP-4200], [EIP-4750] and [EIP-5450]
     originally proposed for [Shanghai].
-    [#563](https://github.com/ethereum/evmone/pull/563)
-    [#572](https://github.com/ethereum/evmone/pull/572)
-    [#594](https://github.com/ethereum/evmone/pull/594)
-    [#508](https://github.com/ethereum/evmone/pull/508)
+    [#563](https://github.com/ethereum/cevm/pull/563)
+    [#572](https://github.com/ethereum/cevm/pull/572)
+    [#594](https://github.com/ethereum/cevm/pull/594)
+    [#508](https://github.com/ethereum/cevm/pull/508)
   - EOF is currently enabled in the [Cancun] revision but likely to be moved to Prague in the future.
-    [#561](https://github.com/ethereum/evmone/pull/561)
-  - Added `evmone-eofparse` and `evmone-eofparsefuzz` tools for testing EOF validation.
-    [#568](https://github.com/ethereum/evmone/pull/568)
+    [#561](https://github.com/ethereum/cevm/pull/561)
+  - Added `cevm-eofparse` and `cevm-eofparsefuzz` tools for testing EOF validation.
+    [#568](https://github.com/ethereum/cevm/pull/568)
 - Implemented [EIP-663]: Unlimited SWAP and DUP instructions (enabled in EOF).
-  [#529](https://github.com/ethereum/evmone/pull/529)
+  [#529](https://github.com/ethereum/cevm/pull/529)
 - Added implementation of `evmc::Host`, **state transition** and block finalization for testing purposes.
-  [#484](https://github.com/ethereum/evmone/pull/484)
-  [#519](https://github.com/ethereum/evmone/pull/519)
-  [#575](https://github.com/ethereum/evmone/pull/575)
-  [#608](https://github.com/ethereum/evmone/pull/608)
-  [#609](https://github.com/ethereum/evmone/pull/609)
-- Added **[t8n]** tool `evmone-t8n`
+  [#484](https://github.com/ethereum/cevm/pull/484)
+  [#519](https://github.com/ethereum/cevm/pull/519)
+  [#575](https://github.com/ethereum/cevm/pull/575)
+  [#608](https://github.com/ethereum/cevm/pull/608)
+  [#609](https://github.com/ethereum/cevm/pull/609)
+- Added **[t8n]** tool `cevm-t8n`
   — a command line utility for transaction execution and state transition testing.
   It allows executing and generating tests with cooperation of [retesteth]
   or [Execution Spec Tests].
-  [#552](https://github.com/ethereum/evmone/pull/552)
-  [#555](https://github.com/ethereum/evmone/pull/555)
-  [#558](https://github.com/ethereum/evmone/pull/558)
-  [#569](https://github.com/ethereum/evmone/pull/569)
-  [#583](https://github.com/ethereum/evmone/pull/583)
-  [#590](https://github.com/ethereum/evmone/pull/590)
-  [#591](https://github.com/ethereum/evmone/pull/591)
-  [#604](https://github.com/ethereum/evmone/pull/604)
-  [#606](https://github.com/ethereum/evmone/pull/606)
-  [#607](https://github.com/ethereum/evmone/pull/607)
-  [#612](https://github.com/ethereum/evmone/pull/612)
+  [#552](https://github.com/ethereum/cevm/pull/552)
+  [#555](https://github.com/ethereum/cevm/pull/555)
+  [#558](https://github.com/ethereum/cevm/pull/558)
+  [#569](https://github.com/ethereum/cevm/pull/569)
+  [#583](https://github.com/ethereum/cevm/pull/583)
+  [#590](https://github.com/ethereum/cevm/pull/590)
+  [#591](https://github.com/ethereum/cevm/pull/591)
+  [#604](https://github.com/ethereum/cevm/pull/604)
+  [#606](https://github.com/ethereum/cevm/pull/606)
+  [#607](https://github.com/ethereum/cevm/pull/607)
+  [#612](https://github.com/ethereum/cevm/pull/612)
 - Added partial support for EVM Precompiles
   — gas cost computation and execution via _[JSON stub file](./test/state/precompiles_stub.json)_.
-  [#524](https://github.com/ethereum/evmone/pull/524)
+  [#524](https://github.com/ethereum/cevm/pull/524)
 - Declarative state transition unit test suite.
-  [#589](https://github.com/ethereum/evmone/pull/589)
-- CMake option `EVMONE_X86_64_ARCH_LEVEL` to set the
+  [#589](https://github.com/ethereum/cevm/pull/589)
+- CMake option `CEVM_X86_64_ARCH_LEVEL` to set the
   [x86-64 microarchitecture level](https://en.wikipedia.org/wiki/X86-64#Microarchitecture_levels).
   On Linux and Windows this is set to x86-64-v2 by default.
-  [#548](https://github.com/ethereum/evmone/pull/548)
+  [#548](https://github.com/ethereum/cevm/pull/548)
 
 ### Changed
 
-- C++20 is now required to build evmone.
-  [#502](https://github.com/ethereum/evmone/pull/502)
+- C++20 is now required to build cevm.
+  [#502](https://github.com/ethereum/cevm/pull/502)
 - Minimal tested/supported compilers versions:
-  [#535](https://github.com/ethereum/evmone/pull/535)
+  [#535](https://github.com/ethereum/cevm/pull/535)
   - GCC 11
   - Clang 13
   - XCode 13.4
   - Visual Studio 2022
   - CMake 3.16
 - [EVMC] has been upgraded to version [10.1.0][EVMC 10.1.0].
-  [#623](https://github.com/ethereum/evmone/pull/623)
+  [#623](https://github.com/ethereum/cevm/pull/623)
 - [intx] has been upgraded to version [0.10.0][intx 0.10.0].
-  [#622](https://github.com/ethereum/evmone/pull/622)
+  [#622](https://github.com/ethereum/cevm/pull/622)
 - [ethash] has been upgraded to version [1.0.0][ethash 1.0.0].
-  [#540](https://github.com/ethereum/evmone/pull/540)
+  [#540](https://github.com/ethereum/cevm/pull/540)
 - [Ethereum Execution Tests] has been upgraded to version [12.2][tests 12.2].
-  [#625](https://github.com/ethereum/evmone/pull/625)
+  [#625](https://github.com/ethereum/cevm/pull/625)
 - **Baseline interpreter optimizations**:
   - Better stack overflow/underflow checks.
-    [#518](https://github.com/ethereum/evmone/pull/518)
+    [#518](https://github.com/ethereum/cevm/pull/518)
   - SWAP instructions optimization for Clang.
-    [#527](https://github.com/ethereum/evmone/pull/527)
+    [#527](https://github.com/ethereum/cevm/pull/527)
   - Pass gas counter to memory grow/check helpers by value.
-    [#598](https://github.com/ethereum/evmone/pull/598)
+    [#598](https://github.com/ethereum/cevm/pull/598)
   - Pass gas counter to instructions by value.
-    [#600](https://github.com/ethereum/evmone/pull/600)
+    [#600](https://github.com/ethereum/cevm/pull/600)
 - Changes to EVM tracing:
   - Instruction trace prints `"gas"` and `"gasUsed"` as hex numbers to match geth.
-    [#592](https://github.com/ethereum/evmone/pull/592)
+    [#592](https://github.com/ethereum/cevm/pull/592)
   - C++ tracing API has separated the `gas` parameter.
-    [#599](https://github.com/ethereum/evmone/pull/599)
-- Improvements to the JSON State Test execution tool `evmone-statetest`:
+    [#599](https://github.com/ethereum/cevm/pull/599)
+- Improvements to the JSON State Test execution tool `cevm-statetest`:
   - Ability to load tests from multiple dirs/files.
-    [#512](https://github.com/ethereum/evmone/pull/512)
+    [#512](https://github.com/ethereum/cevm/pull/512)
   - Validate deployed EOF code before state test execution.
-    [#593](https://github.com/ethereum/evmone/pull/593)
-    [#601](https://github.com/ethereum/evmone/pull/601)
+    [#593](https://github.com/ethereum/cevm/pull/593)
+    [#601](https://github.com/ethereum/cevm/pull/601)
   - Added `--trace` command-line flag to enable EVM execution tracing.
-    [#543](https://github.com/ethereum/evmone/pull/543)
+    [#543](https://github.com/ethereum/cevm/pull/543)
   - Other improvements.
-    [#556](https://github.com/ethereum/evmone/pull/556)
-    [#603](https://github.com/ethereum/evmone/pull/603)
-- Benchmarks (invocable by `evmone-bench`) have been migrated to
+    [#556](https://github.com/ethereum/cevm/pull/556)
+    [#603](https://github.com/ethereum/cevm/pull/603)
+- Benchmarks (invocable by `cevm-bench`) have been migrated to
   external [evm-benchmarks] which use JSON State Test format.
-  [#513](https://github.com/ethereum/evmone/pull/513)
-  [#530](https://github.com/ethereum/evmone/pull/530)
+  [#513](https://github.com/ethereum/cevm/pull/513)
+  [#530](https://github.com/ethereum/cevm/pull/530)
 - Removed dependency on `evmc::instructions`.
-  [#533](https://github.com/ethereum/evmone/pull/533)
-  [#534](https://github.com/ethereum/evmone/pull/534)
-  [#537](https://github.com/ethereum/evmone/pull/537)
+  [#533](https://github.com/ethereum/cevm/pull/533)
+  [#534](https://github.com/ethereum/cevm/pull/534)
+  [#537](https://github.com/ethereum/cevm/pull/537)
 
 ### Fixed
 
 - Fixed calling `Tracer.notify_execution_start`.
-  [#531](https://github.com/ethereum/evmone/pull/531)
+  [#531](https://github.com/ethereum/cevm/pull/531)
 - Fixed instruction tracing of EOF code.
-  [#536](https://github.com/ethereum/evmone/pull/536)
+  [#536](https://github.com/ethereum/cevm/pull/536)
 
 ### New Contributors
 
-- **[JSzymanskiJS](https://github.com/ethereum/evmone/commits?author=JSzymanskiJS)**
-  [#512](https://github.com/ethereum/evmone/pull/512)
-- **[miles170](https://github.com/ethereum/evmone/commits?author=miles170)**
-  [#513](https://github.com/ethereum/evmone/pull/513)
-- **[rodiazet](https://github.com/ethereum/evmone/commits?author=rodiazet)**
-  [#531](https://github.com/ethereum/evmone/pull/531)
+- **[JSzymanskiJS](https://github.com/ethereum/cevm/commits?author=JSzymanskiJS)**
+  [#512](https://github.com/ethereum/cevm/pull/512)
+- **[miles170](https://github.com/ethereum/cevm/commits?author=miles170)**
+  [#513](https://github.com/ethereum/cevm/pull/513)
+- **[rodiazet](https://github.com/ethereum/cevm/commits?author=rodiazet)**
+  [#531](https://github.com/ethereum/cevm/pull/531)
 
 
 ## [0.9.1] — 2022-09-07
@@ -850,7 +850,7 @@ the Baseline interpreter is now:
 ### Fixed
 
 - Resetting gas refund counter when execution state is reused. 
-  [#504](https://github.com/ethereum/evmone/pull/504)
+  [#504](https://github.com/ethereum/cevm/pull/504)
 
 
 ## [0.9.0] — 2022-08-30
@@ -866,65 +866,65 @@ The Advanced also has got **4% faster** than in the previous version.
 All numbers are from running the "main" benchmark suite
 on 4.0 GHz Intel Haswell CPU, using the Clang 15 compiler.
 
-Moreover, evmone now calculates _gas refund_ and reports it back using [EVMC 10][EVMC 10.0.0] API.
+Moreover, cevm now calculates _gas refund_ and reports it back using [EVMC 10][EVMC 10.0.0] API.
 
 Finally, the options `O=2` and `O=0` have been replaced by `advanced`. See below for details.
 
 ### Added
 
 - Calculation of EVM gas refunds.
-  [#493](https://github.com/ethereum/evmone/pull/493)
+  [#493](https://github.com/ethereum/cevm/pull/493)
 - `PUSH0` instruction implementation ([EIP-3855]), enabled in [Shanghai].
-  [#448](https://github.com/ethereum/evmone/pull/448)
-  [#432](https://github.com/ethereum/evmone/pull/432)
+  [#448](https://github.com/ethereum/cevm/pull/448)
+  [#432](https://github.com/ethereum/cevm/pull/432)
 - Experimental [EOF] validation and execution ([EIP-3540]), enabled in [Shanghai].
-  [#334](https://github.com/ethereum/evmone/pull/334)
-  [#366](https://github.com/ethereum/evmone/pull/366)
-  [#471](https://github.com/ethereum/evmone/pull/471)
+  [#334](https://github.com/ethereum/cevm/pull/334)
+  [#366](https://github.com/ethereum/cevm/pull/366)
+  [#471](https://github.com/ethereum/cevm/pull/471)
 - _In progress_ State Transition execution tool for testing purposes. So far we've merged:
   - RLP encoding,
-    [#463](https://github.com/ethereum/evmone/pull/463)
+    [#463](https://github.com/ethereum/cevm/pull/463)
   - Merkle Patricia Trie root hash computing,
-    [#477](https://github.com/ethereum/evmone/pull/477)
-    [#478](https://github.com/ethereum/evmone/pull/478)
+    [#477](https://github.com/ethereum/cevm/pull/477)
+    [#478](https://github.com/ethereum/cevm/pull/478)
   - JSON State Transition Test loader.
-    [#479](https://github.com/ethereum/evmone/pull/479)
+    [#479](https://github.com/ethereum/cevm/pull/479)
 
 ### Changed
 
 - EVMC options `O=0` (use Baseline) and `O=2` (use Advanced) have been replaced with single
   option `advanced` to use the non-default Advanced interpreter.
-  [#500](https://github.com/ethereum/evmone/pull/500)
+  [#500](https://github.com/ethereum/cevm/pull/500)
 - Baseline has replaced Advanced as the default interpreter. The later can still be selected
   with the `advanced` option. Reasons are explained in the introduction.
-  [#500](https://github.com/ethereum/evmone/pull/500)
+  [#500](https://github.com/ethereum/cevm/pull/500)
 - _A lot_ of changes related to the optimization of the Baseline interpreter, including
   refactoring and optimization of instructions' implementations.
 - The Baseline interpreter now uses "computed goto" dispatch if supported by C++ compiler.
   The "switch" dispatch can be forced with the `cgoto=no` option.
-  [#495](https://github.com/ethereum/evmone/pull/495)
+  [#495](https://github.com/ethereum/cevm/pull/495)
 - Improvements to basic block metadata placement in the Advanced interpreter.
-  [#457](https://github.com/ethereum/evmone/pull/457)
-  [#474](https://github.com/ethereum/evmone/pull/474)
+  [#457](https://github.com/ethereum/cevm/pull/457)
+  [#474](https://github.com/ethereum/cevm/pull/474)
 - [EVMC] has been upgraded to version [10.0.0][EVMC 10.0.0].
-  [#499](https://github.com/ethereum/evmone/pull/499)
+  [#499](https://github.com/ethereum/cevm/pull/499)
 - [intx] has been upgrade to version [0.8.0][intx 0.8.0].
-  [#446](https://github.com/ethereum/evmone/pull/446)
+  [#446](https://github.com/ethereum/cevm/pull/446)
 
 ### Removed
 
-- `evmone-fuzzer` has removed [aleth-interpreter][Aleth] as it is not maintained
+- `cevm-fuzzer` has removed [aleth-interpreter][Aleth] as it is not maintained
   and lacks the latest EVM features.
-  [#453](https://github.com/ethereum/evmone/pull/453)
+  [#453](https://github.com/ethereum/cevm/pull/453)
 
 
 ## [0.8.2] — 2021-08-26
 
 ### Fixed
 
-- Fixed building of `evmone-standalone` static library when the `llvm-ar` tool is being used.
-  [#373](https://github.com/ethereum/evmone/pull/373)
-  [#374](https://github.com/ethereum/evmone/pull/374)
+- Fixed building of `cevm-standalone` static library when the `llvm-ar` tool is being used.
+  [#373](https://github.com/ethereum/cevm/pull/373)
+  [#374](https://github.com/ethereum/cevm/pull/374)
 
 
 ## [0.8.1] — 2021-08-03
@@ -932,7 +932,7 @@ Finally, the options `O=2` and `O=0` have been replaced by `advanced`. See below
 ### Fixed
 
 - baseline: Fix incorrect exit after invalid jump.
-  [#370](https://github.com/ethereum/evmone/pull/370)
+  [#370](https://github.com/ethereum/cevm/pull/370)
 
 
 ## [0.8.0] — 2021-07-01
@@ -941,36 +941,36 @@ Finally, the options `O=2` and `O=0` have been replaced by `advanced`. See below
 
 - Full support for **[London]** EVM revision:
   - [EVMC] upgraded to version [9.0.0][EVMC 9.0.0].
-    [#348](https://github.com/ethereum/evmone/pull/348)
+    [#348](https://github.com/ethereum/cevm/pull/348)
   - Implementation of the [EIP-3198] "BASEFEE opcode".
-    [#333](https://github.com/ethereum/evmone/pull/333)
+    [#333](https://github.com/ethereum/cevm/pull/333)
 - Instruction tracing ([EIP-3155]) can be enabled via `trace` option in Baseline.
-  [#325](https://github.com/ethereum/evmone/pull/325)
+  [#325](https://github.com/ethereum/cevm/pull/325)
 - Summary of number of executed opcodes is reported if `histogram` option is enabled in Baseline.
-  [#323](https://github.com/ethereum/evmone/pull/323)
-- The `evmone-bench` now reports time of execution without code analysis under "execute" label.
+  [#323](https://github.com/ethereum/cevm/pull/323)
+- The `cevm-bench` now reports time of execution without code analysis under "execute" label.
   The EVMC-like analysis + execution invocation is reported as "total".
-  [#343](https://github.com/ethereum/evmone/pull/343)
-- The `evmone-bench` has started utilizing `evmc::MockedHost` which allows using
+  [#343](https://github.com/ethereum/cevm/pull/343)
+- The `cevm-bench` has started utilizing `evmc::MockedHost` which allows using
   state-access (e.g. `SLOAD`/`SSTORE`) instructions in benchmarks.
-  [#319](https://github.com/ethereum/evmone/pull/319)
+  [#319](https://github.com/ethereum/cevm/pull/319)
 
 ### Changed
 
-- Improvements to semi-public `evmone::baseline` API.
-  [#314](https://github.com/ethereum/evmone/pull/314)
+- Improvements to semi-public `cevm::baseline` API.
+  [#314](https://github.com/ethereum/cevm/pull/314)
 - The [intx] has been upgraded to version [0.6.0][intx 0.6.0]
   which increases performance of `ADDMOD` instruction.
-  [#345](https://github.com/ethereum/evmone/pull/345)
+  [#345](https://github.com/ethereum/cevm/pull/345)
 - The [ethash] has been upgraded to version [0.7.0][ethash 0.7.0]
   which provides faster `KECCAK256` implementation.
-  [#332](https://github.com/ethereum/evmone/pull/332)
+  [#332](https://github.com/ethereum/cevm/pull/332)
 - Optimizations in Baseline interpreter.
-  [#315](https://github.com/ethereum/evmone/pull/315)
-  [#341](https://github.com/ethereum/evmone/pull/341)
-  [#344](https://github.com/ethereum/evmone/pull/344)
+  [#315](https://github.com/ethereum/cevm/pull/315)
+  [#341](https://github.com/ethereum/cevm/pull/341)
+  [#344](https://github.com/ethereum/cevm/pull/344)
 - The [Ethereum Execution Tests] upgraded to version [9.0.2][tests 9.0.2].
-  [#349](https://github.com/ethereum/evmone/pull/349)
+  [#349](https://github.com/ethereum/cevm/pull/349)
 
 
 ## [0.7.0] — 2021-04-27
@@ -978,20 +978,20 @@ Finally, the options `O=2` and `O=0` have been replaced by `advanced`. See below
 ### Added
 
 - Full support for **[Berlin]** EVM revision and [EIP-2929].
-  [#289](https://github.com/ethereum/evmone/pull/289)
-  [#301](https://github.com/ethereum/evmone/pull/301)
+  [#289](https://github.com/ethereum/cevm/pull/289)
+  [#301](https://github.com/ethereum/cevm/pull/301)
 
 ### Changed
 
 - [EVMC] has been upgraded to version [8.0.0][EVMC 8.0.0]. This ABI breaking
   change has been required to support **Berlin** revision.
-  [#309](https://github.com/ethereum/evmone/pull/309)
+  [#309](https://github.com/ethereum/cevm/pull/309)
 - Optimizations to basic `JUMPDEST` analysis used by Baseline interpreter.
-  [#306](https://github.com/ethereum/evmone/pull/306)
-  [#308](https://github.com/ethereum/evmone/pull/308)
+  [#306](https://github.com/ethereum/cevm/pull/306)
+  [#308](https://github.com/ethereum/cevm/pull/308)
 - The Baseline interpreter API has been modified to allow caching
   of the `JUMPDEST` analysis.
-  [#305](https://github.com/ethereum/evmone/pull/305)
+  [#305](https://github.com/ethereum/cevm/pull/305)
 - The consensus testing is now driven by [Silkworm] as a replacement of 
   the unmaintained [Aleth]. The [Ethereum Execution Tests] [8.0.4][tests 8.0.4] are currently being used.
 
@@ -1003,22 +1003,22 @@ Finally, the options `O=2` and `O=0` have been replaced by `advanced`. See below
 - New experimental **Baseline** interpreter has been added to the project.
   It provides relatively straight-forward EVM implementation and
   can be enabled with `O=0` option.
-  [#261](https://github.com/ethereum/evmone/pull/261)
-  [#280](https://github.com/ethereum/evmone/pull/280)
+  [#261](https://github.com/ethereum/cevm/pull/261)
+  [#280](https://github.com/ethereum/cevm/pull/280)
 - A set of EVM synthetic benchmarks stressing individual
   low-level EVM instructions.
-  [#278](https://github.com/ethereum/evmone/pull/278)
+  [#278](https://github.com/ethereum/cevm/pull/278)
 - [Silkworm]-driven integration and Ethereum consensus testing.
-  [#290](https://github.com/ethereum/evmone/pull/290)
+  [#290](https://github.com/ethereum/cevm/pull/290)
 
 ### Changed
 
 - [EVMC] upgraded to version [7.5.0][EVMC 7.5.0].
-  [#294](https://github.com/ethereum/evmone/pull/294)
-- `evmone-bench` tool under-the-hood improvements.
-  [#286](https://github.com/ethereum/evmone/pull/286)
-  [#287](https://github.com/ethereum/evmone/pull/287)
-  [#288](https://github.com/ethereum/evmone/pull/288)
+  [#294](https://github.com/ethereum/cevm/pull/294)
+- `cevm-bench` tool under-the-hood improvements.
+  [#286](https://github.com/ethereum/cevm/pull/286)
+  [#287](https://github.com/ethereum/cevm/pull/287)
+  [#288](https://github.com/ethereum/cevm/pull/288)
 - A lot of instructions implementation refactoring to allow code sharing
   between Baseline and Advanced interpreters.
 
@@ -1029,12 +1029,12 @@ Finally, the options `O=2` and `O=0` have been replaced by `advanced`. See below
 
 - [intx] upgraded to version [0.5.0][intx 0.5.0], small performance increase for
   `ADDMOD` and `MULMOD` instructions expected.
-  [#239](https://github.com/ethereum/evmone/pull/239)
+  [#239](https://github.com/ethereum/cevm/pull/239)
 - [EVMC] upgraded to version [7.4.0][EVMC 7.4.0].
-  [#243](https://github.com/ethereum/evmone/pull/243)
+  [#243](https://github.com/ethereum/cevm/pull/243)
 - C++ exception handling and Run-Time Type Information (RTTI) have been disabled
-  for the evmone library (in GCC and Clang compilers).
-  [#244](https://github.com/ethereum/evmone/pull/244)
+  for the cevm library (in GCC and Clang compilers).
+  [#244](https://github.com/ethereum/cevm/pull/244)
 
 
 ## [0.4.1] — 2020-04-01
@@ -1044,74 +1044,74 @@ Finally, the options `O=2` and `O=0` have been replaced by `advanced`. See below
 - The release binaries for Windows are now built without AVX instruction set
   enabled. That was never intended and is consistent with binaries for other 
   operating systems.
-  [#230](https://github.com/ethereum/evmone/pull/230)
+  [#230](https://github.com/ethereum/cevm/pull/230)
 
 ## [0.4.0] — 2019-12-09
 
 ### Fixed
 
-- In previous versions evmone incorrectly assumed that code size cannot exceed
+- In previous versions cevm incorrectly assumed that code size cannot exceed
   24576 bytes (0x6000) — the limit introduced for the size of newly deployed
   contracts by [EIP-170] in [Spurious Dragon]. The limit do not apply to
   contract creating init code (i.e. in context of "create" transaction or CREATE
-  instruction). Therefore, the pre-processing phase in evmone has been reworked
+  instruction). Therefore, the pre-processing phase in cevm has been reworked
   to raise the technical limits or eliminated them entirely. From now on, only
   blocks of instruction with total base gas cost exceeding 4294967295 (2³² - 1)
   combined with execution gas limit also above this value can cause issues.
-  [#217](https://github.com/ethereum/evmone/pull/217)
-  [#218](https://github.com/ethereum/evmone/pull/218)
-  [#219](https://github.com/ethereum/evmone/pull/219)
-  [#221](https://github.com/ethereum/evmone/pull/221)
+  [#217](https://github.com/ethereum/cevm/pull/217)
+  [#218](https://github.com/ethereum/cevm/pull/218)
+  [#219](https://github.com/ethereum/cevm/pull/219)
+  [#221](https://github.com/ethereum/cevm/pull/221)
 
 ### Changed
 
 - [EVMC] has been upgraded to version [7.1.0][EVMC 7.1.0].
-  [#212](https://github.com/ethereum/evmone/pull/212)
+  [#212](https://github.com/ethereum/cevm/pull/212)
 
 ## [0.3.0] — 2019-11-14
 
-This release of evmone adds changes for **[Istanbul]** EVM revision.
+This release of cevm adds changes for **[Istanbul]** EVM revision.
 
 ### Added
 
 - **Istanbul** EVM revision support with new costs for some instructions ([EIP-1884]).
-  [#191](https://github.com/ethereum/evmone/pull/191)
+  [#191](https://github.com/ethereum/cevm/pull/191)
 - Implementation of CHAINID instruction from the **Istanbul** EVM revision ([EIP-1344]).
-  [#190](https://github.com/ethereum/evmone/pull/190)
+  [#190](https://github.com/ethereum/cevm/pull/190)
 - Implementation of SELFBALANCE instruction from the **Istanbul** EVM revision ([EIP-1884]).
-  [#24](https://github.com/ethereum/evmone/pull/24)
+  [#24](https://github.com/ethereum/cevm/pull/24)
 - Implementation of new cost model for SSTORE from the **Istanbul** EVM revision ([EIP-2200]).
-  [#142](https://github.com/ethereum/evmone/pull/142)
+  [#142](https://github.com/ethereum/cevm/pull/142)
 
 ### Changed
 
 - [EVMC] has been upgraded to version [7.0.0][EVMC 7.0.0].
-  [#204](https://github.com/ethereum/evmone/pull/204)
+  [#204](https://github.com/ethereum/cevm/pull/204)
 
 
 ## [0.2.0] — 2019-09-24
 
-This release of evmone is binary compatible with 0.1 and delivers big performance improvements
+This release of cevm is binary compatible with 0.1 and delivers big performance improvements
 – both code preprocessing and execution is **~66%** faster (needs ~40% less time).
 
 ### Added
 
 - **evm-test** – the testing tool for [EVMC]-compatible EVM implementations.
-  [#85](https://github.com/ethereum/evmone/pull/85)
-- **evmone-fuzzer** – the testing tool that fuzzes evmone execution against [aleth-interpreter][Aleth] execution.
+  [#85](https://github.com/ethereum/cevm/pull/85)
+- **cevm-fuzzer** – the testing tool that fuzzes cevm execution against [aleth-interpreter][Aleth] execution.
   Any other [EVMC]-compatible EVM implementation can be added easily.
-  [#162](https://github.com/ethereum/evmone/pull/162)
-  [#184](https://github.com/ethereum/evmone/pull/184)
-- **evmone-standalone** – single static library that bundles evmone with all its static library dependencies 
+  [#162](https://github.com/ethereum/cevm/pull/162)
+  [#184](https://github.com/ethereum/cevm/pull/184)
+- **cevm-standalone** – single static library that bundles cevm with all its static library dependencies 
   (available on Linux, but support can be extended to other platforms).
-  [#95](https://github.com/ethereum/evmone/pull/95)
-- The **evmone-bench** tool has learned how to benchmark external [EVMC]-compatible EVMs.
-  [#111](https://github.com/ethereum/evmone/pull/111)
-- The **evmone-bench** tool sorts test cases by file names and allows organizing them in subfolders.
-  [#150](https://github.com/ethereum/evmone/pull/150)
-- The docker image [ethereum/evmone](https://hub.docker.com/r/ethereum/evmone)
-  with evmone and modified geth is available on Docker Hub.
-  [#127](https://github.com/ethereum/evmone/pull/127)
+  [#95](https://github.com/ethereum/cevm/pull/95)
+- The **cevm-bench** tool has learned how to benchmark external [EVMC]-compatible EVMs.
+  [#111](https://github.com/ethereum/cevm/pull/111)
+- The **cevm-bench** tool sorts test cases by file names and allows organizing them in subfolders.
+  [#150](https://github.com/ethereum/cevm/pull/150)
+- The docker image [ethereum/cevm](https://hub.docker.com/r/ethereum/cevm)
+  with cevm and modified geth is available on Docker Hub.
+  [#127](https://github.com/ethereum/cevm/pull/127)
 
 
 ### Changed
@@ -1120,43 +1120,43 @@ This release of evmone is binary compatible with 0.1 and delivers big performanc
 
 - Instead of checking basic block preconditions (base gas cost, stack requirements) in the dispatch loop, 
   this is now done in the special "BEGINBLOCK" instruction — execution time reduction **-2–8%**.
-  [#74](https://github.com/ethereum/evmone/pull/74)
+  [#74](https://github.com/ethereum/cevm/pull/74)
 - New EVM stack implementation has replaced naïve usage of `std::vector<intx::uint256>` — **-8–16%**.
-  [#79](https://github.com/ethereum/evmone/pull/79)
+  [#79](https://github.com/ethereum/cevm/pull/79)
 - Improvements to interpreter's dispatch loop — **-4–9%**.
-  [#107](https://github.com/ethereum/evmone/pull/107)
+  [#107](https://github.com/ethereum/cevm/pull/107)
 - Optimization of the JUMPDEST map — up to **-34%**.
-  [#80](https://github.com/ethereum/evmone/pull/80)
+  [#80](https://github.com/ethereum/cevm/pull/80)
 - Optimizations to code preprocessing / analysis.
-  [#121](https://github.com/ethereum/evmone/pull/121)
-  [#125](https://github.com/ethereum/evmone/pull/125)
-  [#153](https://github.com/ethereum/evmone/pull/153)
-  [#168](https://github.com/ethereum/evmone/pull/168)
-  [#178](https://github.com/ethereum/evmone/pull/178)
+  [#121](https://github.com/ethereum/cevm/pull/121)
+  [#125](https://github.com/ethereum/cevm/pull/125)
+  [#153](https://github.com/ethereum/cevm/pull/153)
+  [#168](https://github.com/ethereum/cevm/pull/168)
+  [#178](https://github.com/ethereum/cevm/pull/178)
 - Push instructions with values up to 8 bytes (PUSH1–PUSH8)
   are now handled much more efficiently — up to **-9%**.
-  [#122](https://github.com/ethereum/evmone/pull/122)
+  [#122](https://github.com/ethereum/cevm/pull/122)
 - Pointer to next instruction is now obtained in instruction implementations 
   (instead of the dispatch loop) and is kept in CPU registers only — **-3–7%**.
-  [#133](https://github.com/ethereum/evmone/pull/133)
+  [#133](https://github.com/ethereum/cevm/pull/133)
 - The run-time information about basic blocks has been compressed.
-  [#139](https://github.com/ethereum/evmone/pull/139)
-  [#144](https://github.com/ethereum/evmone/pull/144)
+  [#139](https://github.com/ethereum/cevm/pull/139)
+  [#144](https://github.com/ethereum/cevm/pull/144)
   
 #### Other changes
 
 - The DUP, SWAP, LOG and CALL instructions are now implemented by individual functions (template instances)
   instead of a parametrized function handling each family of instructions.
-  [#126](https://github.com/ethereum/evmone/pull/126)
-  [#159](https://github.com/ethereum/evmone/pull/159)
+  [#126](https://github.com/ethereum/cevm/pull/126)
+  [#159](https://github.com/ethereum/cevm/pull/159)
 - [EVMC] upgraded to version [6.3.1](https://github.com/ethereum/evmc/releases/tag/v6.3.1).
-  [#129](https://github.com/ethereum/evmone/pull/129)
-  [#77](https://github.com/ethereum/evmone/pull/77)
-  [#96](https://github.com/ethereum/evmone/pull/96)
+  [#129](https://github.com/ethereum/cevm/pull/129)
+  [#77](https://github.com/ethereum/cevm/pull/77)
+  [#96](https://github.com/ethereum/cevm/pull/96)
 - [intx] upgraded to version [0.4.0](https://github.com/chfast/intx/releases/tag/v0.4.0).
-  [#131](https://github.com/ethereum/evmone/pull/131)
+  [#131](https://github.com/ethereum/cevm/pull/131)
 - The ability to provide custom opcode table for code preprocessing has been dropped.
-  [#167](https://github.com/ethereum/evmone/pull/167)
+  [#167](https://github.com/ethereum/cevm/pull/167)
 
 
 ### Fixed
@@ -1165,26 +1165,26 @@ This release of evmone is binary compatible with 0.1 and delivers big performanc
   This bug could not cause consensus issue because a block with an undefined instruction terminates 
   with an exception despite incorrect gas checking.
   However, execution might have ended with a confusing error code.
-  [#93](https://github.com/ethereum/evmone/pull/93)
+  [#93](https://github.com/ethereum/cevm/pull/93)
 - Fix for LOG being emitted after _out-of-gas_ exception.
-  [#120](https://github.com/ethereum/evmone/pull/120)
+  [#120](https://github.com/ethereum/cevm/pull/120)
 
 
 ## [0.1.1] — 2019-09-11
 
 ### Changed
 
-- [EVMC] upgraded to version 6.3.1 (still ABI-compatible with evmone 0.1.0).
-  [#171](https://github.com/ethereum/evmone/pull/171)
-- Changes to the **evmone-bench** tool backported from 0.2. 
+- [EVMC] upgraded to version 6.3.1 (still ABI-compatible with cevm 0.1.0).
+  [#171](https://github.com/ethereum/cevm/pull/171)
+- Changes to the **cevm-bench** tool backported from 0.2. 
   This allows better performance comparison between 0.1 and 0.2 as both versions
   can run the same set of benchmarks.
-  [#172](https://github.com/ethereum/evmone/pull/172)
+  [#172](https://github.com/ethereum/cevm/pull/172)
 
 
 ## [0.1.0] — 2019-06-19
 
-The first release of the evmone project. 
+The first release of the cevm project. 
 It delivers fully-compatible and high-speed EVM implementation.
 
 ### Added
@@ -1193,31 +1193,31 @@ It delivers fully-compatible and high-speed EVM implementation.
 - Exposes [EVMC] 6 ABI.
 - The [intx 0.2.0](https://github.com/chfast/intx/releases/tag/v0.2.0) library is used for 256-bit precision arithmetic. 
 
-[0.19.0]: https://github.com/ethereum/evmone/releases/tag/v0.19.0
-[0.18.0]: https://github.com/ethereum/evmone/releases/tag/v0.18.0
-[0.17.0]: https://github.com/ethereum/evmone/releases/tag/v0.17.0
-[0.16.0]: https://github.com/ethereum/evmone/releases/tag/v0.16.0
-[0.15.0]: https://github.com/ethereum/evmone/releases/tag/v0.15.0
-[0.14.1]: https://github.com/ethereum/evmone/releases/tag/v0.14.1
-[0.14.0]: https://github.com/ethereum/evmone/releases/tag/v0.14.0
-[0.13.0]: https://github.com/ethereum/evmone/releases/tag/v0.13.0
-[0.12.0]: https://github.com/ethereum/evmone/releases/tag/v0.12.0
-[0.11.0]: https://github.com/ethereum/evmone/releases/tag/v0.11.0
-[0.10.0]: https://github.com/ethereum/evmone/releases/tag/v0.10.0
-[0.9.1]: https://github.com/ethereum/evmone/releases/tag/v0.9.1
-[0.9.0]: https://github.com/ethereum/evmone/releases/tag/v0.9.0
-[0.8.2]: https://github.com/ethereum/evmone/releases/tag/v0.8.2
-[0.8.1]: https://github.com/ethereum/evmone/releases/tag/v0.8.1
-[0.8.0]: https://github.com/ethereum/evmone/releases/tag/v0.8.0
-[0.7.0]: https://github.com/ethereum/evmone/releases/tag/v0.7.0
-[0.6.0]: https://github.com/ethereum/evmone/releases/tag/v0.6.0
-[0.5.0]: https://github.com/ethereum/evmone/releases/tag/v0.5.0
-[0.4.1]: https://github.com/ethereum/evmone/releases/tag/v0.4.1
-[0.4.0]: https://github.com/ethereum/evmone/releases/tag/v0.4.0
-[0.3.0]: https://github.com/ethereum/evmone/releases/tag/v0.3.0
-[0.2.0]: https://github.com/ethereum/evmone/releases/tag/v0.2.0
-[0.1.1]: https://github.com/ethereum/evmone/releases/tag/v0.1.1
-[0.1.0]: https://github.com/ethereum/evmone/releases/tag/v0.1.0
+[0.19.0]: https://github.com/ethereum/cevm/releases/tag/v0.19.0
+[0.18.0]: https://github.com/ethereum/cevm/releases/tag/v0.18.0
+[0.17.0]: https://github.com/ethereum/cevm/releases/tag/v0.17.0
+[0.16.0]: https://github.com/ethereum/cevm/releases/tag/v0.16.0
+[0.15.0]: https://github.com/ethereum/cevm/releases/tag/v0.15.0
+[0.14.1]: https://github.com/ethereum/cevm/releases/tag/v0.14.1
+[0.14.0]: https://github.com/ethereum/cevm/releases/tag/v0.14.0
+[0.13.0]: https://github.com/ethereum/cevm/releases/tag/v0.13.0
+[0.12.0]: https://github.com/ethereum/cevm/releases/tag/v0.12.0
+[0.11.0]: https://github.com/ethereum/cevm/releases/tag/v0.11.0
+[0.10.0]: https://github.com/ethereum/cevm/releases/tag/v0.10.0
+[0.9.1]: https://github.com/ethereum/cevm/releases/tag/v0.9.1
+[0.9.0]: https://github.com/ethereum/cevm/releases/tag/v0.9.0
+[0.8.2]: https://github.com/ethereum/cevm/releases/tag/v0.8.2
+[0.8.1]: https://github.com/ethereum/cevm/releases/tag/v0.8.1
+[0.8.0]: https://github.com/ethereum/cevm/releases/tag/v0.8.0
+[0.7.0]: https://github.com/ethereum/cevm/releases/tag/v0.7.0
+[0.6.0]: https://github.com/ethereum/cevm/releases/tag/v0.6.0
+[0.5.0]: https://github.com/ethereum/cevm/releases/tag/v0.5.0
+[0.4.1]: https://github.com/ethereum/cevm/releases/tag/v0.4.1
+[0.4.0]: https://github.com/ethereum/cevm/releases/tag/v0.4.0
+[0.3.0]: https://github.com/ethereum/cevm/releases/tag/v0.3.0
+[0.2.0]: https://github.com/ethereum/cevm/releases/tag/v0.2.0
+[0.1.1]: https://github.com/ethereum/cevm/releases/tag/v0.1.1
+[0.1.0]: https://github.com/ethereum/cevm/releases/tag/v0.1.0
 
 [EIP-170]: https://eips.ethereum.org/EIPS/eip-170
 [EIP-663]: https://eips.ethereum.org/EIPS/eip-663

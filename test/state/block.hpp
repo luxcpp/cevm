@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -9,7 +9,7 @@
 #include <intx/intx.hpp>
 #include <vector>
 
-namespace evmone::state
+namespace cevm::state
 {
 struct Ommer
 {
@@ -80,4 +80,4 @@ intx::uint256 compute_blob_gas_price(
 uint64_t calc_excess_blob_gas(evmc_revision rev, const BlobParams& blob_params,
     uint64_t parent_blob_gas_used, uint64_t parent_excess_blob_gas, uint64_t parent_base_fee,
     const intx::uint256& parent_blob_base_fee) noexcept;
-}  // namespace evmone::state
+}  // namespace cevm::state

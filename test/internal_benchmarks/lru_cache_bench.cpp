@@ -1,13 +1,13 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2024 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2024 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../state/hash_utils.hpp"
 #include <benchmark/benchmark.h>
-#include <evmone/lru_cache.hpp>
+#include <cevm/lru_cache.hpp>
 #include <memory>
 
-using evmone::hash256;
+using cevm::hash256;
 
 namespace
 {
@@ -15,7 +15,7 @@ template <typename Key, typename Value>
 void lru_cache_not_found(benchmark::State& state)
 {
     const auto capacity = static_cast<size_t>(state.range(0));
-    evmone::LRUCache<Key, Value> cache(capacity);
+    cevm::LRUCache<Key, Value> cache(capacity);
 
     std::vector<Key> keys(capacity + 1, Key{});
     for (size_t i = 0; i < keys.size(); ++i)
@@ -43,7 +43,7 @@ template <typename Key, typename Value>
 void lru_cache_get_same(benchmark::State& state)
 {
     const auto capacity = static_cast<size_t>(state.range(0));
-    evmone::LRUCache<Key, Value> cache(capacity);
+    cevm::LRUCache<Key, Value> cache(capacity);
 
     std::vector<Key> keys(capacity, Key{});
     for (size_t i = 0; i < keys.size(); ++i)
@@ -71,7 +71,7 @@ template <typename Key, typename Value>
 void lru_cache_get(benchmark::State& state)
 {
     const auto capacity = static_cast<size_t>(state.range(0));
-    evmone::LRUCache<Key, Value> cache(capacity);
+    cevm::LRUCache<Key, Value> cache(capacity);
 
     std::vector<Key> data(capacity, Key{});
     for (size_t i = 0; i < data.size(); ++i)
@@ -101,7 +101,7 @@ template <typename Key, typename Value>
 void lru_cache_put_empty(benchmark::State& state)
 {
     const auto capacity = static_cast<size_t>(state.range(0));
-    evmone::LRUCache<Key, Value> cache(capacity);
+    cevm::LRUCache<Key, Value> cache(capacity);
 
     std::vector<Key> data(capacity, Key{});
     for (size_t i = 0; i < data.size(); ++i)
@@ -127,7 +127,7 @@ template <typename Key, typename Value>
 void lru_cache_put_full(benchmark::State& state)
 {
     const auto capacity = static_cast<size_t>(state.range(0));
-    evmone::LRUCache<Key, Value> cache(capacity);
+    cevm::LRUCache<Key, Value> cache(capacity);
 
     std::vector<Key> keys(capacity, Key{});
     for (size_t i = 0; i < keys.size(); ++i)

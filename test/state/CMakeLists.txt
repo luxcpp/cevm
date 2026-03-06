@@ -1,16 +1,16 @@
-# evmone: Fast Ethereum Virtual Machine implementation
-# Copyright 2022 The evmone Authors.
+# cevm: Fast Ethereum Virtual Machine implementation
+# Copyright 2022 The cevm Authors.
 # SPDX-License-Identifier: Apache-2.0
 
 include(FetchContent)
 
-add_library(evmone-state STATIC)
-add_library(evmone::state ALIAS evmone-state)
-target_compile_features(evmone-state PUBLIC cxx_std_20)
-target_link_libraries(evmone-state PUBLIC evmone::precompiles evmc::evmc_cpp PRIVATE evmone)
-target_include_directories(evmone-state PUBLIC ${PROJECT_SOURCE_DIR})
+add_library(cevm-state STATIC)
+add_library(cevm::state ALIAS cevm-state)
+target_compile_features(cevm-state PUBLIC cxx_std_20)
+target_link_libraries(cevm-state PUBLIC cevm::precompiles evmc::evmc_cpp PRIVATE cevm)
+target_include_directories(cevm-state PUBLIC ${PROJECT_SOURCE_DIR})
 target_sources(
-    evmone-state PRIVATE
+    cevm-state PRIVATE
     account.hpp
     blob_params.hpp
     block.hpp
@@ -37,8 +37,8 @@ target_sources(
     transaction.hpp
 )
 
-option(EVMONE_PRECOMPILES_LIBSECP256K1 "Enable precompiles implementations using libsecp256k1 library" OFF)
-if(EVMONE_PRECOMPILES_LIBSECP256K1)
+option(CEVM_PRECOMPILES_LIBSECP256K1 "Enable precompiles implementations using libsecp256k1 library" OFF)
+if(CEVM_PRECOMPILES_LIBSECP256K1)
     FetchContent_Declare(
         libsecp256k1
         URL https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v0.7.1.tar.gz
@@ -74,23 +74,23 @@ if(EVMONE_PRECOMPILES_LIBSECP256K1)
     endforeach()
     add_library(libsecp256k1::secp256k1 ALIAS secp256k1)
 
-    target_link_libraries(evmone-state PRIVATE libsecp256k1::secp256k1)
-    target_compile_definitions(evmone-state PUBLIC EVMONE_PRECOMPILES_LIBSECP256K1=1)
+    target_link_libraries(cevm-state PRIVATE libsecp256k1::secp256k1)
+    target_compile_definitions(cevm-state PUBLIC CEVM_PRECOMPILES_LIBSECP256K1=1)
     target_sources(
-        evmone-state PRIVATE
+        cevm-state PRIVATE
         precompiles_libsecp256k1.hpp
         precompiles_libsecp256k1.cpp
     )
     set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_ORIG})
 endif()
 
-option(EVMONE_PRECOMPILES_GMP "Enable precompiles implementations via the GMP/MPIR library" OFF)
-if(EVMONE_PRECOMPILES_GMP)
+option(CEVM_PRECOMPILES_GMP "Enable precompiles implementations via the GMP/MPIR library" OFF)
+if(CEVM_PRECOMPILES_GMP)
     find_package(GMP REQUIRED)
-    target_link_libraries(evmone-state PRIVATE GMP::gmp)
-    target_compile_definitions(evmone-state PUBLIC EVMONE_PRECOMPILES_GMP=1)
+    target_link_libraries(cevm-state PRIVATE GMP::gmp)
+    target_compile_definitions(cevm-state PUBLIC CEVM_PRECOMPILES_GMP=1)
     target_sources(
-        evmone-state PRIVATE
+        cevm-state PRIVATE
         precompiles_gmp.hpp
         precompiles_gmp.cpp
     )

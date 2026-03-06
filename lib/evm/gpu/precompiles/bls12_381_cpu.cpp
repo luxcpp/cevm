@@ -12,7 +12,7 @@
 
 #include "internal.hpp"
 
-#include <evmone_precompiles/bls.hpp>
+#include <cevm_precompiles/bls.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -57,7 +57,7 @@ Result bls12_g1add_cpu(std::span<const uint8_t> input, uint64_t gas_limit)
         return make_failure(kGas);
 
     std::vector<uint8_t> out(kBlsG1Size);
-    if (!evmone::crypto::bls::g1_add(out.data(), out.data() + 64,
+    if (!cevm::crypto::bls::g1_add(out.data(), out.data() + 64,
             input.data(), input.data() + 64, input.data() + 128, input.data() + 192))
         return make_failure(kGas);
     return make_ok(kGas, std::move(out));
@@ -77,9 +77,9 @@ Result bls12_g1msm_cpu(std::span<const uint8_t> input, uint64_t gas_limit)
 
     std::vector<uint8_t> out(kBlsG1Size);
     const bool ok = (k == 1)
-        ? evmone::crypto::bls::g1_mul(out.data(), out.data() + 64,
+        ? cevm::crypto::bls::g1_mul(out.data(), out.data() + 64,
               input.data(), input.data() + 64, input.data() + 128)
-        : evmone::crypto::bls::g1_msm(out.data(), out.data() + 64,
+        : cevm::crypto::bls::g1_msm(out.data(), out.data() + 64,
               input.data(), input.size());
     if (!ok) return make_failure(gas);
     return make_ok(gas, std::move(out));
@@ -95,7 +95,7 @@ Result bls12_g2add_cpu(std::span<const uint8_t> input, uint64_t gas_limit)
         return make_failure(kGas);
 
     std::vector<uint8_t> out(kBlsG2Size);
-    if (!evmone::crypto::bls::g2_add(out.data(), out.data() + 128,
+    if (!cevm::crypto::bls::g2_add(out.data(), out.data() + 128,
             input.data(), input.data() + 128, input.data() + 256, input.data() + 384))
         return make_failure(kGas);
     return make_ok(kGas, std::move(out));
@@ -115,9 +115,9 @@ Result bls12_g2msm_cpu(std::span<const uint8_t> input, uint64_t gas_limit)
 
     std::vector<uint8_t> out(kBlsG2Size);
     const bool ok = (k == 1)
-        ? evmone::crypto::bls::g2_mul(out.data(), out.data() + 128,
+        ? cevm::crypto::bls::g2_mul(out.data(), out.data() + 128,
               input.data(), input.data() + 128, input.data() + 256)
-        : evmone::crypto::bls::g2_msm(out.data(), out.data() + 128,
+        : cevm::crypto::bls::g2_msm(out.data(), out.data() + 128,
               input.data(), input.size());
     if (!ok) return make_failure(gas);
     return make_ok(gas, std::move(out));
@@ -136,7 +136,7 @@ Result bls12_pairing_cpu(std::span<const uint8_t> input, uint64_t gas_limit)
         return make_oog();
 
     std::vector<uint8_t> out(32, 0);
-    if (!evmone::crypto::bls::pairing_check(out.data(), input.data(), input.size()))
+    if (!cevm::crypto::bls::pairing_check(out.data(), input.data(), input.size()))
         return make_failure(gas);
     return make_ok(gas, std::move(out));
 }
@@ -151,7 +151,7 @@ Result bls12_map_fp_to_g1_cpu(std::span<const uint8_t> input, uint64_t gas_limit
         return make_failure(kGas);
 
     std::vector<uint8_t> out(kBlsG1Size);
-    if (!evmone::crypto::bls::map_fp_to_g1(out.data(), out.data() + 64, input.data()))
+    if (!cevm::crypto::bls::map_fp_to_g1(out.data(), out.data() + 64, input.data()))
         return make_failure(kGas);
     return make_ok(kGas, std::move(out));
 }
@@ -166,7 +166,7 @@ Result bls12_map_fp2_to_g2_cpu(std::span<const uint8_t> input, uint64_t gas_limi
         return make_failure(kGas);
 
     std::vector<uint8_t> out(kBlsG2Size);
-    if (!evmone::crypto::bls::map_fp2_to_g2(out.data(), out.data() + 128, input.data()))
+    if (!cevm::crypto::bls::map_fp2_to_g2(out.data(), out.data() + 128, input.data()))
         return make_failure(kGas);
     return make_ok(kGas, std::move(out));
 }

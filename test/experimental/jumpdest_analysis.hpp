@@ -1,12 +1,12 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2020 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2020 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include <evmc/bytes.hpp>
 #include <vector>
 
-namespace evmone::exp::jda
+namespace cevm::exp::jda
 {
 using evmc::bytes_view;
 
@@ -23,4 +23,4 @@ public:
 
 JumpdestBitset reference(bytes_view code);
 JumpdestBitset speculate_push_data_size(bytes_view code);
-}  // namespace evmone::exp::jda
+}  // namespace cevm::exp::jda

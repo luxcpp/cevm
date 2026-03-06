@@ -1,13 +1,13 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gmock/gmock.h>
 #include <test/utils/blockchaintest.hpp>
 #include <test/utils/utils.hpp>
 
-using namespace evmone;
-using namespace evmone::test;
+using namespace cevm;
+using namespace cevm::test;
 using namespace testing;
 
 TEST(json_loader, blockchain_test)

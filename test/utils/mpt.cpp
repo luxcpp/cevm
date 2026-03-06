@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "mpt.hpp"
@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <cassert>
 
-namespace evmone::state
+namespace cevm::state
 {
 namespace
 {
@@ -204,4 +204,4 @@ void MPT::insert(bytes_view key, bytes&& value)
     return keccak256(m_root->encode());
 }
 
-}  // namespace evmone::state
+}  // namespace cevm::state

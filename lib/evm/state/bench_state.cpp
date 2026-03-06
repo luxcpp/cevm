@@ -22,8 +22,8 @@
 #include <numeric>
 #include <vector>
 
-// Forward-declare evmone factory.
-extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
+// Forward-declare cevm factory.
+extern "C" struct evmc_vm* evmc_create_cevm(void) noexcept;
 
 namespace
 {
@@ -140,7 +140,7 @@ int main(int argc, char* argv[])
     tx_ctx.chain_id = {};
     tx_ctx.chain_id.bytes[31] = 1;
 
-    auto* vm = evmc_create_evmone();
+    auto* vm = evmc_create_cevm();
 
     // --- Full state benchmark ---
     std::vector<double> state_times;

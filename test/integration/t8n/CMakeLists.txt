@@ -1,8 +1,8 @@
-# evmone: Fast Ethereum Virtual Machine implementation
-# Copyright 2024 The evmone Authors.
+# cevm: Fast Ethereum Virtual Machine implementation
+# Copyright 2024 The cevm Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-# Integration tests for evmone-t8n.
+# Integration tests for cevm-t8n.
 
 set(PREFIX ${PREFIX}/t8n)
 
@@ -12,7 +12,7 @@ add_test(
     NAME ${PREFIX}/${TEST_CASE}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/base_fee
     COMMAND
-    evmone-t8n
+    cevm-t8n
     --state.fork London
     --state.reward 0
     --state.chainid 1
@@ -46,7 +46,7 @@ add_test(
     NAME ${PREFIX}/${TEST_CASE}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/base_fee
     COMMAND
-    evmone-t8n
+    cevm-t8n
     --state.fork Berlin
     --state.reward 0
     --state.chainid 1
@@ -76,7 +76,7 @@ add_test(
     NAME ${PREFIX}/${TEST_CASE}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/${TEST_CASE}
     COMMAND
-    evmone-t8n
+    cevm-t8n
     --state.fork Cancun
     --state.reward 0
     --state.chainid 1
@@ -157,7 +157,7 @@ add_test(
     NAME ${PREFIX}/${TEST_CASE}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/${TEST_CASE}
     COMMAND
-    evmone-t8n
+    cevm-t8n
     --state.fork Prague
     --state.reward 0
     --state.chainid 1
@@ -192,7 +192,7 @@ add_test(
     NAME ${PREFIX}/${TEST_CASE}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/${TEST_CASE}
     COMMAND
-    evmone-t8n
+    cevm-t8n
     --state.fork Osaka
     --state.reward 0
     --state.chainid 1

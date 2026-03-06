@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2021 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2021 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
@@ -9,18 +9,18 @@
 #include <vector>
 
 #if defined(_MSC_VER) && !defined(__clang__)
-#define EVMONE_CGOTO_SUPPORTED 0
+#define CEVM_CGOTO_SUPPORTED 0
 #else
-#define EVMONE_CGOTO_SUPPORTED 1
+#define CEVM_CGOTO_SUPPORTED 1
 #endif
 
 namespace evm
 {
-/// The evmone EVMC instance.
+/// The cevm EVMC instance.
 class VM : public evmc_vm
 {
 public:
-    bool cgoto = EVMONE_CGOTO_SUPPORTED;
+    bool cgoto = CEVM_CGOTO_SUPPORTED;
 
 private:
     std::vector<ExecutionState> m_execution_states;

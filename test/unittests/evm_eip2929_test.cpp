@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2021 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2021 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 /// This file contains EVM unit tests for EIP-2929 "Gas cost increases for state access opcodes"
@@ -8,7 +8,7 @@
 #include "evm_fixture.hpp"
 
 using namespace evmc::literals;
-using namespace evmone::test;
+using namespace cevm::test;
 
 TEST_P(evm, eip2929_case1)
 {

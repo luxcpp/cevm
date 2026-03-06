@@ -15,7 +15,7 @@
 ///   CALL, STATICCALL, DELEGATECALL, CALLCODE, CREATE, CREATE2,
 ///   SELFDESTRUCT, GAS-COST-2929 cold/warm bookkeeping. These yield
 ///   ExecStatus::CallNotSupported so the dispatcher routes the tx to
-///   evmone CPU.
+///   cevm CPU.
 
 #pragma once
 
@@ -159,7 +159,7 @@ struct InterpreterResult
 // -- Keccak-256 ---------------------------------------------------------------
 //
 // Header-only port of the same primitive Metal/CUDA use. Keeps evm-kernel a
-// pure interface library — no link dependency on evmone::precompiles.
+// pure interface library — no link dependency on cevm::precompiles.
 
 namespace keccak_internal {
 
@@ -1423,7 +1423,7 @@ struct EvmInterpreter
                     // Cap check (mirrors SSTORE): appending a new slot when
                     // the per-tx transient buffer is full would silently drop
                     // the write. Fail loud so the dispatcher can route to
-                    // evmone CPU.
+                    // cevm CPU.
                     if (transient_count && transient_keys && transient_values)
                     {
                         bool slot_present = false;
@@ -1655,7 +1655,7 @@ struct EvmInterpreter
                 return {ExecStatus::InvalidOpcode, gas_start, 0, 0, refund_counter};
             }
 
-            // -- CALL family -- routed to evmone CPU --------------------------
+            // -- CALL family -- routed to cevm CPU --------------------------
             if (op == 0xf0 || op == 0xf1 || op == 0xf2 || op == 0xf4 ||
                 op == 0xf5 || op == 0xfa || op == 0xff)
             {

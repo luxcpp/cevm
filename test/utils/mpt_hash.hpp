@@ -1,17 +1,17 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include <test/state/hash_utils.hpp>
 #include <span>
 
-namespace evmone::test
+namespace cevm::test
 {
 class TestState;
 }
 
-namespace evmone::state
+namespace cevm::state
 {
 /// The hash of the empty Merkle Patricia Trie.
 ///
@@ -34,4 +34,4 @@ inline hash256 mpt_hash(const T& list)
     return mpt_hash(std::span<const typename T::value_type>{list});
 }
 
-}  // namespace evmone::state
+}  // namespace cevm::state

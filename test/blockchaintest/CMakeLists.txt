@@ -1,11 +1,11 @@
-# evmone: Fast Ethereum Virtual Machine implementation
-# Copyright 2023 The evmone Authors.
+# cevm: Fast Ethereum Virtual Machine implementation
+# Copyright 2023 The cevm Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-add_executable(evmone-blockchaintest)
-target_link_libraries(evmone-blockchaintest PRIVATE evmone::testutils evmone evmone-buildinfo GTest::gtest)
+add_executable(cevm-blockchaintest)
+target_link_libraries(cevm-blockchaintest PRIVATE cevm::testutils cevm cevm-buildinfo GTest::gtest)
 target_sources(
-    evmone-blockchaintest PRIVATE
+    cevm-blockchaintest PRIVATE
     blockchaintest.cpp
     blockchaintest_runner.hpp
     blockchaintest_runner.cpp

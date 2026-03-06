@@ -4,10 +4,10 @@ Source-based code coverage for the targets that make up the parity surface:
 
 | Target              | Role                                                       |
 | ------------------- | ---------------------------------------------------------- |
-| `evm`               | evmone interpreter (CPU baseline + Block-STM worker)       |
+| `evm`               | cevm interpreter (CPU baseline + Block-STM worker)       |
 | `evm-gpu`           | dispatcher + Block-STM scheduler + state hasher            |
 | `evm-kernel-metal`  | Apple Metal kernel host (compiles `evm_kernel.metal`)      |
-| `evm-cuda`          | NVIDIA CUDA kernels + host launchers (when `EVMONE_CUDA`)  |
+| `evm-cuda`          | NVIDIA CUDA kernels + host launchers (when `CEVM_CUDA`)  |
 
 Only these four targets carry coverage instrumentation. Hunter-installed
 dependencies and CMake helpers are excluded so the headline numbers reflect
@@ -47,11 +47,11 @@ do not appear, keeping the report focused on `lib/evm/`.
 
 ## What the targets cover
 
-* `evm` — evmone's `baseline_execution.cpp`, `vm.cpp`, opcode
+* `evm` — cevm's `baseline_execution.cpp`, `vm.cpp`, opcode
   implementations in `instructions_*.cpp`. The parity test drives the CPU
   bytecode path through `kernel::execute_cpu` (in `evm-gpu`), so `evm`'s
   coverage here comes from `precompile_test` and `host_bridge_test` (which
-  invoke evmone via `evmc_create_evmone`).
+  invoke cevm via `evmc_create_cevm`).
 * `evm-gpu` — `gpu_dispatch.cpp` (the public `execute_block` entry point
   and Backend routing), `parallel_engine.cpp` (Block-STM glue),
   `mv_memory.cpp` and `scheduler.cpp` (Block-STM internals), and the kernel
@@ -79,8 +79,8 @@ For the parity targets the goal is:
   modern Apple Silicon.
 * `evm-cuda` — **N/A on macOS** (excluded). On Linux/CUDA hosts the same
   >80% target applies to the host launchers.
-* `evm` — secondary; the evmone unit suite provides its own >95% baseline
-  (see `circle.yml`'s `evmone-coverage` job). The parity-driven number on
+* `evm` — secondary; the cevm unit suite provides its own >95% baseline
+  (see `circle.yml`'s `cevm-coverage` job). The parity-driven number on
   this target is informational.
 
 ## When coverage drops

@@ -1,4 +1,4 @@
-// Copyright (C) 2026, The evmone Authors. All rights reserved.
+// Copyright (C) 2026, The cevm Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file evm_kernel.cu
@@ -14,7 +14,7 @@
 ///
 /// Spec coverage: every Cancun-era opcode in mainnet today is implemented
 /// here EXCEPT the CALL/CREATE family (0xf0/f1/f2/f4/f5/fa/ff). Those return
-/// status=CallNotSupported so the host falls back to CPU evmone.
+/// status=CallNotSupported so the host falls back to CPU cevm.
 ///
 /// Account-state opcodes (BALANCE, EXTCODESIZE, EXTCODEHASH, EXTCODECOPY,
 /// SELFBALANCE) operate as if the address has no code and zero balance — this
@@ -857,7 +857,7 @@ __global__ void evm_execute_kernel(
 
     // EVM Yellow Paper: 1024-deep stack. Solidity-emitted bytecode regularly
     // hits 30-50 entries; the previous 32-cap silently truncated real
-    // contracts and diverged from CPU evmone. nvcc places the array in
+    // contracts and diverged from CPU cevm. nvcc places the array in
     // per-thread local memory, backed by global memory with L1/L2 caching
     // (32 KB/thread).
     uint256 stack[1024];
@@ -1501,7 +1501,7 @@ __global__ void evm_execute_kernel(
             // Cap check before any state mutation: appending a new slot when
             // the per-tx buffer is full would silently corrupt state. Signal
             // INVALID-style (status=Error, all gas consumed). With a host the
-            // dispatcher routes this tx to evmone CPU (which has no cap);
+            // dispatcher routes this tx to cevm CPU (which has no cap);
             // without one the Error is honest — the GPU can't process this tx.
             if (!found && stor_count >= MAX_STORAGE_PER_TX) ERRA();
             original_value_record(orig_storage, orig_count, slot, current);
@@ -1524,9 +1524,9 @@ __global__ void evm_execute_kernel(
             else
             {
                 // Capacity overflow: silently dropping a charged write
-                // would diverge from CPU evmone (no cap there) and corrupt
+                // would diverge from CPU cevm (no cap there) and corrupt
                 // consensus. Status=Error, all gas — the dispatcher routes
-                // a tx that errs here to evmone CPU as the unbounded
+                // a tx that errs here to cevm CPU as the unbounded
                 // fallback so legitimate large-storage txs still execute.
                 if (stor_count >= MAX_STORAGE_PER_TX) ERR();
                 storage[stor_count].key = slot;
@@ -1745,8 +1745,8 @@ __global__ void evm_execute_kernel(
             unsigned long long size = sv.w[0];
             if (!offset_in_bounds(ov, size)) ERR();
             // Output buffer is fixed at MAX_OUTPUT_PER_TX. Silently
-            // truncating would diverge from CPU evmone (no cap there);
-            // the dispatcher routes Error txs to evmone CPU as the
+            // truncating would diverge from CPU cevm (no cap there);
+            // the dispatcher routes Error txs to cevm CPU as the
             // unbounded fallback so legitimate large RETURN payloads
             // still execute correctly.
             if (size > MAX_OUTPUT_PER_TX) ERR();
@@ -1764,7 +1764,7 @@ __global__ void evm_execute_kernel(
             unsigned long long size = sv.w[0];
             if (!offset_in_bounds(ov, size)) ERR();
             // Same cap as RETURN: fail-loud on output > MAX_OUTPUT_PER_TX
-            // so the dispatcher falls back to evmone (no cap) instead of
+            // so the dispatcher falls back to cevm (no cap) instead of
             // silently truncating REVERT data.
             if (size > MAX_OUTPUT_PER_TX) ERR();
             unsigned int off = (unsigned int)ov.w[0];

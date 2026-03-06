@@ -9,7 +9,7 @@
 
 #include "internal.hpp"
 
-#include <evmone_precompiles/modexp.hpp>
+#include <cevm_precompiles/modexp.hpp>
 
 #include <intx/intx.hpp>
 
@@ -108,7 +108,7 @@ Result modexp_cpu(std::span<const uint8_t> input, uint64_t gas_limit)
     if (std::all_of(mod.begin(), mod.end(), [](uint8_t b) { return b == 0; }))
         return make_ok(gas, std::move(out));
 
-    evmone::crypto::modexp(base, exp, mod, out.data());
+    cevm::crypto::modexp(base, exp, mod, out.data());
     return make_ok(gas, std::move(out));
 }
 }  // namespace evm::gpu::precompile

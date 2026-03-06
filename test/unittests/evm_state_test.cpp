@@ -1,15 +1,15 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2019 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2019 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 /// This file contains EVM unit tests that access or modify information
 /// about accounts, without storage.
 
 #include "evm_fixture.hpp"
-#include <evmone/instructions_traits.hpp>
+#include <cevm/instructions_traits.hpp>
 
 using namespace evmc::literals;
-using namespace evmone::test;
+using namespace cevm::test;
 
 TEST_P(evm, code)
 {
@@ -194,7 +194,7 @@ TEST_P(evm, log_data_cost)
         EXPECT_EQ(host.recorded_logs.size(), 0);
         execute(cost - 1, code);
         EXPECT_EQ(result.status_code, EVMC_OUT_OF_GAS);
-        EXPECT_EQ(host.recorded_logs.size(), 0) << evmone::instr::traits[op].name;
+        EXPECT_EQ(host.recorded_logs.size(), 0) << cevm::instr::traits[op].name;
         host.recorded_logs.clear();
     }
 }

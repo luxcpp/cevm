@@ -112,7 +112,7 @@ CGpuBlockResult gpu_execute_block(
 // Extended block execution: returns state root + per-tx status.
 // num_threads=0 selects hardware concurrency for CPU_PARALLEL.
 // revision is an evmc_revision value (e.g. EVM_GPU_REV_CANCUN). It governs
-// the evmone fallback path; kernel CPU/GPU paths implement Cancun
+// the cevm fallback path; kernel CPU/GPU paths implement Cancun
 // unconditionally and ignore this field. Pass EVM_GPU_REV_DEFAULT for the
 // production default (Cancun).
 CGpuBlockResultV2 gpu_execute_block_v2(

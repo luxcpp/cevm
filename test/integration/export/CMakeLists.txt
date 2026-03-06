@@ -1,8 +1,8 @@
-# evmone: Fast Ethereum Virtual Machine implementation
-# Copyright 2023 The evmone Authors.
+# cevm: Fast Ethereum Virtual Machine implementation
+# Copyright 2023 The cevm Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-# Commands and tests for exporting evmone's tests to JSON formats
+# Commands and tests for exporting cevm's tests to JSON formats
 
 set(PREFIX ${PREFIX}/export)
 set(EXPORT_DIR fixtures)
@@ -19,11 +19,11 @@ set_tests_properties(
 
 add_test(
     NAME ${PREFIX}/export_state_tests
-    COMMAND evmone-unittests --gtest_filter=state_transition.*
+    COMMAND cevm-unittests --gtest_filter=state_transition.*
 )
 set_tests_properties(
     ${PREFIX}/export_state_tests PROPERTIES
-    ENVIRONMENT "EVMONE_EXPORT_TESTS=${EXPORT_DIR}/state_tests;LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/integration-%p.profraw"
+    ENVIRONMENT "CEVM_EXPORT_TESTS=${EXPORT_DIR}/state_tests;LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/integration-%p.profraw"
     FIXTURES_SETUP EXPORT_STATE_TESTS
     FIXTURES_REQUIRED EXPORT_PREPARATION
 )
@@ -31,7 +31,7 @@ set_tests_properties(
 add_test(
     NAME ${PREFIX}/execute_exported_state_tests
     # TODO: Broken exported tests are filtered out.
-    COMMAND evmone-statetest ${EXPORT_DIR}/state_tests --gtest_filter=-*block.*
+    COMMAND cevm-statetest ${EXPORT_DIR}/state_tests --gtest_filter=-*block.*
 )
 set_tests_properties(
     ${PREFIX}/execute_exported_state_tests PROPERTIES

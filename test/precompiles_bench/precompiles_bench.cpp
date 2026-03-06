@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2024 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2024 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../utils/utils.hpp"
@@ -11,18 +11,18 @@
 #include <memory>
 #include <span>
 
-#ifdef EVMONE_PRECOMPILES_LIBSECP256K1
+#ifdef CEVM_PRECOMPILES_LIBSECP256K1
 #include <state/precompiles_libsecp256k1.hpp>
 #endif
 
-#ifdef EVMONE_PRECOMPILES_GMP
+#ifdef CEVM_PRECOMPILES_GMP
 #include <state/precompiles_gmp.hpp>
 #endif
 
 namespace
 {
-using namespace evmone::state;
-using namespace evmone::test;
+using namespace cevm::state;
+using namespace cevm::test;
 
 /// The revision used for the precompile benchmarks.
 constexpr auto REV = EVMC_OSAKA;
@@ -306,8 +306,8 @@ void modexp(benchmark::State& state)
         ->Args({128 * 8, 8, 2048})                \
         ->Args({128 * 8, 4096, 2048})             \
         ->Args({128 * 8, 8190, 2048})
-BENCHMARK(modexp<expmod_execute_evmone>) MODEXP_ARGS;
-#ifdef EVMONE_PRECOMPILES_GMP
+BENCHMARK(modexp<expmod_execute_cevm>) MODEXP_ARGS;
+#ifdef CEVM_PRECOMPILES_GMP
 BENCHMARK(modexp<expmod_execute_gmp>) MODEXP_ARGS;
 #endif
 #undef MODEXP_ARGS
@@ -316,9 +316,9 @@ BENCHMARK_TEMPLATE(precompile, PrecompileId::identity, identity_execute);
 
 namespace bench_ecrecovery
 {
-constexpr auto evmone = ecrecover_execute_evmone;
-BENCHMARK_TEMPLATE(precompile, PrecompileId::ecrecover, evmone);
-#ifdef EVMONE_PRECOMPILES_LIBSECP256K1
+constexpr auto cevm = ecrecover_execute_cevm;
+BENCHMARK_TEMPLATE(precompile, PrecompileId::ecrecover, cevm);
+#ifdef CEVM_PRECOMPILES_LIBSECP256K1
 constexpr auto libsecp256k1 = ecrecover_execute_libsecp256k1;
 BENCHMARK_TEMPLATE(precompile, PrecompileId::ecrecover, libsecp256k1);
 #endif
@@ -326,9 +326,9 @@ BENCHMARK_TEMPLATE(precompile, PrecompileId::ecrecover, libsecp256k1);
 
 namespace bench_expmod
 {
-constexpr auto evmone = expmod_execute_evmone;
-BENCHMARK(precompile<PrecompileId::expmod, evmone>);
-#ifdef EVMONE_PRECOMPILES_GMP
+constexpr auto cevm = expmod_execute_cevm;
+BENCHMARK(precompile<PrecompileId::expmod, cevm>);
+#ifdef CEVM_PRECOMPILES_GMP
 constexpr auto gmp = expmod_execute_gmp;
 BENCHMARK(precompile<PrecompileId::expmod, gmp>);
 #endif
@@ -354,16 +354,16 @@ BENCHMARK_TEMPLATE(precompile, PrecompileId::ecpairing, evmmax_cpp);
 
 namespace bench_kzg
 {
-constexpr auto evmone_blst = point_evaluation_execute;
-BENCHMARK_TEMPLATE(precompile, PrecompileId::point_evaluation, evmone_blst);
+constexpr auto cevm_blst = point_evaluation_execute;
+BENCHMARK_TEMPLATE(precompile, PrecompileId::point_evaluation, cevm_blst);
 }  // namespace bench_kzg
 
 }  // namespace
 
 namespace bench_p256verify
 {
-constexpr auto evmone_cpp = p256verify_execute;
-BENCHMARK_TEMPLATE(precompile, PrecompileId::p256verify, evmone_cpp);
+constexpr auto cevm_cpp = p256verify_execute;
+BENCHMARK_TEMPLATE(precompile, PrecompileId::p256verify, cevm_cpp);
 }  // namespace bench_p256verify
 
 BENCHMARK_MAIN();

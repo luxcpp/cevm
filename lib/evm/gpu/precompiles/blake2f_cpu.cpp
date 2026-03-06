@@ -6,7 +6,7 @@
 
 #include "internal.hpp"
 
-#include <evmone_precompiles/blake2b.hpp>
+#include <cevm_precompiles/blake2b.hpp>
 
 #include <intx/intx.hpp>
 
@@ -40,7 +40,7 @@ Result blake2f_cpu(std::span<const uint8_t> input, uint64_t gas_limit)
     if (f != 0 && f != 1)
         return make_failure(gas);
 
-    evmone::crypto::blake2b_compress(rounds, h, m, t, f != 0);
+    cevm::crypto::blake2b_compress(rounds, h, m, t, f != 0);
 
     std::vector<uint8_t> out(64);
     std::memcpy(out.data(), h, sizeof(h));

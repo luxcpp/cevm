@@ -1,4 +1,4 @@
-// Copyright (C) 2026, The evmone Authors. All rights reserved.
+// Copyright (C) 2026, The cevm Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "parallel_engine.hpp"
@@ -8,8 +8,8 @@
 
 #include <evmc/evmc.hpp>
 
-// Forward-declare the evmone factory. Defined in vm.cpp.
-extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
+// Forward-declare the cevm factory. Defined in vm.cpp.
+extern "C" struct evmc_vm* evmc_create_cevm(void) noexcept;
 
 #include <chrono>
 #include <cstring>
@@ -20,7 +20,7 @@ extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
 namespace evm::gpu
 {
 
-/// Execute a single transaction through evmone.
+/// Execute a single transaction through cevm.
 static evmc_result execute_one(evmc_vm* vm, evmc::Host& host,
                                evmc_revision rev, const EvmTransaction& tx)
 {
@@ -67,7 +67,7 @@ EvmTransaction to_evm_transaction(const Transaction& tx)
     return etx;
 }
 
-BlockResult execute_sequential_evmone(
+BlockResult execute_sequential_cevm(
     const std::vector<EvmTransaction>& txs,
     evmc::Host& base_host,
     evmc_revision rev)
@@ -75,7 +75,7 @@ BlockResult execute_sequential_evmone(
     BlockResult result;
     result.gas_used.resize(txs.size());
 
-    auto* vm = evmc_create_evmone();
+    auto* vm = evmc_create_cevm();
 
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -98,7 +98,7 @@ BlockResult execute_sequential_evmone(
     return result;
 }
 
-BlockResult execute_parallel_evmone(
+BlockResult execute_parallel_cevm(
     const std::vector<EvmTransaction>& txs,
     evmc::Host& base_host,
     evmc_revision rev,
@@ -125,9 +125,9 @@ BlockResult execute_parallel_evmone(
     for (uint32_t w = 0; w < num_threads; ++w)
     {
         workers.emplace_back([&]() {
-            // Each worker gets its own VM instance (evmone VM is not thread-safe
+            // Each worker gets its own VM instance (cevm VM is not thread-safe
             // because it pools ExecutionState objects).
-            auto* vm = evmc_create_evmone();
+            auto* vm = evmc_create_cevm();
 
             while (true)
             {
@@ -146,7 +146,7 @@ BlockResult execute_parallel_evmone(
                     // Create a ParallelHost for this transaction
                     ParallelHost phost(base_host, mv_memory, idx, task.incarnation);
 
-                    // Execute through evmone
+                    // Execute through cevm
                     auto r = execute_one(vm, phost, rev, txs[idx]);
 
                     const auto gas_consumed =

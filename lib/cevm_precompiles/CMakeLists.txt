@@ -1,0 +1,42 @@
+# cevm: Fast Ethereum Virtual Machine implementation
+# Copyright 2023 The cevm Authors.
+# SPDX-License-Identifier: Apache-2.0
+
+include(blst)
+
+add_library(cevm_precompiles STATIC)
+add_library(cevm::precompiles ALIAS cevm_precompiles)
+target_link_libraries(cevm_precompiles PUBLIC evmc::evmc_cpp PRIVATE cevm::evmmax blst::blst)
+target_include_directories(cevm_precompiles INTERFACE ..)
+target_sources(
+    cevm_precompiles PRIVATE
+    blake2b.hpp
+    blake2b.cpp
+    bls.hpp
+    bls.cpp
+    bn254.hpp
+    bn254.cpp
+    ecc.hpp
+    hash_types.h
+    keccak.h
+    keccak.hpp
+    keccak.c
+    pairing/bn254/fields.hpp
+    pairing/bn254/pairing.cpp
+    pairing/bn254/utils.hpp
+    pairing/field_template.hpp
+    modexp.hpp
+    modexp.cpp
+    mulmod.hpp
+    mulmod.cpp
+    ripemd160.hpp
+    ripemd160.cpp
+    secp256k1.hpp
+    secp256k1.cpp
+    secp256r1.hpp
+    secp256r1.cpp
+    sha256.hpp
+    sha256.cpp
+    kzg.hpp
+    kzg.cpp
+)

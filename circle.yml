@@ -160,14 +160,14 @@ commands:
           working_directory: ~/build
           command: >
             LLVM_PROFILE_FILE=state_tests.profraw
-            bin/evmone-statetest ~/spec-tests/fixtures/state_tests
+            bin/cevm-statetest ~/spec-tests/fixtures/state_tests
       - run:
           name: "Execution spec tests (develop, blockchain_tests)"
           # Tests for in-development EVM revision currently passing.
           working_directory: ~/build
           command: >
             LLVM_PROFILE_FILE=blockchain_tests.profraw
-            bin/evmone-blockchaintest ~/spec-tests/fixtures/blockchain_tests
+            bin/cevm-blockchaintest ~/spec-tests/fixtures/blockchain_tests
 
   build:
     description: "Build"
@@ -203,7 +203,7 @@ commands:
             if [ "$TOOLCHAIN" ]; then
               export toolchain_option="-DTOOLCHAIN=$TOOLCHAIN"
             fi
-            cmake ../project $toolchain_option -DCMAKE_INSTALL_PREFIX=~/install -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DCMAKE_COMPILE_WARNING_AS_ERROR=TRUE -DEVMONE_TESTING=ON $CMAKE_OPTIONS
+            cmake ../project $toolchain_option -DCMAKE_INSTALL_PREFIX=~/install -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DCMAKE_COMPILE_WARNING_AS_ERROR=TRUE -DCEVM_TESTING=ON $CMAKE_OPTIONS
       - save_cache:
           name: "Save Hunter cache"
           key: *hunter-cache-key
@@ -223,7 +223,7 @@ commands:
           name: "Test"
           shell: bash
           working_directory: ~/build
-          command: ctest -R ${TESTS_FILTER:-'.*'} --schedule-random --output-on-failure --parallel $CMAKE_BUILD_PARALLEL_LEVEL --output-junit ~/test_results/evmone.xml
+          command: ctest -R ${TESTS_FILTER:-'.*'} --schedule-random --output-on-failure --parallel $CMAKE_BUILD_PARALLEL_LEVEL --output-junit ~/test_results/cevm.xml
       - store_test_results:
           path: ~/test_results
 
@@ -249,7 +249,7 @@ commands:
         default: ""
       binaries:
         type: string
-        default: evmone-unittests evmone-statetest evmone-blockchaintest evmone-t8n
+        default: cevm-unittests cevm-statetest cevm-blockchaintest cevm-t8n
     steps:
       - run:
           name: "Collect coverage data (clang)"
@@ -257,11 +257,11 @@ commands:
           command: |
             IGNORE_FILENAME_REGEX='include/evmc<<#parameters.ignore_filename_regex>>|<<parameters.ignore_filename_regex>><</parameters.ignore_filename_regex>>'
             OBJECTS=$(printf -- '-object bin/%s ' <<parameters.binaries>>)
-            ARGS="lib/libevmone.so $OBJECTS -Xdemangler llvm-cxxfilt -instr-profile=evmone.profdata -ignore-filename-regex=$IGNORE_FILENAME_REGEX"
+            ARGS="lib/libcevm.so $OBJECTS -Xdemangler llvm-cxxfilt -instr-profile=cevm.profdata -ignore-filename-regex=$IGNORE_FILENAME_REGEX"
 
             rm -rf ~/coverage
             mkdir ~/coverage
-            llvm-profdata merge -sparse *.profraw -o evmone.profdata
+            llvm-profdata merge -sparse *.profraw -o cevm.profdata
             find . -name '*.profraw' -delete
             
             llvm-cov export -format=lcov $ARGS -skip-expansions > ~/coverage/coverage.lcov
@@ -293,23 +293,23 @@ commands:
           name: "Build Package"
           shell: bash
           working_directory: ~/package
-          command: cmake --build ~/build --target package && mv ~/build/evmone-*.* .
+          command: cmake --build ~/build --target package && mv ~/build/cevm-*.* .
       - store_artifacts:
           path: ~/package
           destination: package
       - persist_to_workspace:
           root: ~/package
           paths:
-            - evmone-*
+            - cevm-*
 
   unpack_package:
     steps:
       - attach_workspace:
           at: ~/package
       - run:
-          name: "Unpack evmone"
+          name: "Unpack cevm"
           working_directory: ~/package
-          command: tar xz < evmone*.tar.gz
+          command: tar xz < cevm*.tar.gz
 
 jobs:
 
@@ -326,7 +326,7 @@ jobs:
       - run:
           name: "Check spelling"
           command: |
-            codespell --quiet-level=4 --ignore-words=.codespell-ignore --skip=./lib/evmone_precompiles/keccak.c
+            codespell --quiet-level=4 --ignore-words=.codespell-ignore --skip=./lib/cevm_precompiles/keccak.c
 
   release-linux:
     executor: linux-gcc-latest
@@ -338,7 +338,7 @@ jobs:
       - run:
           name: "Export JSON tests"
           working_directory: ~/package
-          command: tar -C ~/build/test/integration/export -cz fixtures > evmone-tests.tar.gz
+          command: tar -C ~/build/test/integration/export -cz fixtures > cevm-tests.tar.gz
       - package
 
   release-windows:
@@ -361,7 +361,7 @@ jobs:
             $ErrorActionPreference = "Stop"
             & 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1' -Arch amd64
             which cmake
-            cmake -S . -B ~/build -G Ninja -DCMAKE_INSTALL_PREFIX=C:\install -DEVMONE_TESTING=ON
+            cmake -S . -B ~/build -G Ninja -DCMAKE_INSTALL_PREFIX=C:\install -DCEVM_TESTING=ON
       - run:
           name: 'Build'
           shell: powershell
@@ -414,8 +414,8 @@ jobs:
       - build
       - run_execution_spec_tests
       - collect_coverage_clang:
-          ignore_filename_regex: lib/evmone/(advanced|cpu_check|eof|lru_cache|tracing|vm)|test/(experimental|t8n|unittests|utils)
-          binaries: evmone-statetest evmone-blockchaintest
+          ignore_filename_regex: lib/cevm/(advanced|cpu_check|eof|lru_cache|tracing|vm)|test/(experimental|t8n|unittests|utils)
+          binaries: cevm-statetest cevm-blockchaintest
       - upload_coverage:
           flags: eest-develop
 
@@ -441,7 +441,7 @@ jobs:
             stExample.*:\
             stTransactionTest.*"
           command: >
-            bin/evmone-statetest
+            bin/cevm-statetest
             --gtest_filter=$GTEST_FILTER
             ~/tests/LegacyTests/Cancun/GeneralStateTests
             ~/tests/LegacyTests/Constantinople/GeneralStateTests
@@ -449,7 +449,7 @@ jobs:
           name: "Blockchain tests (ValidBlocks)"
           working_directory: ~/build
           command: >
-            bin/evmone-blockchaintest
+            bin/cevm-blockchaintest
             --gtest_filter='-bcValidBlockTest.SimpleTx3LowS'
             ~/tests/BlockchainTests/ValidBlocks
             ~/tests/LegacyTests/Cancun/BlockchainTests/ValidBlocks
@@ -457,7 +457,7 @@ jobs:
           name: "Blockchain tests (InvalidBlocks)"
           working_directory: ~/build
           command: >
-            bin/evmone-blockchaintest
+            bin/cevm-blockchaintest
             --gtest_filter='-bc4895-withdrawals.shanghaiWithoutWithdrawalsRLP:bcInvalidHeaderTest.*:bcUncleHeaderValidity.gasLimitTooLowExactBound'
             ~/tests/BlockchainTests/InvalidBlocks
             ~/tests/LegacyTests/Cancun/BlockchainTests/InvalidBlocks
@@ -469,7 +469,7 @@ jobs:
     executor: linux-clang-latest
     environment:
       BUILD_TYPE: Release
-      CMAKE_OPTIONS: -DCOVERAGE=1 -DEVMONE_PRECOMPILES_LIBSECP256K1=1
+      CMAKE_OPTIONS: -DCOVERAGE=1 -DCEVM_PRECOMPILES_LIBSECP256K1=1
     steps:
       - build
       - download_execution_spec_tests:
@@ -479,7 +479,7 @@ jobs:
           name: "Execution spec tests (state_tests)"
           working_directory: ~/build
           command: >
-            bin/evmone-statetest ~/spec-tests/fixtures/state_tests
+            bin/cevm-statetest ~/spec-tests/fixtures/state_tests
       - collect_coverage_clang
       - upload_coverage:
           flags: eest-libsecp256k1
@@ -488,7 +488,7 @@ jobs:
     executor: linux-clang-latest
     environment:
       BUILD_TYPE: Release
-      CMAKE_OPTIONS: -DCOVERAGE=1 -DEVMONE_PRECOMPILES_GMP=1
+      CMAKE_OPTIONS: -DCOVERAGE=1 -DCEVM_PRECOMPILES_GMP=1
     steps:
       - run:
           name: "Install GMP"
@@ -501,7 +501,7 @@ jobs:
           name: "Execution spec tests (state_tests)"
           working_directory: ~/build
           command: >
-            bin/evmone-statetest ~/spec-tests/fixtures/state_tests
+            bin/cevm-statetest ~/spec-tests/fixtures/state_tests
       - collect_coverage_clang
       - upload_coverage:
           flags: eest-develop-gmp
@@ -515,7 +515,7 @@ jobs:
   clang-min:
     executor: linux-clang-min
     environment:
-      CMAKE_OPTIONS=-DEVMONE_X86_64_ARCH_LEVEL=3
+      CMAKE_OPTIONS=-DCEVM_X86_64_ARCH_LEVEL=3
     steps:
       - build
       - test
@@ -531,7 +531,7 @@ jobs:
       - run:
           name: "memcheck"
           working_directory: ~/build
-          command: valgrind --vgdb=no --error-exitcode=99 bin/evmone-unittests
+          command: valgrind --vgdb=no --error-exitcode=99 bin/cevm-unittests
 
   gcc-32bit:
     executor: linux-gcc-multilib
@@ -575,23 +575,23 @@ jobs:
       - test
       - collect_coverage_clang
       - upload_coverage:
-          flags: evmone-unittests
+          flags: cevm-unittests
 
   fuzzing:
     executor: linux-clang-selfhosted
     environment:
       CMAKE_GENERATOR: Ninja
-      CMAKE_OPTIONS: -DASSERTIONS=ON -DEVMONE_FUZZING=ON
+      CMAKE_OPTIONS: -DASSERTIONS=ON -DCEVM_FUZZING=ON
     steps:
       - build
       - restore_cache:
           name: "Restore fuzzing corpus"
           key: fuzzing-corpus
       - run:
-          name: "Run evmone-fuzzer"
+          name: "Run cevm-fuzzer"
           working_directory: ~/build
           command: |
-            bin/evmone-fuzzer -runs=5000000 -fork=$CMAKE_BUILD_PARALLEL_LEVEL -fork_corpus_groups=1 ~/corpus -create_missing_dirs=1 -max_len=100 -entropic_scale_per_exec_time=1 2>&1 | sed '/NEW_FUNC/d'
+            bin/cevm-fuzzer -runs=5000000 -fork=$CMAKE_BUILD_PARALLEL_LEVEL -fork_corpus_groups=1 ~/corpus -create_missing_dirs=1 -max_len=100 -entropic_scale_per_exec_time=1 2>&1 | sed '/NEW_FUNC/d'
       - save_cache:
           name: "Save fuzzing corpus"
           key: fuzzing-corpus-{{epoch}}
@@ -639,13 +639,13 @@ jobs:
           name: "Check qemu"
           command: qemu-x86_64 --version
       - run:
-          name: "Check evmone.so"
+          name: "Check cevm.so"
           working_directory: ~/build
-          command: (! qemu-x86_64 bin/evmc run --vm ./lib/libevmone.so,trace 6000 2>&1) | grep "CPU does not support"
+          command: (! qemu-x86_64 bin/evmc run --vm ./lib/libcevm.so,trace 6000 2>&1) | grep "CPU does not support"
       - run:
           name: "Check unittests"
           working_directory: ~/build
-          command: (! qemu-x86_64 bin/evmone-unittests 2>&1) | grep "CPU does not support"
+          command: (! qemu-x86_64 bin/cevm-unittests 2>&1) | grep "CPU does not support"
 
   riscv32:
     executor: linux-gcc-latest
@@ -662,7 +662,7 @@ jobs:
 
 workflows:
   version: 2
-  evmone:
+  cevm:
     jobs:
       - lint
       - clang-tidy

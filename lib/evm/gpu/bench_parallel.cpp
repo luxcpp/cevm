@@ -1,4 +1,4 @@
-// Copyright (C) 2026, The evmone Authors. All rights reserved.
+// Copyright (C) 2026, The cevm Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file bench_parallel.cpp
@@ -227,11 +227,11 @@ int main(int argc, char* argv[])
         auto txs = generate_transfers(num_txs);
         BenchHost host;
 
-        auto r_seq = evm::gpu::execute_sequential_evmone(txs, host, EVMC_SHANGHAI);
-        print_result("Sequential evmone", r_seq, num_txs);
+        auto r_seq = evm::gpu::execute_sequential_cevm(txs, host, EVMC_SHANGHAI);
+        print_result("Sequential cevm", r_seq, num_txs);
 
-        auto r_par = evm::gpu::execute_parallel_evmone(txs, host, EVMC_SHANGHAI, 0);
-        print_result("Parallel Block-STM + evmone", r_par, num_txs);
+        auto r_par = evm::gpu::execute_parallel_cevm(txs, host, EVMC_SHANGHAI, 0);
+        print_result("Parallel Block-STM + cevm", r_par, num_txs);
 
         if (r_seq.execution_time_ms > 0)
         {

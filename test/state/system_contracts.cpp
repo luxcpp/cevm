@@ -1,12 +1,12 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "system_contracts.hpp"
 #include "host.hpp"
 #include "state_view.hpp"
 
-namespace evmone::state
+namespace cevm::state
 {
 namespace
 {
@@ -128,4 +128,4 @@ std::optional<RequestsResult> system_call_block_end(const StateView& state_view,
     }
     return RequestsResult{state.build_diff(rev), requests};
 }
-}  // namespace evmone::state
+}  // namespace cevm::state

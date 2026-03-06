@@ -40,8 +40,8 @@ jobs:
       - name: Configure
         run: |
           cmake -B build \
-            -DEVMONE_CUDA=ON \
-            -DEVMONE_TESTING=OFF \
+            -DCEVM_CUDA=ON \
+            -DCEVM_TESTING=OFF \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_ARCHITECTURES="80;90"
 
@@ -91,7 +91,7 @@ jobs:
       - name: Build luxcpp/evm with CUDA
         run: |
           cd luxcpp-evm
-          cmake -B build -DEVMONE_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
+          cmake -B build -DCEVM_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_ARCHITECTURES="80;90"
           cmake --build build --target evm-gpu evm-cuda evm-kernel -j
 

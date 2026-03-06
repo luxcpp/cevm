@@ -1,4 +1,4 @@
-// Copyright (C) 2026, The evmone Authors. All rights reserved.
+// Copyright (C) 2026, The cevm Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file evm_kernel_host.cpp

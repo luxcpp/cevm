@@ -1,13 +1,13 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2024 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2024 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <evmc/hex.hpp>
-#include <evmone_precompiles/ripemd160.hpp>
+#include <cevm_precompiles/ripemd160.hpp>
 #include <gtest/gtest.h>
 #include <span>
 
-using evmone::crypto::ripemd160;
+using cevm::crypto::ripemd160;
 
 static std::string hex(std::span<const std::byte> x)
 {

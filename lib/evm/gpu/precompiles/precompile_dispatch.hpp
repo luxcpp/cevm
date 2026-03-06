@@ -6,28 +6,28 @@
 ///
 /// Routes EVM precompile calls (addresses 0x01..0x11) to GPU primitives
 /// when an accelerated implementation exists, falling back to the CPU path
-/// (evmone_precompiles) otherwise. Output bytes and gas accounting match
-/// evmone exactly so this can substitute for the CPU dispatcher with no
+/// (cevm_precompiles) otherwise. Output bytes and gas accounting match
+/// cevm exactly so this can substitute for the CPU dispatcher with no
 /// observable consensus difference.
 ///
 /// Backends per precompile:
 ///   0x01 ECRECOVER          metal/cuda (via secp256k1_recover.{cu,metal})
-///   0x02 SHA256             cpu        (evmone)
-///   0x03 RIPEMD160          cpu        (evmone)
+///   0x02 SHA256             cpu        (cevm)
+///   0x03 RIPEMD160          cpu        (cevm)
 ///   0x04 IDENTITY           cpu        (memcpy)
-///   0x05 MODEXP             cpu        (evmone)
-///   0x06 BN256_ADD          cpu        (evmone)
-///   0x07 BN256_MUL          cpu        (evmone)
-///   0x08 BN256_PAIRING      cpu        (evmone)
-///   0x09 BLAKE2F            cpu        (evmone)
+///   0x05 MODEXP             cpu        (cevm)
+///   0x06 BN256_ADD          cpu        (cevm)
+///   0x07 BN256_MUL          cpu        (cevm)
+///   0x08 BN256_PAIRING      cpu        (cevm)
+///   0x09 BLAKE2F            cpu        (cevm)
 ///   0x0a POINT_EVALUATION   metal/cuda (via bls12_381 + cpu kzg verify)
 ///   0x0b BLS12_G1ADD        metal/cuda (via bls12_381.{cu,metal})
 ///   0x0c BLS12_G1MSM        metal/cuda
 ///   0x0d BLS12_G2ADD        metal/cuda
 ///   0x0e BLS12_G2MSM        metal/cuda
 ///   0x0f BLS12_PAIRING      metal/cuda
-///   0x10 BLS12_MAP_FP_G1    cpu        (evmone, no GPU primitive)
-///   0x11 BLS12_MAP_FP2_G2   cpu        (evmone)
+///   0x10 BLS12_MAP_FP_G1    cpu        (cevm, no GPU primitive)
+///   0x11 BLS12_MAP_FP2_G2   cpu        (cevm)
 ///
 /// Usage:
 ///   auto disp = PrecompileDispatcher::create();
@@ -71,7 +71,7 @@ struct Result
 enum class Backend : uint8_t
 {
     None = 0,  ///< no implementation registered (precompile not handled).
-    Cpu  = 1,  ///< CPU implementation (evmone).
+    Cpu  = 1,  ///< CPU implementation (cevm).
     Metal= 2,  ///< Apple Metal GPU.
     Cuda = 3,  ///< NVIDIA CUDA GPU.
 };

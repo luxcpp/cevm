@@ -10,8 +10,8 @@
 //   - gas_used  (against the EIP-cited cost — exact integer)
 //   - output    (32-byte big-endian word from MSTORE+RETURN)
 //
-// We compare to evmone wherever the no-host execution model agrees:
-//   - For pure-bytecode tests (no state lookups), evmone with EVMC_CANCUN
+// We compare to cevm wherever the no-host execution model agrees:
+//   - For pure-bytecode tests (no state lookups), cevm with EVMC_CANCUN
 //     returns the same gas/output and we cross-check.
 //   - For host-dependent opcodes (BALANCE / EXTCODE* / BLOBHASH / etc.) the
 //     CPU interpreter returns the spec-mandated "no host" defaults
@@ -27,7 +27,7 @@
 
 #include <evmc/evmc.hpp>
 #include <evmc/mocked_host.hpp>
-#include <evmone/evmone.h>
+#include <cevm/cevm.h>
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -92,22 +92,22 @@ bool eq_bytes(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b)
            (a.empty() || std::memcmp(a.data(), b.data(), a.size()) == 0);
 }
 
-/// Run the same code through evmone with EVMC_CANCUN as the ground truth.
+/// Run the same code through cevm with EVMC_CANCUN as the ground truth.
 /// Returns (status, gas_used, output) for direct comparison with
 /// `kernel::execute_cpu`. Uses evmc::MockedHost with no preinstalled
 /// accounts — i.e. the same "no host state" world the kernel CPU sees.
-struct EvmoneResult
+struct CevmResult
 {
     evmc_status_code status;
     int64_t gas_used;
     std::vector<uint8_t> output;
 };
 
-EvmoneResult evmone_run(const std::vector<uint8_t>& code,
+CevmResult cevm_run(const std::vector<uint8_t>& code,
                         const std::vector<uint8_t>& input = {},
                         int64_t gas = 1'000'000)
 {
-    auto* vm = evmc_create_evmone();
+    auto* vm = evmc_create_cevm();
 
     evmc::MockedHost host;
     evmc_message msg{};
@@ -122,7 +122,7 @@ EvmoneResult evmone_run(const std::vector<uint8_t>& code,
     auto r = vm->execute(vm, &iface, ctx, EVMC_CANCUN, &msg,
                          code.empty() ? nullptr : code.data(), code.size());
 
-    EvmoneResult out;
+    CevmResult out;
     out.status   = r.status_code;
     out.gas_used = gas - r.gas_left;
     if (r.output_size > 0 && r.output_data != nullptr)
@@ -132,13 +132,13 @@ EvmoneResult evmone_run(const std::vector<uint8_t>& code,
     return out;
 }
 
-/// Assertion macro for "kernel CPU and evmone agree byte-for-byte".
-#define EXPECT_AGREE_WITH_EVMONE(CODE, GAS_LIMIT)                              \
+/// Assertion macro for "kernel CPU and cevm agree byte-for-byte".
+#define EXPECT_AGREE_WITH_CEVM(CODE, GAS_LIMIT)                              \
     do {                                                                       \
         auto cpu = execute_cpu(make_tx((CODE), {}, (GAS_LIMIT)));              \
-        auto ref = evmone_run((CODE), {}, int64_t(GAS_LIMIT));                 \
+        auto ref = cevm_run((CODE), {}, int64_t(GAS_LIMIT));                 \
         EXPECT_EQ(cpu.status, TxStatus::Return) << "CPU status";               \
-        EXPECT_EQ(ref.status, EVMC_SUCCESS)     << "evmone status";            \
+        EXPECT_EQ(ref.status, EVMC_SUCCESS)     << "cevm status";            \
         EXPECT_EQ(uint64_t(cpu.gas_used), uint64_t(ref.gas_used)) << "gas";    \
         EXPECT_TRUE(eq_bytes(cpu.output, ref.output)) << "output bytes";       \
     } while (0)
@@ -169,8 +169,8 @@ TEST(CpuInterpreterSpec, KECCAK256_empty)
     };
     ASSERT_EQ(r.output.size(), 32u);
     EXPECT_EQ(0, std::memcmp(r.output.data(), expected, 32));
-    // Cross-check with evmone (must match exactly).
-    EXPECT_AGREE_WITH_EVMONE(code, 100'000);
+    // Cross-check with cevm (must match exactly).
+    EXPECT_AGREE_WITH_CEVM(code, 100'000);
 }
 
 // 0x20 KECCAK256 — hash of "abc" (write 0x61 0x62 0x63 to mem[0..3]).
@@ -195,7 +195,7 @@ TEST(CpuInterpreterSpec, KECCAK256_abc)
     };
     ASSERT_EQ(r.output.size(), 32u);
     EXPECT_EQ(0, std::memcmp(r.output.data(), expected, 32));
-    EXPECT_AGREE_WITH_EVMONE(code, 100'000);
+    EXPECT_AGREE_WITH_CEVM(code, 100'000);
 }
 
 // 0x20 KECCAK256 — gas accounting: 30 + 6*ceil(size/32) + memory expansion.
@@ -209,7 +209,7 @@ TEST(CpuInterpreterSpec, KECCAK256_gas_one_word)
     };
     auto r = execute_cpu(make_tx(code));
     EXPECT_EQ(r.status, TxStatus::Return);
-    EXPECT_AGREE_WITH_EVMONE(code, 100'000);
+    EXPECT_AGREE_WITH_CEVM(code, 100'000);
 }
 
 // 0x32 ORIGIN — gas 2, returns 0 with no host context wired.
@@ -248,7 +248,7 @@ TEST(CpuInterpreterSpec, CODESIZE)
     for (int i = 0; i < 8; ++i)
         got = (got << 8) | uint64_t(r.output[size_t(24 + i)]);
     EXPECT_EQ(got, code_size);
-    EXPECT_AGREE_WITH_EVMONE(code, 50'000);
+    EXPECT_AGREE_WITH_CEVM(code, 50'000);
 }
 
 // 0x39 CODECOPY — copy first 4 bytes of code to memory, return them.
@@ -265,7 +265,7 @@ TEST(CpuInterpreterSpec, CODECOPY_basic)
     EXPECT_EQ(r.output[1], 0x04u);
     EXPECT_EQ(r.output[2], 0x60u);
     EXPECT_EQ(r.output[3], 0x00u);
-    EXPECT_AGREE_WITH_EVMONE(code, 50'000);
+    EXPECT_AGREE_WITH_CEVM(code, 50'000);
 }
 
 // 0x39 CODECOPY — out-of-range source offset => zero-fill (per spec).
@@ -282,7 +282,7 @@ TEST(CpuInterpreterSpec, CODECOPY_out_of_range_zero_pads)
     EXPECT_EQ(r.status, TxStatus::Return);
     ASSERT_EQ(r.output.size(), 4u);
     for (auto b : r.output) EXPECT_EQ(b, 0u);
-    EXPECT_AGREE_WITH_EVMONE(code, 50'000);
+    EXPECT_AGREE_WITH_CEVM(code, 50'000);
 }
 
 // 0x3b EXTCODESIZE — no host => 0.
@@ -509,7 +509,7 @@ TEST(CpuInterpreterSpec, MSTORE8_basic)
     EXPECT_EQ(r.status, TxStatus::Return);
     ASSERT_EQ(r.output.size(), 32u);
     EXPECT_EQ(r.output[31], 0xCC);
-    EXPECT_AGREE_WITH_EVMONE(code, 50'000);
+    EXPECT_AGREE_WITH_CEVM(code, 50'000);
 }
 
 // 0x5e MCOPY (EIP-5656) — overlap-safe forward copy.
@@ -526,7 +526,7 @@ TEST(CpuInterpreterSpec, MCOPY_overlap_forward)
     ASSERT_EQ(r.output.size(), 16u);
     EXPECT_EQ(r.output[0], 0xAA);
     for (size_t i = 1; i < 16; ++i) EXPECT_EQ(r.output[i], 0u);
-    EXPECT_AGREE_WITH_EVMONE(code, 50'000);
+    EXPECT_AGREE_WITH_CEVM(code, 50'000);
 }
 
 // 0x5e MCOPY — backward copy with overlap (memmove semantics).
@@ -548,7 +548,7 @@ TEST(CpuInterpreterSpec, MCOPY_overlap_backward)
     EXPECT_EQ(r.output[1], 0x22);
     EXPECT_EQ(r.output[2], 0x11);  // copy of mem[0]
     EXPECT_EQ(r.output[3], 0x22);  // copy of mem[1]
-    EXPECT_AGREE_WITH_EVMONE(code, 50'000);
+    EXPECT_AGREE_WITH_CEVM(code, 50'000);
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +567,7 @@ TEST(CpuInterpreterSpec, TSTORE_TLOAD_roundtrip)
     EXPECT_EQ(r.status, TxStatus::Return);
     ASSERT_EQ(r.output.size(), 32u);
     EXPECT_EQ(r.output[31], 0x42);
-    EXPECT_AGREE_WITH_EVMONE(code, 50'000);
+    EXPECT_AGREE_WITH_CEVM(code, 50'000);
 }
 
 // 0x5c TLOAD on uninitialised slot returns 0.
@@ -644,8 +644,8 @@ TEST(CpuInterpreterSpec, LOG4_records_4_topics)
     EXPECT_EQ(r.logs[0].topics[3].w[0], uint64_t(0x44));
 }
 
-// LOG gas: 375 + 8*size + 375*N + memory expansion. Cross-check with evmone.
-TEST(CpuInterpreterSpec, LOG2_gas_matches_evmone)
+// LOG gas: 375 + 8*size + 375*N + memory expansion. Cross-check with cevm.
+TEST(CpuInterpreterSpec, LOG2_gas_matches_cevm)
 {
     std::vector<uint8_t> code = {
         0x60, 0xAA, 0x60, 0x00, 0x53,           // mem[0] = 0xAA
@@ -655,7 +655,7 @@ TEST(CpuInterpreterSpec, LOG2_gas_matches_evmone)
         0x00,
     };
     auto cpu = execute_cpu(make_tx(code, {}, 50'000));
-    auto ref = evmone_run(code, {}, 50'000);
+    auto ref = cevm_run(code, {}, 50'000);
     EXPECT_EQ(cpu.status, TxStatus::Stop);
     EXPECT_EQ(ref.status, EVMC_SUCCESS);
     EXPECT_EQ(uint64_t(cpu.gas_used), uint64_t(ref.gas_used));
@@ -675,7 +675,7 @@ TEST(CpuInterpreterSpec, ADD_5_3)
     auto r = execute_cpu(make_tx(code));
     EXPECT_EQ(r.status, TxStatus::Return);
     EXPECT_EQ(r.output[31], 0x08);
-    EXPECT_AGREE_WITH_EVMONE(code, 50'000);
+    EXPECT_AGREE_WITH_CEVM(code, 50'000);
 }
 
 TEST(CpuInterpreterSpec, SDIV_neg)
@@ -688,7 +688,7 @@ TEST(CpuInterpreterSpec, SDIV_neg)
     emit_store_return(c);
     auto r = execute_cpu(make_tx(c));
     EXPECT_EQ(r.status, TxStatus::Return);
-    EXPECT_AGREE_WITH_EVMONE(c, 50'000);
+    EXPECT_AGREE_WITH_CEVM(c, 50'000);
 }
 
 TEST(CpuInterpreterSpec, ISZERO_true_and_false)
@@ -722,7 +722,7 @@ TEST(CpuInterpreterSpec, JUMP_to_jumpdest)
     auto r = execute_cpu(make_tx(code));
     EXPECT_EQ(r.status, TxStatus::Return);
     EXPECT_EQ(r.output[31], 0x01);
-    EXPECT_AGREE_WITH_EVMONE(code, 50'000);
+    EXPECT_AGREE_WITH_CEVM(code, 50'000);
 }
 
 TEST(CpuInterpreterSpec, INVALID_consumes_all_gas)

@@ -1,14 +1,14 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2018 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2018 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file
-/// EVMC instance (class VM) and entry point of evmone is defined here.
+/// EVMC instance (class VM) and entry point of cevm is defined here.
 
 #include "vm.hpp"
 #include "advanced_execution.hpp"
 #include "baseline.hpp"
-#include <evmone/evmone.h>
+#include <cevm/cevm.h>
 #include <cassert>
 #include <iostream>
 
@@ -40,7 +40,7 @@ evmc_set_option_result set_option(evmc_vm* c_vm, char const* c_name, char const*
     }
     else if (name == "cgoto")
     {
-#if EVMONE_CGOTO_SUPPORTED
+#if CEVM_CGOTO_SUPPORTED
         if (value == "no")
         {
             vm.cgoto = false;
@@ -74,7 +74,7 @@ evmc_set_option_result set_option(evmc_vm* c_vm, char const* c_name, char const*
 VM::VM() noexcept
   : evmc_vm{
         EVMC_ABI_VERSION,
-        "evmone",
+        "cevm",
         PROJECT_VERSION,
         evm::destroy,
         evm::baseline::execute,
@@ -99,7 +99,7 @@ ExecutionState& VM::get_execution_state(size_t depth) noexcept
 }  // namespace evm
 
 extern "C" {
-EVMC_EXPORT evmc_vm* evmc_create_evmone() noexcept
+EVMC_EXPORT evmc_vm* evmc_create_cevm() noexcept
 {
     return new evm::VM{};
 }

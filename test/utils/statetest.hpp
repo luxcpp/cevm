@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
@@ -12,7 +12,7 @@
 
 namespace json = nlohmann;
 
-namespace evmone::test
+namespace cevm::test
 {
 
 struct TestMultiTransaction : state::Transaction
@@ -152,14 +152,14 @@ inline std::string hex0x(const bytes_view& v)
 {
     return "0x" + evmc::hex(v);
 }
-}  // namespace evmone::test
+}  // namespace cevm::test
 
-inline std::ostream& operator<<(std::ostream& out, const evmone::address& a)
+inline std::ostream& operator<<(std::ostream& out, const cevm::address& a)
 {
-    return out << evmone::test::hex0x(a);
+    return out << cevm::test::hex0x(a);
 }
 
-inline std::ostream& operator<<(std::ostream& out, const evmone::bytes32& b)
+inline std::ostream& operator<<(std::ostream& out, const cevm::bytes32& b)
 {
-    return out << evmone::test::hex0x(b);
+    return out << cevm::test::hex0x(b);
 }

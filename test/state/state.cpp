@@ -1,19 +1,19 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "state.hpp"
 #include "../utils/stdx/utility.hpp"
 #include "host.hpp"
 #include "state_view.hpp"
-#include <evmone/constants.hpp>
-#include <evmone/delegation.hpp>
-#include <evmone_precompiles/secp256k1.hpp>
+#include <cevm/constants.hpp>
+#include <cevm/delegation.hpp>
+#include <cevm_precompiles/secp256k1.hpp>
 #include <algorithm>
 
 using namespace intx;
 
-namespace evmone::state
+namespace cevm::state
 {
 namespace
 {
@@ -207,7 +207,7 @@ StateDiff State::build_diff(evmc_revision rev) const
         if (m.destructed)
         {
             // TODO: This must be done even for just_created
-            //   because destructed may pre-date just_created. Add test to evmone (EEST has it).
+            //   because destructed may pre-date just_created. Add test to cevm (EEST has it).
             diff.deleted_accounts.emplace_back(addr);
             continue;
         }
@@ -647,4 +647,4 @@ TransactionReceipt transition(const StateView& state_view, const BlockInfo& bloc
 
     return receipt;
 }
-}  // namespace evmone::state
+}  // namespace cevm::state

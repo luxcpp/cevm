@@ -1,10 +1,10 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <CLI/CLI.hpp>
-#include <evmone/evmone.h>
-#include <evmone/version.h>
+#include <cevm/cevm.h>
+#include <cevm/version.h>
 #include <gtest/gtest.h>
 #include <test/utils/statetest.hpp>
 #include <iostream>
@@ -30,12 +30,12 @@ public:
     void TestBody() final
     {
         std::ifstream f{m_json_test_file};
-        const auto tests = evmone::test::load_state_tests(f);
+        const auto tests = cevm::test::load_state_tests(f);
         for (const auto& test : tests)
         {
             if (m_filter.has_value() && test.name.find(*m_filter) == std::string::npos)
                 continue;
-            evmone::test::run_state_test(test, m_vm, m_trace);
+            cevm::test::run_state_test(test, m_vm, m_trace);
         }
     }
 
@@ -52,19 +52,19 @@ public:
 /// Implementation of a gtest Test which runs a single state test.
 class StateTest : public testing::Test
 {
-    evmone::test::StateTransitionTest m_state_transition_test;
+    cevm::test::StateTransitionTest m_state_transition_test;
     evmc::VM& m_vm;
     bool m_trace = false;
 
 public:
     explicit StateTest(
-        evmone::test::StateTransitionTest state_transition_test, evmc::VM& vm, bool trace) noexcept
+        cevm::test::StateTransitionTest state_transition_test, evmc::VM& vm, bool trace) noexcept
       : m_state_transition_test{std::move(state_transition_test)}, m_vm{vm}, m_trace{trace}
     {}
 
-    void TestBody() final { evmone::test::run_state_test(m_state_transition_test, m_vm, m_trace); }
+    void TestBody() final { cevm::test::run_state_test(m_state_transition_test, m_vm, m_trace); }
 
-    static void register_one(const evmone::test::StateTransitionTest& test,
+    static void register_one(const cevm::test::StateTransitionTest& test,
         const std::string& suite_name, const std::string& test_name, const fs::path& file,
         evmc::VM& vm, bool trace)
     {
@@ -95,7 +95,7 @@ void register_test_files(
     else  // Treat as a file.
     {
         std::ifstream f{root};
-        const auto tests = evmone::test::load_state_tests(f);
+        const auto tests = cevm::test::load_state_tests(f);
         for (const auto& test : tests)
         {
             if (filter.has_value() && test.name.find(*filter) == std::string::npos)
@@ -124,9 +124,9 @@ int main(int argc, char* argv[])
     {
         testing::InitGoogleTest(&argc, argv);  // Process GoogleTest flags.
 
-        CLI::App app{"evmone state test runner"};
+        CLI::App app{"cevm state test runner"};
 
-        app.set_version_flag("--version", "evmone-statetest " EVMONE_VERSION);
+        app.set_version_flag("--version", "cevm-statetest " CEVM_VERSION);
 
         std::vector<std::string> paths;
         app.add_option("path", paths,
@@ -148,7 +148,7 @@ int main(int argc, char* argv[])
 
         CLI11_PARSE(app, argc, argv);
 
-        evmc::VM vm{evmc_create_evmone(), {{"O", "0"}}};
+        evmc::VM vm{evmc_create_cevm(), {{"O", "0"}}};
 
         if (trace)
         {

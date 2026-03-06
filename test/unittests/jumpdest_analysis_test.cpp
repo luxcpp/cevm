@@ -1,15 +1,15 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2020 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2020 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "test/experimental/jumpdest_analysis.hpp"
 #include "test/utils/bytecode.hpp"
-#include <evmone/baseline.hpp>
+#include <cevm/baseline.hpp>
 #include <gtest/gtest.h>
 
-using namespace evmone;
-using namespace evmone::exp::jda;
-using namespace evmone::test;
+using namespace cevm;
+using namespace cevm::exp::jda;
+using namespace cevm::test;
 
 namespace
 {

@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2020 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2020 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "baseline.hpp"
@@ -213,7 +213,7 @@ int64_t dispatch(const CostTable& cost_table, ExecutionState& state, int64_t gas
     intx::unreachable();
 }
 
-#if EVMONE_CGOTO_SUPPORTED
+#if CEVM_CGOTO_SUPPORTED
 int64_t dispatch_cgoto(
     const CostTable& cost_table, ExecutionState& state, int64_t gas, const uint8_t* code) noexcept
 {
@@ -284,7 +284,7 @@ evmc_result execute(VM& vm, const evmc_host_interface& host, evmc_host_context* 
     }
     else
     {
-#if EVMONE_CGOTO_SUPPORTED
+#if CEVM_CGOTO_SUPPORTED
         if (vm.cgoto)
             gas = dispatch_cgoto(cost_table, state, gas, code_begin);
         else

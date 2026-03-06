@@ -1,11 +1,11 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "block.hpp"
 #include "transaction.hpp"
 
-namespace evmone::state
+namespace cevm::state
 {
 static constexpr auto GAS_LIMIT_ELASTICITY_MULTIPLIER = 2;
 static constexpr auto BASE_FEE_MAX_CHANGE_DENOMINATOR = 8;
@@ -91,4 +91,4 @@ uint64_t calc_excess_blob_gas(evmc_revision rev, const BlobParams& blob_params,
 
     return parent_excess_blob_gas + parent_blob_gas_used - target_blob_gas_per_block;
 }
-}  // namespace evmone::state
+}  // namespace cevm::state

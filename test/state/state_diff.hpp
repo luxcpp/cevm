@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2024 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2024 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
@@ -7,7 +7,7 @@
 #include <intx/intx.hpp>
 #include <vector>
 
-namespace evmone::state
+namespace cevm::state
 {
 using evmc::address;
 using evmc::bytes;
@@ -48,4 +48,4 @@ struct StateDiff
     /// accounts cannot be deleted and this list is always empty.
     std::vector<address> deleted_accounts;
 };
-}  // namespace evmone::state
+}  // namespace cevm::state

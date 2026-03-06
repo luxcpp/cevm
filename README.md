@@ -1,4 +1,4 @@
-# evmone
+# cevm
 
 [![ethereum badge]][ethereum]
 [![readme style standard badge]][standard readme]
@@ -9,12 +9,12 @@
 
 > Fast Ethereum Virtual Machine implementation
 
-_evmone_ is a C++ implementation of the Ethereum Virtual Machine (EVM). 
+_cevm_ is a C++ implementation of the Ethereum Virtual Machine (EVM). 
 Created by members of the [Ipsilon] (ex-[Ewasm]) team, the project aims for clean, standalone EVM implementation 
 that can be imported as an execution module by Ethereum Client projects. 
-The codebase of _evmone_ is optimized to provide fast and efficient execution of EVM smart contracts.
+The codebase of _cevm_ is optimized to provide fast and efficient execution of EVM smart contracts.
 
-### Characteristic of evmone
+### Characteristic of cevm
 
 1. Exposes the [EVMC] API.
 2. Requires C++20 standard.
@@ -43,38 +43,38 @@ The codebase of _evmone_ is optimized to provide fast and efficient execution of
 
 ### As geth plugin
 
-evmone implements the [EVMC] API for Ethereum Virtual Machines.
+cevm implements the [EVMC] API for Ethereum Virtual Machines.
 It can be used as a plugin replacing geth's internal EVM. But for that a modified
 version of geth is needed. The [Ewasm]'s fork
 of go-ethereum provides [binary releases of geth with EVMC support](https://github.com/ewasm/go-ethereum/releases).
 
-Next, download evmone from [Releases].
+Next, download cevm from [Releases].
 
-Start the downloaded geth with `--vm.evm` option pointing to the evmone shared library.
+Start the downloaded geth with `--vm.evm` option pointing to the cevm shared library.
 
 ```bash
-geth --vm.evm=./libevmone.so
+geth --vm.evm=./libcevm.so
 ```
 
 ### Building from source
 
-To build the evmone EVMC module (shared library), test, and benchmark:
+To build the cevm EVMC module (shared library), test, and benchmark:
 
 1. Fetch the source code:
    ```
-   git clone --recursive https://github.com/ethereum/evmone
-   cd evmone
+   git clone --recursive https://github.com/ethereum/cevm
+   cd cevm
    ```
 
 2. Configure the project build and dependencies:
    ##### Linux / OSX
    ```
-   cmake -S . -B build -DEVMONE_TESTING=ON
+   cmake -S . -B build -DCEVM_TESTING=ON
    ```
 
    ##### Windows
    ```
-   cmake -S . -B build -DEVMONE_TESTING=ON -G "Visual Studio 16 2019" -A x64
+   cmake -S . -B build -DCEVM_TESTING=ON -G "Visual Studio 16 2019" -A x64
    ```
    
 3. Build:
@@ -85,16 +85,16 @@ To build the evmone EVMC module (shared library), test, and benchmark:
 
 3. Run the unit tests or benchmarking tool:
    ```
-   build/bin/evmone-unittests
-   build/bin/evmone-bench test/evm-benchmarks/benchmarks
+   build/bin/cevm-unittests
+   build/bin/cevm-bench test/evm-benchmarks/benchmarks
    ```
 
 ### Precompiles
 
-Ethereum Precompiled Contracts (_precompiles_ for short) are supported by evmone with some exceptions:
+Ethereum Precompiled Contracts (_precompiles_ for short) are supported by cevm with some exceptions:
 
-1. The `ecrecover` is implemented directly by evmone and has degraded performance.
-2. For `expmod` stubs are enabled by default — they will correctly respond to known inputs. The CMake option `EVMONE_PRECOMPILES_GMP=1` enables full implementation but this requires [GMP] (e.g. libgmp-dev) library at build and execution time.
+1. The `ecrecover` is implemented directly by cevm and has degraded performance.
+2. For `expmod` stubs are enabled by default — they will correctly respond to known inputs. The CMake option `CEVM_PRECOMPILES_GMP=1` enables full implementation but this requires [GMP] (e.g. libgmp-dev) library at build and execution time.
 
 ### Tools
 
@@ -102,23 +102,23 @@ Ethereum Precompiled Contracts (_precompiles_ for short) are supported by evmone
 
 The **evm-test** executes a collection of unit tests on 
 any EVMC-compatible Ethereum Virtual Machine implementation.
-The collection of tests comes from the evmone project.
+The collection of tests comes from the cevm project.
 
 ```bash
-evm-test ./evmone.so
+evm-test ./cevm.so
 ```
 
 ### Docker
 
-Docker images with evmone are available on Docker Hub:
-https://hub.docker.com/r/ethereum/evmone.
+Docker images with cevm are available on Docker Hub:
+https://hub.docker.com/r/ethereum/cevm.
 
-Having the evmone shared library inside a docker is not very useful on its own,
+Having the cevm shared library inside a docker is not very useful on its own,
 but the image can be used as the base of another one or you can run benchmarks 
 with it.
 
 ```bash
-docker run --entrypoint evmone-bench ethereum/evmone /src/test/benchmarks
+docker run --entrypoint cevm-bench ethereum/cevm /src/test/benchmarks
 ```
 
 ## References
@@ -137,9 +137,9 @@ Licensed under the [Apache License, Version 2.0].
 
 
 [@chfast]: https://github.com/chfast
-[appveyor]: https://ci.appveyor.com/project/chfast/evmone/branch/master
-[circleci]: https://circleci.com/gh/ethereum/evmone/tree/master
-[codecov]: https://codecov.io/gh/ethereum/evmone/
+[appveyor]: https://ci.appveyor.com/project/chfast/cevm/branch/master
+[circleci]: https://circleci.com/gh/ethereum/cevm/tree/master
+[codecov]: https://codecov.io/gh/ethereum/cevm/
 [Apache License, Version 2.0]: LICENSE
 [ethereum]: https://ethereum.org
 [EVMC]: https://github.com/ethereum/evmc
@@ -148,13 +148,13 @@ Licensed under the [Apache License, Version 2.0].
 [GMP]: https://gmplib.org
 [intx]: https://github.com/chfast/intx
 [ethash]: https://github.com/chfast/ethash
-[Releases]: https://github.com/ethereum/evmone/releases
+[Releases]: https://github.com/ethereum/cevm/releases
 [standard readme]: https://github.com/RichardLitt/standard-readme
 [silkpre]: https://github.com/torquem-ch/silkpre
 
-[appveyor badge]: https://img.shields.io/appveyor/ci/chfast/evmone/master.svg?logo=appveyor
-[circleci badge]: https://img.shields.io/circleci/project/github/ethereum/evmone/master.svg?logo=circleci
-[codecov badge]: https://img.shields.io/codecov/c/github/ethereum/evmone.svg?logo=codecov
+[appveyor badge]: https://img.shields.io/appveyor/ci/chfast/cevm/master.svg?logo=appveyor
+[circleci badge]: https://img.shields.io/circleci/project/github/ethereum/cevm/master.svg?logo=circleci
+[codecov badge]: https://img.shields.io/codecov/c/github/ethereum/cevm.svg?logo=codecov
 [ethereum badge]: https://img.shields.io/badge/ethereum-EVM-informational.svg?logo=ethereum
-[license badge]: https://img.shields.io/github/license/ethereum/evmone.svg?logo=apache
+[license badge]: https://img.shields.io/github/license/ethereum/cevm.svg?logo=apache
 [readme style standard badge]: https://img.shields.io/badge/readme%20style-standard-brightgreen.svg

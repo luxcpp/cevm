@@ -1,11 +1,11 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gmock/gmock.h>
 #include <test/state/ethash_difficulty.hpp>
 
-using namespace evmone::state;
+using namespace cevm::state;
 
 struct DifficultyTest  // NOLINT(clang-analyzer-optin.performance.Padding)
 {

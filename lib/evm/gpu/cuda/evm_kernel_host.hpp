@@ -1,4 +1,4 @@
-// Copyright (C) 2026, The evmone Authors. All rights reserved.
+// Copyright (C) 2026, The cevm Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file evm_kernel_host.hpp
@@ -7,7 +7,7 @@
 /// Mirrors the API of kernel/evm_kernel_host.hpp (Metal). The CUDA backend
 /// dispatches one thread per transaction. Transactions that hit a
 /// CALL/CREATE-family opcode complete with status == CallNotSupported so
-/// the caller can re-execute them on the CPU evmone interpreter.
+/// the caller can re-execute them on the CPU cevm interpreter.
 ///
 /// Wire layout note: TxInput, TxOutput, and StorageEntry below are kept
 /// byte-for-byte identical to evm_kernel.cu's device structs. The host

@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gtest/gtest.h>
@@ -11,7 +11,7 @@ using namespace evmc::literals;
 
 TEST(state_new_account_address, create_examples)
 {
-    static constexpr auto addr = evmone::state::compute_create_address;
+    static constexpr auto addr = cevm::state::compute_create_address;
 
     static constexpr auto S0 = 0x00_address;
     EXPECT_EQ(addr(S0, 0), 0xbd770416a3345f91e4b34576cb804a576fa48eb1_address);
@@ -37,7 +37,7 @@ TEST(state_new_account_address, create_examples)
 TEST(state_new_account_address, create_nonces)
 {
     // Explore nonce values from all ranges giving RLP encoding schemes.
-    static constexpr auto addr = evmone::state::compute_create_address;
+    static constexpr auto addr = cevm::state::compute_create_address;
 
     struct TestCase
     {
@@ -86,7 +86,7 @@ TEST(state_new_account_address, create_rlp)
     // Compute the RLP payload for keccak256 hash producing the final CREATE address.
     // This test is to visualize what RLP inputs are reaching the final keccak256 hash.
     static constexpr auto rlp = [](const address& addr, uint64_t nonce) {
-        return evmc::hex(evmone::rlp::encode_tuple(addr, nonce));
+        return evmc::hex(cevm::rlp::encode_tuple(addr, nonce));
     };
 
     // The address does not matter for length so use a fixed one.
@@ -120,7 +120,7 @@ TEST(state_new_account_address, create_rlp)
 
 TEST(state_new_account_address, create2)
 {
-    static constexpr auto addr = evmone::state::compute_create2_address;
+    static constexpr auto addr = cevm::state::compute_create2_address;
     static constexpr address SENDERS[] = {
         0x00_address, 0x01_address, 0x8000000000000000000000000000000000000000_address};
     static constexpr auto z0 = 0x00_bytes32;

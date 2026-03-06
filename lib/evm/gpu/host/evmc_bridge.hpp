@@ -17,7 +17,7 @@
 ///
 /// Anything that requires a runtime-computed address (CALLDATALOAD then CALL,
 /// SELFBALANCE then CREATE, etc.) is reported as "needs CPU fallback" via
-/// `std::nullopt`. The dispatcher then routes those transactions to evmone
+/// `std::nullopt`. The dispatcher then routes those transactions to cevm
 /// with a proper `evmc::Host*`.
 ///
 /// The bridge is designed to keep the existing GPU fast-path entirely intact
@@ -30,7 +30,7 @@
 ///   * 1 024 bytes of return data per frame (HOST_MAX_OUTPUT_PER_TX).
 ///   * 64 storage slots per (frame, account) pair (HOST_MAX_STORAGE_PER_TX).
 ///
-/// Hitting any of these → `std::nullopt`, fall back to evmone.
+/// Hitting any of these → `std::nullopt`, fall back to cevm.
 
 #pragma once
 
@@ -70,7 +70,7 @@ struct TxResult
     std::vector<uint8_t> output;
     /// True when the GPU kernel executed at least one frame.
     /// False means everything ran in the bridge frame manager (no GPU work).
-    /// Either way, the result matches what evmone would return.
+    /// Either way, the result matches what cevm would return.
     bool used_gpu = false;
 };
 
@@ -91,7 +91,7 @@ public:
     /// holding more storage than the kernel's per-frame budget, etc.).
     ///
     /// On success the result is byte-equivalent to running the same tx
-    /// on evmone with the same host and revision.
+    /// on cevm with the same host and revision.
     std::optional<TxResult> try_execute(const Transaction& tx, evmc_revision rev);
 
     /// Batch helper. The output vector has the same length as `txs`;

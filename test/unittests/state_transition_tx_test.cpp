@@ -1,12 +1,12 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "state_transition.hpp"
 #include <test/utils/bytecode.hpp>
 
 using namespace evmc::literals;
-using namespace evmone::test;
+using namespace cevm::test;
 
 TEST_F(state_transition, tx_legacy)
 {

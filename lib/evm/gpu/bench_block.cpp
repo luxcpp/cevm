@@ -3,7 +3,7 @@
 
 /// @file bench_block.cpp
 /// Benchmark comparing CPU_Sequential vs CPU_Parallel (Block-STM) execution
-/// of ETH transfer blocks through evmone.
+/// of ETH transfer blocks through cevm.
 ///
 /// Build: cmake --build build --target evm-bench-block
 /// Usage: evm-bench-block [num_txs] [num_runs]
@@ -263,7 +263,7 @@ int main(int argc, char* argv[])
     for (uint32_t r = 0; r < num_runs; ++r)
     {
         BenchHost host(1'000'000'000);
-        auto result = evm::gpu::execute_sequential_evmone(txs, host, EVMC_SHANGHAI);
+        auto result = evm::gpu::execute_sequential_cevm(txs, host, EVMC_SHANGHAI);
         seq_times.push_back(result.execution_time_ms);
     }
     auto seq_stats = compute_stats(seq_times, total_gas);
@@ -274,7 +274,7 @@ int main(int argc, char* argv[])
     for (uint32_t r = 0; r < num_runs; ++r)
     {
         BenchHost host(1'000'000'000);
-        auto result = evm::gpu::execute_parallel_evmone(txs, host, EVMC_SHANGHAI, 4);
+        auto result = evm::gpu::execute_parallel_cevm(txs, host, EVMC_SHANGHAI, 4);
         par4_times.push_back(result.execution_time_ms);
     }
     auto par4_stats = compute_stats(par4_times, total_gas);
@@ -285,7 +285,7 @@ int main(int argc, char* argv[])
     for (uint32_t r = 0; r < num_runs; ++r)
     {
         BenchHost host(1'000'000'000);
-        auto result = evm::gpu::execute_parallel_evmone(txs, host, EVMC_SHANGHAI, 0);
+        auto result = evm::gpu::execute_parallel_cevm(txs, host, EVMC_SHANGHAI, 0);
         parN_times.push_back(result.execution_time_ms);
     }
     auto parN_stats = compute_stats(parN_times, total_gas);

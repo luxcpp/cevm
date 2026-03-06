@@ -2,7 +2,7 @@
 #include "utils.hpp"
 #include <string_view>
 
-namespace evmone::test
+namespace cevm::test
 {
 state::BlobParams get_blob_params(evmc_revision rev)
 {
@@ -42,4 +42,4 @@ state::BlobParams get_blob_params(
         return get_blob_params(to_rev_schedule(network).get_revision(timestamp));
 }
 
-}  // namespace evmone::test
+}  // namespace cevm::test

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file processor.hpp
-/// Block transaction processor wiring StateDB to evmone.
+/// Block transaction processor wiring StateDB to cevm.
 /// Supports GPU-accelerated batch ecrecover for sender recovery.
 
 #pragma once
@@ -71,19 +71,19 @@ struct BlockResult
 /// @return     Map from tx index to recovered sender address.
 SenderCache batch_recover_senders(const std::vector<Transaction>& txs);
 
-/// Process a block of transactions through evmone with full state.
+/// Process a block of transactions through cevm with full state.
 ///
 /// For each transaction:
 /// 1. Validate nonce and balance.
 /// 2. Deduct gas_limit * gas_price from sender.
-/// 3. Execute via evmone (or direct transfer for no-code recipients).
+/// 3. Execute via cevm (or direct transfer for no-code recipients).
 /// 4. Apply state changes (or revert on failure).
 /// 5. Refund unused gas to sender.
 /// 6. Add gas_used * gas_price to coinbase.
 ///
 /// @param db       The state database (modified in place).
 /// @param txs      Transactions to process.
-/// @param vm       The evmone VM instance.
+/// @param vm       The cevm VM instance.
 /// @param tx_ctx   Transaction/block context.
 /// @param rev      EVM revision.
 /// @param senders  Optional pre-recovered sender cache (from batch_recover_senders).

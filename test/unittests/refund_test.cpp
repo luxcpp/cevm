@@ -14,7 +14,7 @@
 //   2. SSTORE clears a slot (orig!=0, cur!=0, new=0): +4800 refund.
 //   3. SSTORE clear -> set within one tx: refund accumulates and revokes.
 //   4. The EIP-3529 cap: refund must not exceed gas_used / 5.
-//   5. Parity: kernel CPU path must match evmone CPU on the same input.
+//   5. Parity: kernel CPU path must match cevm CPU on the same input.
 //
 // The kernel CPU path (Backend::CPU_Sequential with state==nullptr +
 // non-empty bytecode) is the parity reference for both Metal and CUDA, so
@@ -29,7 +29,7 @@
 #include <cstring>
 #include <vector>
 
-extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
+extern "C" struct evmc_vm* evmc_create_cevm(void) noexcept;
 
 namespace {
 
@@ -84,23 +84,23 @@ BlockResult run_kernel_cpu(const std::vector<uint8_t>& code, uint64_t gas_limit 
     return evm::gpu::execute_block(cfg, {tx}, /*state=*/nullptr);
 }
 
-// -- Run helper: evmone CPU with a real host so SSTORE actually goes through.
+// -- Run helper: cevm CPU with a real host so SSTORE actually goes through.
 //
-// evmone reports `gas_left` plus an internal refund; the dispatcher path that
-// has a host routes through evmone and returns gas_used in BlockResult. We
-// drive evmone directly here so we can inspect gas_refund independently and
+// cevm reports `gas_left` plus an internal refund; the dispatcher path that
+// has a host routes through cevm and returns gas_used in BlockResult. We
+// drive cevm directly here so we can inspect gas_refund independently and
 // build a parity oracle for the kernel-CPU path.
 
-struct EvmoneRun
+struct CevmRun
 {
     int64_t gas_used   = 0;
     int64_t gas_refund = 0;
     evmc_status_code status = EVMC_FAILURE;
 };
 
-EvmoneRun run_evmone(const std::vector<uint8_t>& code, uint64_t gas_limit = 200'000)
+CevmRun run_cevm(const std::vector<uint8_t>& code, uint64_t gas_limit = 200'000)
 {
-    evmc::VM vm{evmc_create_evmone()};
+    evmc::VM vm{evmc_create_cevm()};
     evmc::MockedHost host;
 
     evmc_message msg{};
@@ -114,10 +114,10 @@ EvmoneRun run_evmone(const std::vector<uint8_t>& code, uint64_t gas_limit = 200'
     auto res = vm.execute(host, EVMC_CANCUN, msg,
                           code.data(), code.size());
 
-    EvmoneRun out;
+    CevmRun out;
     out.status     = res.status_code;
     out.gas_used   = static_cast<int64_t>(gas_limit) - res.gas_left;
-    out.gas_refund = res.gas_refund;  // evmone exposes refund here
+    out.gas_refund = res.gas_refund;  // cevm exposes refund here
     return out;
 }
 
@@ -244,18 +244,18 @@ TEST(Refund, Eip3529CapApplied)
 }
 
 // -----------------------------------------------------------------------------
-// 5. Parity with evmone CPU on the SSTORE refund DIRECTION.
+// 5. Parity with cevm CPU on the SSTORE refund DIRECTION.
 //
 //    The kernel now models EIP-2929 cold/warm storage access on top of
 //    the EIP-2200 + EIP-3529 refund pipeline, so absolute gas numbers
-//    line up with evmone. What this test asserts is the qualitative
+//    line up with cevm. What this test asserts is the qualitative
 //    behaviour: clearing a slot earns a positive refund, after which the
 //    EIP-3529 cap shrinks net gas_used below the raw cost. That is
 //    exactly the evidence that the signed refund is flowing through
 //    both backends; underflow (the original bug) would instead inflate
 //    gas_used past the gas_limit.
 // -----------------------------------------------------------------------------
-TEST(Refund, ParityWithEvmoneOnClearSlot)
+TEST(Refund, ParityWithCevmOnClearSlot)
 {
     std::vector<uint8_t> code;
     emit_sstore(code, 0x10, 0x42);
@@ -263,24 +263,24 @@ TEST(Refund, ParityWithEvmoneOnClearSlot)
     emit_stop(code);
 
     auto kernel = run_kernel_cpu(code);
-    auto evmone = run_evmone(code);
+    auto cevm = run_cevm(code);
 
     ASSERT_EQ(kernel.status.size(), 1u);
     EXPECT_EQ(kernel.status[0], TxStatus::Stop);
-    EXPECT_EQ(evmone.status, EVMC_SUCCESS);
+    EXPECT_EQ(cevm.status, EVMC_SUCCESS);
 
     // Both backends report a positive raw refund on this bytecode. The
     // exact magnitude differs because the kernel doesn't model EIP-2929
     // cold/warm SLOAD pricing, but the SSTORE refund branch is shared
     // semantics — so both must agree that a refund was earned.
-    EXPECT_GT(evmone.gas_refund, 0)
-        << "evmone reports no refund — bytecode does not exercise the path";
+    EXPECT_GT(cevm.gas_refund, 0)
+        << "cevm reports no refund — bytecode does not exercise the path";
 
-    // Compute net gas_used after EIP-3529 cap for evmone, the same way
+    // Compute net gas_used after EIP-3529 cap for cevm, the same way
     // the dispatcher does for the kernel.
-    const int64_t cap          = evmone.gas_used / 5;
-    const int64_t evmone_final = evmone.gas_used -
-                                 std::min<int64_t>(evmone.gas_refund, cap);
+    const int64_t cap          = cevm.gas_used / 5;
+    const int64_t cevm_final = cevm.gas_used -
+                                 std::min<int64_t>(cevm.gas_refund, cap);
 
     // Both backends must yield net gas_used STRICTLY LESS THAN raw
     // gas_used (refund actually applied) and well within the gas_limit
@@ -290,8 +290,8 @@ TEST(Refund, ParityWithEvmoneOnClearSlot)
     EXPECT_LT(static_cast<int64_t>(kernel.gas_used[0]),
               static_cast<int64_t>(20112))
         << "kernel did not apply refund (raw cost is 20112)";
-    EXPECT_LT(evmone_final, evmone.gas_used)
-        << "evmone did not apply refund either — test is faulty";
+    EXPECT_LT(cevm_final, cevm.gas_used)
+        << "cevm did not apply refund either — test is faulty";
     EXPECT_LT(static_cast<int64_t>(kernel.gas_used[0]), 1'000'000)
         << "kernel gas_used absurdly large — refund underflow regressed";
 }

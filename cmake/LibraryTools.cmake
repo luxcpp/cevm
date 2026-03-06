@@ -1,5 +1,5 @@
-# evmone: Fast Ethereum Virtual Machine implementation
-# Copyright 2019 The evmone Authors.
+# cevm: Fast Ethereum Virtual Machine implementation
+# Copyright 2019 The cevm Authors.
 # SPDX-License-Identifier: Apache-2.0
 
 # For given target of a static library creates a custom target with -standalone suffix

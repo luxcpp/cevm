@@ -1,11 +1,11 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "blockchaintest_runner.hpp"
 #include <CLI/CLI.hpp>
-#include <evmone/evmone.h>
-#include <evmone/version.h>
+#include <cevm/cevm.h>
+#include <cevm/version.h>
 #include <gtest/gtest.h>
 #include <iostream>
 
@@ -30,9 +30,9 @@ public:
 
         try
         {
-            evmone::test::run_blockchain_tests(evmone::test::load_blockchain_tests(f), m_vm);
+            cevm::test::run_blockchain_tests(cevm::test::load_blockchain_tests(f), m_vm);
         }
-        catch (const evmone::test::UnsupportedTestFeature& ex)
+        catch (const cevm::test::UnsupportedTestFeature& ex)
         {
             GTEST_SKIP() << ex.what();
         }
@@ -49,20 +49,20 @@ public:
 /// Implementation of a gtest Test which runs a single blockchain test.
 class BlockchainGTest : public testing::Test
 {
-    const evmone::test::BlockchainTest m_blockchain_test;
+    const cevm::test::BlockchainTest m_blockchain_test;
     evmc::VM& m_vm;
 
 public:
-    explicit BlockchainGTest(evmone::test::BlockchainTest blockchain_test, evmc::VM& vm) noexcept
+    explicit BlockchainGTest(cevm::test::BlockchainTest blockchain_test, evmc::VM& vm) noexcept
       : m_blockchain_test{std::move(blockchain_test)}, m_vm{vm}
     {}
 
     void TestBody() final
     {
-        evmone::test::run_blockchain_tests(std::array{m_blockchain_test}, m_vm);
+        cevm::test::run_blockchain_tests(std::array{m_blockchain_test}, m_vm);
     }
 
-    static void register_one(const evmone::test::BlockchainTest& test,
+    static void register_one(const cevm::test::BlockchainTest& test,
         const std::string& suite_name, const std::string& test_name, const fs::path& file,
         evmc::VM& vm)
     {
@@ -93,11 +93,11 @@ void register_test_files(const fs::path& root, evmc::VM& vm)
         std::ifstream f{root};
         try
         {
-            const auto tests = evmone::test::load_blockchain_tests(f);
+            const auto tests = cevm::test::load_blockchain_tests(f);
             for (const auto& test : tests)
                 BlockchainGTest::register_one(test, root.string(), test.name, root, vm);
         }
-        catch (const evmone::test::UnsupportedTestFeature& ex)
+        catch (const cevm::test::UnsupportedTestFeature& ex)
         {
             std::cerr << ex.what() << ": " << root.string() << '\n';
         }
@@ -112,9 +112,9 @@ int main(int argc, char* argv[])
     {
         testing::InitGoogleTest(&argc, argv);  // Process GoogleTest flags.
 
-        CLI::App app{"evmone blockchain test runner"};
+        CLI::App app{"cevm blockchain test runner"};
 
-        app.set_version_flag("--version", "evmone-blockchaintest " EVMONE_VERSION);
+        app.set_version_flag("--version", "cevm-blockchaintest " CEVM_VERSION);
 
         std::vector<std::string> paths;
         app.add_option("path", paths,
@@ -129,7 +129,7 @@ int main(int argc, char* argv[])
 
         CLI11_PARSE(app, argc, argv);
 
-        evmc::VM vm{evmc_create_evmone()};
+        evmc::VM vm{evmc_create_cevm()};
 
         if (trace_flag)
             vm.set_option("trace", "1");

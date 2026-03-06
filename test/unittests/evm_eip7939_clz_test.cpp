@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2025 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2025 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 /// This file contains EVM unit tests for EIP-7939 "Count leading zeros (CLZ) opcode"
@@ -8,7 +8,7 @@
 #include "evm_fixture.hpp"
 
 using namespace evmc::literals;
-using namespace evmone::test;
+using namespace cevm::test;
 
 TEST_P(evm, clz_pre_osaka)
 {

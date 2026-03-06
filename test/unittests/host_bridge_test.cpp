@@ -13,7 +13,7 @@
 ///   * DELEGATECALL preserves the caller's apparent state
 ///
 /// On accept, the result is compared against running the same transaction
-/// through evmone with the same evmc::Host. The two must match byte-for-
+/// through cevm with the same evmc::Host. The two must match byte-for-
 /// byte (same status, same gas_used, same output).
 
 #include "../../lib/evm/gpu/host/code_resolver.hpp"
@@ -25,7 +25,7 @@
 #include <cstring>
 #include <vector>
 
-extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
+extern "C" struct evmc_vm* evmc_create_cevm(void) noexcept;
 
 namespace evm::gpu::host::test {
 
@@ -49,11 +49,11 @@ void install_code(evmc::MockedHost& host, const evmc::address& addr,
     acct.code.assign(code.begin(), code.end());
 }
 
-// Run the same tx through evmone (the "ground truth" reference).
-TxResult evmone_reference(
+// Run the same tx through cevm (the "ground truth" reference).
+TxResult cevm_reference(
     evmc::Host& host, const Transaction& tx, evmc_revision rev)
 {
-    auto* vm = evmc_create_evmone();
+    auto* vm = evmc_create_cevm();
 
     std::vector<uint8_t> code;
     if (tx.is_create)
@@ -148,7 +148,7 @@ TEST(host_bridge, pure_leaf_no_calls_runs_on_gpu)
     EXPECT_TRUE(result->used_gpu);
     EXPECT_EQ(result->status, EVMC_SUCCESS);
 
-    auto reference = evmone_reference(host, tx, EVMC_SHANGHAI);
+    auto reference = cevm_reference(host, tx, EVMC_SHANGHAI);
     expect_results_equal(*result, reference);
 }
 
@@ -201,7 +201,7 @@ TEST(host_bridge, static_call_with_constant_target_is_accepted)
     auto result = bridge->try_execute(tx, EVMC_SHANGHAI);
 
     ASSERT_TRUE(result.has_value()) << "static-target CALL should be accepted";
-    auto reference = evmone_reference(host, tx, EVMC_SHANGHAI);
+    auto reference = cevm_reference(host, tx, EVMC_SHANGHAI);
     expect_results_equal(*result, reference);
 }
 
@@ -276,7 +276,7 @@ TEST(host_bridge, deterministic_create_runs_on_gpu)
 
     ASSERT_TRUE(result.has_value()) << "deterministic CREATE should be accepted";
     EXPECT_TRUE(result->used_gpu);
-    auto reference = evmone_reference(host, tx, EVMC_SHANGHAI);
+    auto reference = cevm_reference(host, tx, EVMC_SHANGHAI);
     expect_results_equal(*result, reference);
 }
 
@@ -321,7 +321,7 @@ TEST(host_bridge, four_deep_static_call_chain_runs_on_gpu)
     auto result = bridge->try_execute(tx, EVMC_SHANGHAI);
 
     ASSERT_TRUE(result.has_value()) << "depth-4 chain must be accepted";
-    auto reference = evmone_reference(host, tx, EVMC_SHANGHAI);
+    auto reference = cevm_reference(host, tx, EVMC_SHANGHAI);
     expect_results_equal(*result, reference);
 }
 
@@ -368,7 +368,7 @@ TEST(host_bridge, nine_deep_static_call_chain_is_rejected)
 TEST(host_bridge, delegatecall_preserves_caller_context)
 {
     // DELEGATECALL: callee runs with the caller's recipient/value/sender.
-    // Verify the bridge's result equals evmone's: that's what makes the
+    // Verify the bridge's result equals cevm's: that's what makes the
     // bridge "correct" for DELEGATECALL — it doesn't have to implement
     // the semantics itself, just confirm the analysis is happy with the
     // static call site, then defer to the host-driven execution.
@@ -413,7 +413,7 @@ TEST(host_bridge, delegatecall_preserves_caller_context)
     auto result = bridge->try_execute(tx, EVMC_SHANGHAI);
 
     ASSERT_TRUE(result.has_value());
-    auto reference = evmone_reference(host, tx, EVMC_SHANGHAI);
+    auto reference = cevm_reference(host, tx, EVMC_SHANGHAI);
     expect_results_equal(*result, reference);
 }
 

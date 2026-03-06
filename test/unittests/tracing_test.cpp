@@ -1,18 +1,18 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2021 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2021 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "test/utils/bytecode.hpp"
 #include <evmc/evmc.hpp>
 #include <evmc/mocked_host.hpp>
-#include <evmone/evmone.h>
-#include <evmone/instructions_traits.hpp>
-#include <evmone/tracing.hpp>
-#include <evmone/vm.hpp>
+#include <cevm/cevm.h>
+#include <cevm/instructions_traits.hpp>
+#include <cevm/tracing.hpp>
+#include <cevm/vm.hpp>
 #include <gmock/gmock.h>
 
 using namespace testing;
-using namespace evmone::test;
+using namespace cevm::test;
 
 class tracing : public Test
 {
@@ -20,14 +20,14 @@ private:
     evmc::VM m_baseline_vm;
 
 protected:
-    evmone::VM& vm;
+    cevm::VM& vm;
     evmc::MockedHost host;
 
     std::ostringstream trace_stream;
 
     tracing()
-      : m_baseline_vm{evmc_create_evmone()},
-        vm{*static_cast<evmone::VM*>(m_baseline_vm.get_raw_pointer())}
+      : m_baseline_vm{evmc_create_cevm()},
+        vm{*static_cast<cevm::VM*>(m_baseline_vm.get_raw_pointer())}
     {}
 
     std::string trace(
@@ -43,7 +43,7 @@ protected:
         return result;
     }
 
-    class OpcodeTracer final : public evmone::Tracer
+    class OpcodeTracer final : public cevm::Tracer
     {
         std::string m_name;
         std::ostringstream& m_trace;
@@ -59,10 +59,10 @@ protected:
 
         void on_instruction_start(uint32_t pc, const intx::uint256* /*stack_top*/,
             int /*stack_height*/, int64_t /*gas*/,
-            const evmone::ExecutionState& /*state*/) noexcept override
+            const cevm::ExecutionState& /*state*/) noexcept override
         {
             const auto opcode = m_code[pc];
-            m_trace << m_name << pc << ":" << evmone::instr::traits[opcode].name << " ";
+            m_trace << m_name << pc << ":" << cevm::instr::traits[opcode].name << " ";
         }
 
     public:
@@ -71,7 +71,7 @@ protected:
         {}
     };
 
-    class Inspector final : public evmone::Tracer
+    class Inspector final : public cevm::Tracer
     {
         bytes m_last_code;
 
@@ -85,7 +85,7 @@ protected:
 
         void on_instruction_start(uint32_t /*pc*/, const intx::uint256* /*stack_top*/,
             int /*stack_height*/, int64_t /*gas*/,
-            const evmone::ExecutionState& /*state*/) noexcept override
+            const cevm::ExecutionState& /*state*/) noexcept override
         {}
 
     public:
@@ -144,7 +144,7 @@ TEST_F(tracing, tracers_removed)
 
 TEST_F(tracing, histogram)
 {
-    vm.add_tracer(evmone::create_histogram_tracer(trace_stream));
+    vm.add_tracer(cevm::create_histogram_tracer(trace_stream));
 
     trace_stream << '\n';
     EXPECT_EQ(trace(add(0, 0)), R"(
@@ -157,7 +157,7 @@ PUSH1,2
 
 TEST_F(tracing, histogram_undefined_instruction)
 {
-    vm.add_tracer(evmone::create_histogram_tracer(trace_stream));
+    vm.add_tracer(cevm::create_histogram_tracer(trace_stream));
 
     trace_stream << '\n';
     EXPECT_EQ(trace(bytecode{"EF"}), R"(
@@ -169,7 +169,7 @@ opcode,count
 
 TEST_F(tracing, histogram_internal_call)
 {
-    vm.add_tracer(evmone::create_histogram_tracer(trace_stream));
+    vm.add_tracer(cevm::create_histogram_tracer(trace_stream));
     trace_stream << '\n';
     EXPECT_EQ(trace(push(0) + OP_DUP1 + OP_SWAP1 + OP_POP + OP_POP, 1), R"(
 --- # HISTOGRAM depth=1
@@ -183,7 +183,7 @@ SWAP1,1
 
 TEST_F(tracing, trace)
 {
-    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+    vm.add_tracer(cevm::create_instruction_tracer(trace_stream));
 
     trace_stream << '\n';
     EXPECT_EQ(trace(add(2, 3)), R"(
@@ -195,7 +195,7 @@ TEST_F(tracing, trace)
 
 TEST_F(tracing, trace_stack)
 {
-    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+    vm.add_tracer(cevm::create_instruction_tracer(trace_stream));
 
     const auto code = push(1) + push(2) + push(3) + push(4) + OP_ADD + OP_ADD + OP_ADD;
     trace_stream << '\n';
@@ -212,7 +212,7 @@ TEST_F(tracing, trace_stack)
 
 TEST_F(tracing, trace_error)
 {
-    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+    vm.add_tracer(cevm::create_instruction_tracer(trace_stream));
 
     const auto code = bytecode{OP_POP};
     trace_stream << '\n';
@@ -223,7 +223,7 @@ TEST_F(tracing, trace_error)
 
 TEST_F(tracing, trace_output)
 {
-    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+    vm.add_tracer(cevm::create_instruction_tracer(trace_stream));
 
     const auto code = push(0xabcdef) + ret_top();
     trace_stream << '\n';
@@ -239,7 +239,7 @@ TEST_F(tracing, trace_output)
 
 TEST_F(tracing, trace_revert)
 {
-    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+    vm.add_tracer(cevm::create_instruction_tracer(trace_stream));
 
     const auto code = mstore(0, 0x0e4404) + push(3) + push(29) + OP_REVERT;
     trace_stream << '\n';
@@ -255,7 +255,7 @@ TEST_F(tracing, trace_revert)
 
 // TEST_F(tracing, trace_create)
 //{
-//     vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+//     vm.add_tracer(cevm::create_instruction_tracer(trace_stream));
 //
 //     trace_stream << '\n';
 //     EXPECT_EQ(trace({}, 2), R"(
@@ -266,7 +266,7 @@ TEST_F(tracing, trace_revert)
 //
 // TEST_F(tracing, trace_static)
 //{
-//     vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+//     vm.add_tracer(cevm::create_instruction_tracer(trace_stream));
 //
 //     trace_stream << '\n';
 //     EXPECT_EQ(trace({}, 2, EVMC_STATIC), R"(
@@ -277,7 +277,7 @@ TEST_F(tracing, trace_revert)
 
 TEST_F(tracing, trace_undefined_instruction)
 {
-    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+    vm.add_tracer(cevm::create_instruction_tracer(trace_stream));
 
     const auto code = bytecode{} + OP_JUMPDEST + "EF";
     trace_stream << '\n';
@@ -304,7 +304,7 @@ TEST_F(tracing, trace_create_instruction)
 {
     using namespace evmc::literals;
 
-    vm.add_tracer(evmone::create_instruction_tracer(trace_stream));
+    vm.add_tracer(cevm::create_instruction_tracer(trace_stream));
 
     trace_stream << '\n';
 

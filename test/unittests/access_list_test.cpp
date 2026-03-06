@@ -38,7 +38,7 @@ using evm::gpu::Config;
 using evm::gpu::Transaction;
 using evm::gpu::TxStatus;
 
-// EIP-2929 constants. These are the ground-truth values evmone (and every
+// EIP-2929 constants. These are the ground-truth values cevm (and every
 // other Ethereum client) charges; the kernels MUST match.
 constexpr uint64_t SLOAD_COLD   = 2100;
 constexpr uint64_t SLOAD_WARM   = 100;

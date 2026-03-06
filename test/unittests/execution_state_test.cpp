@@ -1,23 +1,23 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2020 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2020 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
-#include <evmone/advanced_analysis.hpp>
-#include <evmone/execution_state.hpp>
+#include <cevm/advanced_analysis.hpp>
+#include <cevm/execution_state.hpp>
 #include <gtest/gtest.h>
 #include <type_traits>
 
-static_assert(std::is_default_constructible_v<evmone::ExecutionState>);
-static_assert(std::is_move_constructible_v<evmone::ExecutionState>);
-static_assert(!std::is_copy_constructible_v<evmone::ExecutionState>);
-static_assert(std::is_move_assignable_v<evmone::ExecutionState>);
-static_assert(!std::is_copy_assignable_v<evmone::ExecutionState>);
+static_assert(std::is_default_constructible_v<cevm::ExecutionState>);
+static_assert(std::is_move_constructible_v<cevm::ExecutionState>);
+static_assert(!std::is_copy_constructible_v<cevm::ExecutionState>);
+static_assert(std::is_move_assignable_v<cevm::ExecutionState>);
+static_assert(!std::is_copy_assignable_v<cevm::ExecutionState>);
 
-static_assert(std::is_default_constructible_v<evmone::advanced::AdvancedExecutionState>);
-static_assert(std::is_move_constructible_v<evmone::advanced::AdvancedExecutionState>);
-static_assert(!std::is_copy_constructible_v<evmone::advanced::AdvancedExecutionState>);
-static_assert(std::is_move_assignable_v<evmone::advanced::AdvancedExecutionState>);
-static_assert(!std::is_copy_assignable_v<evmone::advanced::AdvancedExecutionState>);
+static_assert(std::is_default_constructible_v<cevm::advanced::AdvancedExecutionState>);
+static_assert(std::is_move_constructible_v<cevm::advanced::AdvancedExecutionState>);
+static_assert(!std::is_copy_constructible_v<cevm::advanced::AdvancedExecutionState>);
+static_assert(std::is_move_assignable_v<cevm::advanced::AdvancedExecutionState>);
+static_assert(!std::is_copy_assignable_v<cevm::advanced::AdvancedExecutionState>);
 
 TEST(execution_state, construct)
 {
@@ -25,7 +25,7 @@ TEST(execution_state, construct)
     msg.gas = -1;
     const evmc_host_interface host_interface{};
     const uint8_t code[]{0x0f};
-    const evmone::ExecutionState st{
+    const cevm::ExecutionState st{
         msg, EVMC_MAX_REVISION, host_interface, nullptr, {code, std::size(code)}};
 
     EXPECT_EQ(st.memory.size(), 0);
@@ -39,7 +39,7 @@ TEST(execution_state, construct)
 
 TEST(execution_state, default_construct)
 {
-    const evmone::ExecutionState st;
+    const cevm::ExecutionState st;
 
     EXPECT_EQ(st.memory.size(), 0);
     EXPECT_EQ(st.msg, nullptr);
@@ -52,7 +52,7 @@ TEST(execution_state, default_construct)
 
 TEST(execution_state, default_construct_advanced)
 {
-    evmone::advanced::AdvancedExecutionState st;
+    cevm::advanced::AdvancedExecutionState st;
 
     EXPECT_EQ(st.gas_left, 0);
     EXPECT_EQ(st.stack_size(), 0);
@@ -71,9 +71,9 @@ TEST(execution_state, default_construct_advanced)
 TEST(execution_state, reset_advanced)
 {
     const evmc_message msg{};
-    const evmone::advanced::AdvancedCodeAnalysis analysis;
+    const cevm::advanced::AdvancedCodeAnalysis analysis;
 
-    evmone::advanced::AdvancedExecutionState st;
+    cevm::advanced::AdvancedExecutionState st;
     st.gas_left = 1;
     st.gas_refund = 2;
     st.stack.push(6u);
@@ -128,10 +128,10 @@ TEST(execution_state, reset_advanced)
 
 TEST(execution_state, memory_view)
 {
-    evmone::Memory memory;
+    cevm::Memory memory;
     memory.grow(32);
 
-    const evmone::bytes_view view{&memory[0], memory.size()};
+    const cevm::bytes_view view{&memory[0], memory.size()};
     ASSERT_EQ(view.size(), 32);
     EXPECT_EQ(view[0], 0x00);
     EXPECT_EQ(view[1], 0x00);

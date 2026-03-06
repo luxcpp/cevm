@@ -221,7 +221,7 @@ TEST_F(PrecompileTest, Bn256MulByTwo)
     const auto r = disp_->execute(0x07, input, 100000);
     ASSERT_TRUE(r.ok);
     EXPECT_EQ(r.gas_used, 6000u);
-    // Reference output computed by evmone bn254 (matches geth bn256
+    // Reference output computed by cevm bn254 (matches geth bn256
     // ScalarMult of (1, 2) by 2 over the curve in EIP-196 layout).
     EXPECT_EQ(bytes_to_hex(r.output),
         "030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd3"

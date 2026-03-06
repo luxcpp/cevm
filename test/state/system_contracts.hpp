@@ -1,12 +1,12 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include "requests.hpp"
 #include <evmc/evmc.hpp>
 
-namespace evmone::state
+namespace cevm::state
 {
 using namespace evmc::literals;
 
@@ -52,4 +52,4 @@ struct RequestsResult
 /// @return The collected requests and state diff or std::nullopt if the execution has failed.
 [[nodiscard]] std::optional<RequestsResult> system_call_block_end(const StateView& state_view,
     const BlockInfo& block, const BlockHashes& block_hashes, evmc_revision rev, evmc::VM& vm);
-}  // namespace evmone::state
+}  // namespace cevm::state

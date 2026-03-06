@@ -1,10 +1,10 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
-#include <evmone/evmone.h>
-#include <evmone/version.h>
-#include <evmone/vm.hpp>
+#include <cevm/cevm.h>
+#include <cevm/version.h>
+#include <cevm/vm.hpp>
 #include <nlohmann/json.hpp>
 #include <test/state/errors.hpp>
 #include <test/state/ethash_difficulty.hpp>
@@ -21,8 +21,8 @@
 
 namespace fs = std::filesystem;
 namespace json = nlohmann;
-using namespace evmone;
-using namespace evmone::test;
+using namespace cevm;
+using namespace cevm::test;
 using namespace std::literals;
 
 int main(int argc, const char* argv[])
@@ -51,7 +51,7 @@ int main(int argc, const char* argv[])
 
             if (arg == "-v" || arg == "--version")
             {
-                std::cout << "evmone-t8n " EVMONE_VERSION "\n";
+                std::cout << "cevm-t8n " CEVM_VERSION "\n";
                 return 0;
             }
             if (arg == "--state.fork" && ++i < argc)
@@ -154,7 +154,7 @@ int main(int argc, const char* argv[])
         {
             const auto j_txs = json::json::parse(std::ifstream{txs_file});
 
-            evmc::VM vm{evmc_create_evmone()};
+            evmc::VM vm{evmc_create_cevm()};
 
             if (trace)
                 vm.set_option("trace", "1");

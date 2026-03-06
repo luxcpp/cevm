@@ -9,7 +9,7 @@
 
 #include "internal.hpp"
 
-#include <evmone_precompiles/secp256k1.hpp>
+#include <cevm_precompiles/secp256k1.hpp>
 
 #include <intx/intx.hpp>
 

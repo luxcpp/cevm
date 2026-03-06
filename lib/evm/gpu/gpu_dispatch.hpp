@@ -1,12 +1,12 @@
-// Copyright (C) 2026, The evmone Authors. All rights reserved.
+// Copyright (C) 2026, The cevm Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file gpu_dispatch.hpp
-/// GPU execution dispatcher for evmone.
+/// GPU execution dispatcher for cevm.
 ///
 /// Routes EVM block execution to either:
-/// - CPU sequential (baseline evmone)
-/// - CPU parallel (Block-STM scheduler with evmone workers)
+/// - CPU sequential (baseline cevm)
+/// - CPU parallel (Block-STM scheduler with cevm workers)
 /// - GPU parallel (CUDA/Metal kernels for opcode dispatch)
 ///
 /// The GPU path offloads three categories of work:
@@ -29,7 +29,7 @@ namespace evm::gpu
 /// Execution backend selection.
 enum class Backend : uint8_t
 {
-    CPU_Sequential = 0,  ///< Single-threaded evmone (baseline)
+    CPU_Sequential = 0,  ///< Single-threaded cevm (baseline)
     CPU_Parallel = 1,    ///< Block-STM with N worker threads
     GPU_Metal = 2,       ///< Apple Metal compute shaders
     GPU_CUDA = 3,        ///< NVIDIA CUDA kernels
@@ -96,8 +96,8 @@ struct Config
     std::vector<uint8_t> warm_addresses;
     std::vector<uint8_t> warm_storage_keys;
 
-    /// EVM revision for the evmone fallback path. Kernel paths implement
-    /// Cancun unconditionally; this field aligns the evmone path so the
+    /// EVM revision for the cevm fallback path. Kernel paths implement
+    /// Cancun unconditionally; this field aligns the cevm path so the
     /// same tx produces the same result regardless of backend.
     evmc_revision revision = EVMC_CANCUN;
 
@@ -139,7 +139,7 @@ struct BlockResult
     uint32_t re_executions = 0;        ///< Number of re-executed transactions
 
     /// Number of txs that the GPU kernel rejected with CallNotSupported and
-    /// the dispatcher re-ran on CPU evmone. Zero means the GPU executed every
+    /// the dispatcher re-ran on CPU cevm. Zero means the GPU executed every
     /// tx end-to-end. Non-zero is informational, not an error.
     uint32_t gpu_fallback_count = 0;
 

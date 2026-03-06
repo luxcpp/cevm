@@ -1,15 +1,15 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
 #include <evmc/evmc.hpp>
 #include <evmc/hex.hpp>
-#include <evmone_precompiles/keccak.hpp>
+#include <cevm_precompiles/keccak.hpp>
 #include <bit>
 
-namespace evmone
+namespace cevm
 {
 using evmc::address;
 using evmc::bytes;
@@ -31,4 +31,4 @@ inline hash256 keccak256(bytes_view data) noexcept
 {
     return std::bit_cast<hash256>(ethash::keccak256(data.data(), data.size()));
 }
-}  // namespace evmone
+}  // namespace cevm

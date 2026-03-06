@@ -1,12 +1,12 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "ethash_difficulty.hpp"
 #include <algorithm>
 #include <cassert>
 
-namespace evmone::state
+namespace cevm::state
 {
 namespace
 {
@@ -89,4 +89,4 @@ int64_t calculate_difficulty(int64_t parent_difficulty, bool parent_has_ommers,
 
     return std::max(MIN_DIFFICULTY, difficulty);
 }
-}  // namespace evmone::state
+}  // namespace cevm::state

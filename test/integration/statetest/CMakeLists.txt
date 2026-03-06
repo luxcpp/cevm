@@ -1,8 +1,8 @@
-# evmone: Fast Ethereum Virtual Machine implementation
-# Copyright 2022 The evmone Authors.
+# cevm: Fast Ethereum Virtual Machine implementation
+# Copyright 2022 The cevm Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-# Integration tests for evmone-statetest.
+# Integration tests for cevm-statetest.
 
 set(PREFIX ${PREFIX}/statetest)
 set(TESTS1 ${CMAKE_CURRENT_SOURCE_DIR}/tests1)
@@ -12,7 +12,7 @@ set(TESTS_FILTER ${CMAKE_CURRENT_SOURCE_DIR}/filter)
 
 add_test(
     NAME ${PREFIX}/no_arguments
-    COMMAND evmone-statetest
+    COMMAND cevm-statetest
 )
 set_tests_properties(
     ${PREFIX}/no_arguments PROPERTIES
@@ -21,7 +21,7 @@ set_tests_properties(
 
 add_test(
     NAME ${PREFIX}/tests1_list
-    COMMAND evmone-statetest ${TESTS1} --gtest_list_tests
+    COMMAND cevm-statetest ${TESTS1} --gtest_list_tests
 )
 set_tests_properties(
     ${PREFIX}/tests1_list PROPERTIES
@@ -36,7 +36,7 @@ SuiteA\.
 
 add_test(
     NAME ${PREFIX}/single_file_list
-    COMMAND evmone-statetest ${TESTS1}/SuiteA/test1.json --gtest_list_tests
+    COMMAND cevm-statetest ${TESTS1}/SuiteA/test1.json --gtest_list_tests
 )
 set_tests_properties(
     ${PREFIX}/single_file_list PROPERTIES
@@ -48,7 +48,7 @@ set_tests_properties(
 
 add_test(
     NAME ${PREFIX}/multiple_args_list
-    COMMAND evmone-statetest ${TESTS1} ${TESTS2} ${TESTS1}/B/T.json ${TESTS1}/SuiteA --gtest_list_tests
+    COMMAND cevm-statetest ${TESTS1} ${TESTS2} ${TESTS1}/B/T.json ${TESTS1}/SuiteA --gtest_list_tests
 )
 set_tests_properties(
     ${PREFIX}/multiple_args_list PROPERTIES
@@ -67,7 +67,7 @@ SuiteA\.
 
 add_test(
     NAME ${PREFIX}/invalid_path
-    COMMAND evmone-statetest invalid.json
+    COMMAND cevm-statetest invalid.json
 )
 set_tests_properties(
     ${PREFIX}/invalid_path PROPERTIES
@@ -76,7 +76,7 @@ set_tests_properties(
 
 add_test(
     NAME ${PREFIX}/multi_test
-    COMMAND evmone-statetest ${TESTS1}/SuiteA/test2_multi.json
+    COMMAND cevm-statetest ${TESTS1}/SuiteA/test2_multi.json
 )
 set_tests_properties(
     ${PREFIX}/multi_test PROPERTIES
@@ -86,7 +86,7 @@ set_tests_properties(
 
 add_test(
     NAME ${PREFIX}/trace
-    COMMAND evmone-statetest ${TESTS1}/SuiteA/test1.json --trace
+    COMMAND cevm-statetest ${TESTS1}/SuiteA/test1.json --trace
 )
 set(EXPECTED_TRACE [[
 {"pc":0,"op":96,"gas":"0x5c878","gasCost":"0x3","memSize":0,"stack":[],"depth":1,"refund":0,"opName":"PUSH1"}
@@ -109,7 +109,7 @@ set_tests_properties(
 
 add_test(
     NAME ${PREFIX}/tx_invalid_nonce
-    COMMAND evmone-statetest ${TESTS_TX}/invalid_nonce.json
+    COMMAND cevm-statetest ${TESTS_TX}/invalid_nonce.json
 )
 set_tests_properties(
     ${PREFIX}/tx_invalid_nonce PROPERTIES
@@ -118,7 +118,7 @@ set_tests_properties(
 
 add_test(
     NAME ${PREFIX}/filter
-    COMMAND evmone-statetest ${TESTS_FILTER}/one_failing_of_two.json -k passing_test_case
+    COMMAND cevm-statetest ${TESTS_FILTER}/one_failing_of_two.json -k passing_test_case
 )
 set_tests_properties(
     ${PREFIX}/filter PROPERTIES

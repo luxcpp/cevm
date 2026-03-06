@@ -9,13 +9,13 @@
 //      add must zero-pad, not read calldata[0..N].
 //
 //   2. Stack underflow on POP empty — exceptional halt must consume
-//      ALL gas (gas_used == gas_limit), matching evmone semantics.
+//      ALL gas (gas_used == gas_limit), matching cevm semantics.
 //
 //   3. SSTORE writing the 65th distinct slot — must signal Error, not
 //      silently drop the write while charging gas.
 //
 //   4. RETURN with size > MAX_OUTPUT_PER_TX (2048 bytes) — must signal
-//      Error so the dispatcher can fall back to evmone instead of
+//      Error so the dispatcher can fall back to cevm instead of
 //      silently truncating output.
 //
 //   5. BLOBHASH with an index beyond the kernel's MAX_BLOB_HASHES (8) —
@@ -164,7 +164,7 @@ TEST(KernelEdgeCases, SstoreCapOverflow_SignalsError)
 // -- 4. RETURN with output > MAX_OUTPUT_PER_TX signals Error -----------
 //
 // Allocate the memory range and RETURN 2048 bytes. With the fix, kernel
-// emits Error so dispatcher can fall back to evmone. Without the fix,
+// emits Error so dispatcher can fall back to cevm. Without the fix,
 // the kernel silently truncates to 1024 — a divergent return value.
 
 TEST(KernelEdgeCases, ReturnTooLarge_SignalsError)

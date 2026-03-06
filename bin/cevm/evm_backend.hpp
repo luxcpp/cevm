@@ -22,8 +22,8 @@
 #include <unordered_map>
 #include <vector>
 
-// Forward-declare evmone factory.
-extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
+// Forward-declare cevm factory.
+extern "C" struct evmc_vm* evmc_create_cevm(void) noexcept;
 
 namespace cevm
 {
@@ -232,7 +232,7 @@ class EvmBackend final : public VmBackend
 public:
     EvmBackend()
     {
-        vm_ = evmc_create_evmone();
+        vm_ = evmc_create_cevm();
     }
 
     ~EvmBackend() override

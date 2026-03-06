@@ -7,7 +7,7 @@
 // SLOAD/TLOAD reads back an old value while the rest of the transaction
 // continues as if the write succeeded. The kernels now signal an exceptional
 // halt (status=Error, all gas consumed) on the offending opcode so the host
-// dispatcher can route the tx to evmone CPU (which has no cap), or — when
+// dispatcher can route the tx to cevm CPU (which has no cap), or — when
 // no host is available (benchmark mode) — surface an honest "GPU can't
 // process this tx" instead of a corrupt result.
 //
@@ -17,13 +17,13 @@
 //   2. SSTORE one over cap (65 distinct slots), no host — every backend
 //      returns status=Error with gas_used == gas_limit.
 //   3. SSTORE one over cap, MockedHost provided — the dispatcher routes
-//      through evmone (no cap), execution succeeds.
+//      through cevm (no cap), execution succeeds.
 //   4. TSTORE within cap (64 slots) — every GPU backend succeeds; the
 //      kernel CPU path doesn't implement TSTORE so it returns Error
 //      (KernelCpuMissing pattern, mirroring parity_test.cpp).
 //   5. TSTORE one over cap, no host — every GPU backend returns
 //      status=Error with gas_used == gas_limit.
-//   6. TSTORE one over cap, MockedHost provided — evmone executes it.
+//   6. TSTORE one over cap, MockedHost provided — cevm executes it.
 
 #include "gpu/gpu_dispatch.hpp"
 
@@ -34,7 +34,7 @@
 #include <cstdint>
 #include <vector>
 
-extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
+extern "C" struct evmc_vm* evmc_create_cevm(void) noexcept;
 
 namespace {
 
@@ -114,7 +114,7 @@ Transaction make_tx(std::vector<uint8_t> code, uint64_t gas_limit)
     return t;
 }
 
-// Mocked host that lets evmone run any bytecode without external services.
+// Mocked host that lets cevm run any bytecode without external services.
 // The block context fields are populated so opcodes that read them (none of
 // the ones used here, but the dispatcher may touch tx_context regardless)
 // return deterministic values.
@@ -180,13 +180,13 @@ void assert_overflow_signaled(const char* name,
 #endif
 }
 
-// Evmone (host-backed) executes the same bytecode and succeeds because it
+// Cevm (host-backed) executes the same bytecode and succeeds because it
 // has no per-tx storage cap. The host-routed dispatcher path reads bytecode
 // from `tx.data` (parallel_engine.cpp:to_evm_transaction sets etx.code from
 // the data field), so we mirror the bytecode into both fields here. gas_used
-// is the only signal evmone exposes through the dispatcher's host path
-// (status/output are not populated for evmone-routed txs).
-void assert_evmone_succeeds(const char* name,
+// is the only signal cevm exposes through the dispatcher's host path
+// (status/output are not populated for cevm-routed txs).
+void assert_cevm_succeeds(const char* name,
                             std::vector<uint8_t> bytecode,
                             uint64_t gas_limit)
 {
@@ -208,7 +208,7 @@ void assert_evmone_succeeds(const char* name,
     ASSERT_EQ(r.gas_used.size(), 1u);
     EXPECT_GT(r.gas_used[0], 0u);
     EXPECT_LT(r.gas_used[0], tx.gas_limit)
-        << "evmone consumed all gas — bytecode failed even on the unbounded "
+        << "cevm consumed all gas — bytecode failed even on the unbounded "
            "CPU path, which means the test is not exercising what we think";
     EXPECT_TRUE(r.error_message.empty()) << r.error_message;
 }
@@ -264,11 +264,11 @@ TEST(StorageOverflow, SStoreOverCap_NoHost_SignalsError)
 
 // -- 3. SSTORE one over cap, with host ---------------------------------------
 //
-// With a MockedHost, the dispatcher routes the tx through evmone — which
+// With a MockedHost, the dispatcher routes the tx through cevm — which
 // has no per-tx storage cap and therefore executes all 65 writes.
-TEST(StorageOverflow, SStoreOverCap_WithHost_EvmoneSucceeds)
+TEST(StorageOverflow, SStoreOverCap_WithHost_CevmSucceeds)
 {
-    assert_evmone_succeeds("sstore_65_with_host",
+    assert_cevm_succeeds("sstore_65_with_host",
         build_sstore_program(KERNEL_STORAGE_CAP + 1), 5'000'000);
 }
 
@@ -327,9 +327,9 @@ TEST(StorageOverflow, TStoreOverCap_NoHost_SignalsError)
 
 // -- 6. TSTORE one over cap, with host ---------------------------------------
 //
-// MockedHost + evmone: TSTORE is fully supported, no cap, executes all 65.
-TEST(StorageOverflow, TStoreOverCap_WithHost_EvmoneSucceeds)
+// MockedHost + cevm: TSTORE is fully supported, no cap, executes all 65.
+TEST(StorageOverflow, TStoreOverCap_WithHost_CevmSucceeds)
 {
-    assert_evmone_succeeds("tstore_65_with_host",
+    assert_cevm_succeeds("tstore_65_with_host",
         build_tstore_program(KERNEL_STORAGE_CAP + 1), 5'000'000);
 }

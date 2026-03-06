@@ -1,16 +1,16 @@
-// evmone-fuzzer: LibFuzzer based testing tool for EVMC-compatible EVM implementations.
-// Copyright 2019 The evmone Authors.
+// cevm-fuzzer: LibFuzzer based testing tool for EVMC-compatible EVM implementations.
+// Copyright 2019 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <evmc/mocked_host.hpp>
-#include <evmone/evmone.h>
+#include <cevm/cevm.h>
 #include <test/utils/bytecode.hpp>
 #include <test/utils/utils.hpp>
 #include <cstring>
 #include <iostream>
 #include <limits>
 
-using namespace evmone::test;
+using namespace cevm::test;
 
 inline std::ostream& operator<<(std::ostream& os, const evmc_address& addr)
 {
@@ -55,11 +55,11 @@ template <typename T1, typename T2>
 
 static auto print_input = std::getenv("PRINT");
 
-/// The reference VM: evmone Baseline
-static auto ref_vm = evmc::VM{evmc_create_evmone()};
+/// The reference VM: cevm Baseline
+static auto ref_vm = evmc::VM{evmc_create_cevm()};
 
 static evmc::VM external_vms[] = {
-    evmc::VM{evmc_create_evmone(), {{"advanced", ""}}},
+    evmc::VM{evmc_create_cevm(), {{"advanced", ""}}},
 };
 
 
@@ -176,7 +176,7 @@ inline int expand_block_number(uint8_t x) noexcept
 
 inline int64_t expand_block_timestamp(uint8_t x) noexcept
 {
-    // TODO: If timestamp is -1 Aleth and evmone disagrees how to convert it to uint256.
+    // TODO: If timestamp is -1 Aleth and cevm disagrees how to convert it to uint256.
     return x < 255 ? int64_t{16777619} * x : std::numeric_limits<int64_t>::max();
 }
 

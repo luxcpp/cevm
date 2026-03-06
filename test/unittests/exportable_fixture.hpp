@@ -1,11 +1,11 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2024 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2024 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include <gtest/gtest.h>
 
-namespace evmone::test
+namespace cevm::test
 {
 class ExportableFixture : public testing::Test
 {
@@ -15,4 +15,4 @@ protected:
 
     ExportableFixture();
 };
-}  // namespace evmone::test
+}  // namespace cevm::test

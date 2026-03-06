@@ -6,8 +6,8 @@
 #include <chrono>
 #include <cstring>
 
-// Forward-declare evmone factory.
-extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
+// Forward-declare cevm factory.
+extern "C" struct evmc_vm* evmc_create_cevm(void) noexcept;
 
 // GPU batch ecrecover (from luxcpp/gpu).
 // Weak symbols: link succeeds even without luxgpu, falls back to no-op.

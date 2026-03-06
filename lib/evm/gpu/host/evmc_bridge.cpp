@@ -10,15 +10,15 @@
 #include "call_frame.hpp"
 #include "code_resolver.hpp"
 
-#include <evmone_precompiles/keccak.hpp>
+#include <cevm_precompiles/keccak.hpp>
 
 #include <algorithm>
 #include <cstring>
 #include <unordered_map>
 #include <utility>
 
-// evmone factory (provided by the main `evm` library).
-extern "C" struct evmc_vm* evmc_create_evmone(void) noexcept;
+// cevm factory (provided by the main `evm` library).
+extern "C" struct evmc_vm* evmc_create_cevm(void) noexcept;
 
 namespace evm::gpu::host {
 
@@ -211,15 +211,15 @@ std::optional<PreResolved> walk_static(
     return out;
 }
 
-// Run a single transaction through evmone, with `host` providing all state.
+// Run a single transaction through cevm, with `host` providing all state.
 // This is byte-equivalent to the dispatcher's CPU fallback path. The bridge
 // uses this both as the "one true source" for results and as the safety
 // net for txs we don't want to risk on the kernel.
-TxResult run_via_evmone(
+TxResult run_via_cevm(
     evmc::Host& host, const Transaction& tx, evmc_revision rev,
     const std::vector<uint8_t>& code_to_execute)
 {
-    auto* vm = evmc_create_evmone();
+    auto* vm = evmc_create_cevm();
     if (vm == nullptr)
         return TxResult{EVMC_INTERNAL_ERROR, 0, 0, {}, false};
 
@@ -278,7 +278,7 @@ std::optional<TxResult> GpuHostBridge::Impl::try_execute_one(
         // CREATE: the initcode lives in `tx.input`. Analyze it. If it is
         // pure (deterministic — no CALL/CREATE/SELFDESTRUCT), the bridge
         // can run it on the kernel and compute the resulting address from
-        // (sender, sender_nonce). Otherwise we hand it to evmone.
+        // (sender, sender_nonce). Otherwise we hand it to cevm.
         code = tx.input;
         if (code.empty())
             return std::nullopt;
@@ -287,7 +287,7 @@ std::optional<TxResult> GpuHostBridge::Impl::try_execute_one(
         if (!info.pure)
             return std::nullopt;
 
-        auto out = run_via_evmone(host, tx, rev, code);
+        auto out = run_via_cevm(host, tx, rev, code);
         out.used_gpu = true;  // pure initcode → kernel-eligible
         return out;
     }
@@ -297,10 +297,10 @@ std::optional<TxResult> GpuHostBridge::Impl::try_execute_one(
     if (code_size > 0)
         host.copy_code(tx.recipient, 0, code.data(), code_size);
 
-    // -- Pure value transfer? Just let evmone do it; nothing GPU about that.
+    // -- Pure value transfer? Just let cevm do it; nothing GPU about that.
     if (code.empty())
     {
-        auto out = run_via_evmone(host, tx, rev, code);
+        auto out = run_via_cevm(host, tx, rev, code);
         out.used_gpu = true;  // trivially leaf
         return out;
     }
@@ -329,14 +329,14 @@ std::optional<TxResult> GpuHostBridge::Impl::try_execute_one(
     // CallNotSupported. So even with a full code dictionary we cannot
     // suspend/resume the kernel on a CALL. The bridge orchestration
     // resolves what's needed for the GPU side to be feasible, then runs
-    // the transaction through evmone (which uses the same host the kernel
+    // the transaction through cevm (which uses the same host the kernel
     // would consult). Result is byte-equivalent.
     //
     // When the kernel grows a CALL implementation that takes a code
     // dictionary as input, this path becomes a real GPU dispatch with
     // `resolved->code` as a side buffer. Static analysis and
     // pre-resolution remain the unchanged contract.
-    auto out = run_via_evmone(host, tx, rev, code);
+    auto out = run_via_cevm(host, tx, rev, code);
     out.used_gpu = true;
     return out;
 }

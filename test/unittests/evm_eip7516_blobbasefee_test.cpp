@@ -1,5 +1,5 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 /// This file contains EVM unit tests for EIP-7516: "BLOBBASEFEE opcode"
@@ -9,7 +9,7 @@
 
 using namespace evmc::literals;
 using namespace intx::literals;
-using namespace evmone::test;
+using namespace cevm::test;
 
 TEST_P(evm, blobbasefee_pre_cancun)
 {

@@ -1,11 +1,11 @@
-# evmone: Fast Ethereum Virtual Machine implementation
-# Copyright 2019-2020 The evmone Authors.
+# cevm: Fast Ethereum Virtual Machine implementation
+# Copyright 2019-2020 The cevm Authors.
 # SPDX-License-Identifier: Apache-2.0
 
 include(GoogleTest)
 include(${PROJECT_SOURCE_DIR}/evmc/cmake/EVMC.cmake)
 
-set(evmone_private_include_dir ${PROJECT_SOURCE_DIR}/lib)
+set(cevm_private_include_dir ${PROJECT_SOURCE_DIR}/lib)
 
 hunter_add_package(GTest)
 find_package(GTest CONFIG REQUIRED)
@@ -17,7 +17,7 @@ hunter_add_package(nlohmann_json)
 find_package(nlohmann_json CONFIG REQUIRED)
 
 include(CableBuildInfo)
-cable_add_buildinfo_library(PROJECT_NAME evmone)
+cable_add_buildinfo_library(PROJECT_NAME cevm)
 
 add_subdirectory(utils)
 add_subdirectory(bench)
@@ -31,11 +31,11 @@ add_subdirectory(statetest)
 add_subdirectory(t8n)
 add_subdirectory(unittests)
 
-set(targets evmone-bench evmone-bench-internal evmone-blockchaintest evmone-precompiles-bench evmone-state evmone-statetest evmone-t8n evmone-unittests)
+set(targets cevm-bench cevm-bench-internal cevm-blockchaintest cevm-precompiles-bench cevm-state cevm-statetest cevm-t8n cevm-unittests)
 
-if(EVMONE_FUZZING)
+if(CEVM_FUZZING)
     add_subdirectory(fuzzer)
-    list(APPEND targets evmone-fuzzer)
+    list(APPEND targets cevm-fuzzer)
 endif()
 
 set_target_properties(
@@ -45,11 +45,11 @@ set_target_properties(
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}
 )
 
-get_target_property(type evmone TYPE)
+get_target_property(type cevm TYPE)
 if(type STREQUAL SHARED_LIBRARY)
-    evmc_add_vm_test(NAME ${PROJECT_NAME}/evmc-vmtester TARGET evmone)
+    evmc_add_vm_test(NAME ${PROJECT_NAME}/evmc-vmtester TARGET cevm)
 
     if(TARGET evm-test)
-        add_test(NAME ${PROJECT_NAME}/evm-test COMMAND evm-test $<TARGET_FILE:evmone>)
+        add_test(NAME ${PROJECT_NAME}/evm-test COMMAND evm-test $<TARGET_FILE:cevm>)
     endif()
 endif()

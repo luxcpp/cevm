@@ -1,4 +1,4 @@
-// Copyright (C) 2026, The evmone Authors. All rights reserved.
+// Copyright (C) 2026, The cevm Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file parallel_host.hpp
@@ -51,7 +51,7 @@ struct ReadWriteSet
 /// - set_storage: writes to MvMemory, records in write-set.
 /// - All other calls delegate to base host unchanged.
 ///
-/// This is the critical integration point between Block-STM and evmone.
+/// This is the critical integration point between Block-STM and cevm.
 class ParallelHost : public evmc::Host
 {
 public:

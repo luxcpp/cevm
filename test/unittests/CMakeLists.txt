@@ -1,11 +1,11 @@
-# evmone: Fast Ethereum Virtual Machine implementation
-# Copyright 2018 The evmone Authors.
+# cevm: Fast Ethereum Virtual Machine implementation
+# Copyright 2018 The cevm Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-# The internal evmone unit tests. The generic EVM ones are also built in.
-add_executable(evmone-unittests)
+# The internal cevm unit tests. The generic EVM ones are also built in.
+add_executable(cevm-unittests)
 target_sources(
-    evmone-unittests PRIVATE
+    cevm-unittests PRIVATE
     analysis_test.cpp
     baseline_analysis_test.cpp
     blockchaintest_loader_test.cpp
@@ -34,7 +34,7 @@ target_sources(
     evmmax_bn254_pairing_test.cpp
     evmmax_test.cpp
     evmmax_secp256k1_test.cpp
-    evmone_test.cpp
+    cevm_test.cpp
     execution_state_test.cpp
     exportable_fixture.hpp
     exportable_fixture.cpp
@@ -80,11 +80,11 @@ target_sources(
     statetest_withdrawals_test.cpp
     tracing_test.cpp
 )
-target_link_libraries(evmone-unittests PRIVATE evmone evmone::evmmax evmone::experimental evmone::state evmone::testutils GTest::gtest GTest::gtest_main)
-target_include_directories(evmone-unittests PRIVATE ${evmone_private_include_dir})
+target_link_libraries(cevm-unittests PRIVATE cevm cevm::evmmax cevm::experimental cevm::state cevm::testutils GTest::gtest GTest::gtest_main)
+target_include_directories(cevm-unittests PRIVATE ${cevm_private_include_dir})
 
 gtest_discover_tests(
-    evmone-unittests
+    cevm-unittests
     TEST_PREFIX ${PROJECT_NAME}/unittests/
     PROPERTIES
     ENVIRONMENT LLVM_PROFILE_FILE=${PROJECT_BINARY_DIR}/unittests-%p.profraw
@@ -92,7 +92,7 @@ gtest_discover_tests(
 
 # Provide the project version to selected source files.
 set_source_files_properties(
-    evmone_test.cpp
+    cevm_test.cpp
     main.cpp
     PROPERTIES COMPILE_DEFINITIONS PROJECT_VERSION="${PROJECT_VERSION}"
 )

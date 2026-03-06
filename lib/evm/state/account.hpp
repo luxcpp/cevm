@@ -7,7 +7,7 @@
 #pragma once
 
 #include <evmc/evmc.hpp>
-#include <evmone_precompiles/keccak.hpp>
+#include <cevm_precompiles/keccak.hpp>
 #include <intx/intx.hpp>
 #include <cstdint>
 #include <vector>

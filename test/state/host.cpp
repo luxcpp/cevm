@@ -1,12 +1,12 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "host.hpp"
 #include "precompiles.hpp"
-#include <evmone/constants.hpp>
+#include <cevm/constants.hpp>
 
-namespace evmone::state
+namespace cevm::state
 {
 bool Host::account_exists(const address& addr) const noexcept
 {
@@ -475,4 +475,4 @@ void Host::set_transient_storage(
     m_state.journal_transient_storage_change(addr, key, slot);
     slot = value;
 }
-}  // namespace evmone::state
+}  // namespace cevm::state

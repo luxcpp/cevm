@@ -1,4 +1,4 @@
-# AGENTS instructions for the evmone project
+# AGENTS instructions for the cevm project
 
 ## Review guidelines
 

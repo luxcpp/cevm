@@ -1,11 +1,11 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2022 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include <evmc/evmc.hpp>
 
-namespace evmone::state
+namespace cevm::state
 {
 /// The precompile identifiers.
 enum class PrecompileId : uint8_t
@@ -35,4 +35,4 @@ bool is_precompile(evmc_revision rev, const evmc::address& addr) noexcept;
 
 /// Executes the message to a precompiled contract (msg.code_address must be a precompile).
 evmc::Result call_precompile(evmc_revision rev, const evmc_message& msg) noexcept;
-}  // namespace evmone::state
+}  // namespace cevm::state

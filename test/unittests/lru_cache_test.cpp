@@ -1,14 +1,14 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2024 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2024 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 
-#include <evmone/lru_cache.hpp>
+#include <cevm/lru_cache.hpp>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <numeric>
 #include <random>
 
-using evmone::LRUCache;
+using cevm::LRUCache;
 
 TEST(lru_cache, capacity1)
 {

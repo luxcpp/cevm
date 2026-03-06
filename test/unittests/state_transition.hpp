@@ -1,18 +1,18 @@
-// evmone: Fast Ethereum Virtual Machine implementation
-// Copyright 2023 The evmone Authors.
+// cevm: Fast Ethereum Virtual Machine implementation
+// Copyright 2023 The cevm Authors.
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include "exportable_fixture.hpp"
-#include <evmone/evmone.h>
+#include <cevm/cevm.h>
 #include <test/state/errors.hpp>
 #include <test/state/host.hpp>
 #include <test/utils/test_state.hpp>
 
-namespace evmone::test
+namespace cevm::test
 {
-using namespace evmone;
-using namespace evmone::state;
+using namespace cevm;
+using namespace cevm::state;
 
 /// Fixture to defining test cases in form similar to JSON State Tests.
 ///
@@ -34,8 +34,8 @@ protected:
 
     static constexpr auto Coinbase = 0xc014bace_address;
 
-    static inline evmc::VM vm{evmc_create_evmone()};
-    static inline evmc::VM tracing_vm{evmc_create_evmone(), {{"trace", "1"}}};
+    static inline evmc::VM vm{evmc_create_cevm()};
+    static inline evmc::VM tracing_vm{evmc_create_cevm(), {{"trace", "1"}}};
 
     struct ExpectedAccount
     {
@@ -100,4 +100,4 @@ protected:
         const std::variant<TransactionReceipt, std::error_code>& res, const TestState& post);
 };
 
-}  // namespace evmone::test
+}  // namespace cevm::test

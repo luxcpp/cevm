@@ -1,5 +1,5 @@
 # evm: Fast Ethereum Virtual Machine implementation
-# Copyright 2019 The evmone Authors.
+# Copyright 2019 The cevm Authors.
 # SPDX-License-Identifier: Apache-2.0
 
 include(LibraryTools)
@@ -37,7 +37,7 @@ function(_luxcpp_evm_apply_coverage tgt)
 endfunction()
 
 add_library(evm
-    ${include_dir}/evmone/evmone.h
+    ${include_dir}/cevm/cevm.h
     advanced_analysis.cpp
     advanced_analysis.hpp
     advanced_execution.cpp
@@ -64,15 +64,15 @@ add_library(evm
     vm.hpp
 )
 target_compile_features(evm PUBLIC cxx_std_20)
-target_link_libraries(evm PUBLIC evmc::evmc intx::intx PRIVATE evmone::precompiles)
+target_link_libraries(evm PUBLIC evmc::evmc intx::intx PRIVATE cevm::precompiles)
 target_include_directories(evm PUBLIC
     $<BUILD_INTERFACE:${include_dir}>$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-if(EVMONE_X86_64_ARCH_LEVEL GREATER_EQUAL 2)
-    # Add CPU architecture runtime check. The EVMONE_X86_64_ARCH_LEVEL has a valid value.
+if(CEVM_X86_64_ARCH_LEVEL GREATER_EQUAL 2)
+    # Add CPU architecture runtime check. The CEVM_X86_64_ARCH_LEVEL has a valid value.
     target_sources(evm PRIVATE cpu_check.cpp)
-    set_source_files_properties(cpu_check.cpp PROPERTIES COMPILE_DEFINITIONS EVMONE_X86_64_ARCH_LEVEL=${EVMONE_X86_64_ARCH_LEVEL})
+    set_source_files_properties(cpu_check.cpp PROPERTIES COMPILE_DEFINITIONS CEVM_X86_64_ARCH_LEVEL=${CEVM_X86_64_ARCH_LEVEL})
 endif()
 
 if(CABLE_COMPILER_GNULIKE)
@@ -144,7 +144,7 @@ _luxcpp_evm_apply_coverage(evm-gpu)
 # CUDA backend (optional). Adds the .cu kernels and host launchers, and
 # defines EVM_CUDA on evm-gpu so gpu_dispatch.cpp routes through the
 # direct CUDA path.
-if(EVMONE_CUDA)
+if(CEVM_CUDA)
     add_library(evm-cuda STATIC
         gpu/cuda/keccak256.cu
         gpu/cuda/keccak_host.cpp
@@ -220,7 +220,7 @@ add_library(evm-precompiles STATIC
     gpu/precompiles/bls12_381_cpu.cpp
 )
 target_compile_features(evm-precompiles PUBLIC cxx_std_20)
-target_link_libraries(evm-precompiles PUBLIC evmone::precompiles intx::intx)
+target_link_libraries(evm-precompiles PUBLIC cevm::precompiles intx::intx)
 target_include_directories(evm-precompiles PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<BUILD_INTERFACE:${include_dir}>
@@ -236,7 +236,7 @@ if(APPLE AND LUXCPP_GPU_FOUND)
     )
     target_link_libraries(evm-precompiles PUBLIC "-framework Metal" "-framework Foundation")
 endif()
-if(EVMONE_CUDA AND LUXCPP_GPU_FOUND)
+if(CEVM_CUDA AND LUXCPP_GPU_FOUND)
     target_sources(evm-precompiles PRIVATE
         gpu/precompiles/ecrecover_cuda.cpp
         gpu/precompiles/bls12_381_cuda.cpp
@@ -317,7 +317,7 @@ if(GTest_FOUND)
     endif()
 
     # Stack-depth parity test: bytecode with stack depth >32, proves
-    # Metal/CUDA match CPU evmone now that the spec's 1024-deep stack is wired.
+    # Metal/CUDA match CPU cevm now that the spec's 1024-deep stack is wired.
     add_executable(stack-depth-test
         ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/stack_depth_test.cpp
     )
@@ -384,7 +384,7 @@ if(GTest_FOUND)
 
     # Per-opcode spec test for the kernel CPU interpreter. Each new opcode in
     # evm_interpreter.hpp gets a vector here; passing means status, gas, and
-    # output match the EIP-cited cost (cross-checked against evmone CANCUN).
+    # output match the EIP-cited cost (cross-checked against cevm CANCUN).
     add_executable(cpu-interpreter-spec-test
         ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/cpu_interpreter_spec_test.cpp
     )
@@ -423,7 +423,7 @@ if(APPLE)
         state/gpu_hashtable.mm
     )
     target_compile_features(evm-gpu-state PUBLIC cxx_std_20)
-    target_link_libraries(evm-gpu-state PUBLIC evm evmc::evmc intx::intx evmone::precompiles)
+    target_link_libraries(evm-gpu-state PUBLIC evm evmc::evmc intx::intx cevm::precompiles)
     target_link_libraries(evm-gpu-state PUBLIC "-framework Metal" "-framework Foundation")
     target_include_directories(evm-gpu-state PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -433,7 +433,7 @@ if(APPLE)
     # GPU state tests
     add_executable(evm-test-gpu-state state/test_gpu_state.cpp)
     target_compile_features(evm-test-gpu-state PRIVATE cxx_std_20)
-    target_link_libraries(evm-test-gpu-state PRIVATE evm-gpu-state evm evmc::evmc intx::intx evmone::precompiles)
+    target_link_libraries(evm-test-gpu-state PRIVATE evm-gpu-state evm evmc::evmc intx::intx cevm::precompiles)
 
     # Metal host dispatchers: tx_validate, bls, block_stm
     add_library(evm-metal-hosts STATIC
@@ -454,7 +454,7 @@ if(APPLE)
     target_compile_features(evm-test-pipeline PRIVATE cxx_std_20)
     target_link_libraries(evm-test-pipeline PRIVATE
         evm-metal-hosts evm-kernel-metal evm-gpu-state evm-gpu evm-state
-        evm evmc::evmc intx::intx evmone::precompiles
+        evm evmc::evmc intx::intx cevm::precompiles
         "-framework Metal" "-framework Foundation"
     )
     target_include_directories(evm-test-pipeline PRIVATE
@@ -496,13 +496,13 @@ if(APPLE)
     )
 endif()
 
-# State layer: full Ethereum state (accounts, storage, journal) for evmone
+# State layer: full Ethereum state (accounts, storage, journal) for cevm
 add_library(evm-state STATIC
     state/state_db.cpp
     state/processor.cpp
 )
 target_compile_features(evm-state PUBLIC cxx_std_20)
-target_link_libraries(evm-state PUBLIC evm evmc::evmc intx::intx evmone::precompiles)
+target_link_libraries(evm-state PUBLIC evm evmc::evmc intx::intx cevm::precompiles)
 target_include_directories(evm-state PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<BUILD_INTERFACE:${include_dir}>
@@ -599,7 +599,7 @@ endif()
 #
 # Turns evmc::Host* into a code dictionary that the GPU EVM kernel can run
 # against. Pure leaf transactions and statically call-resolvable transactions
-# go through the bridge; everything else falls back to evmone via the
+# go through the bridge; everything else falls back to cevm via the
 # dispatcher.
 # -----------------------------------------------------------------------------
 add_library(evm-host-bridge STATIC
@@ -609,7 +609,7 @@ add_library(evm-host-bridge STATIC
 target_compile_features(evm-host-bridge PUBLIC cxx_std_20)
 target_link_libraries(evm-host-bridge
     PUBLIC evmc::evmc evm-gpu evm
-    PRIVATE evmone::precompiles)
+    PRIVATE cevm::precompiles)
 target_include_directories(evm-host-bridge PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<BUILD_INTERFACE:${include_dir}>
@@ -618,12 +618,12 @@ if(APPLE)
     target_sources(evm-host-bridge PRIVATE gpu/host/frame_metal.mm)
     target_link_libraries(evm-host-bridge PUBLIC evm-kernel-metal)
 endif()
-if(EVMONE_CUDA)
+if(CEVM_CUDA)
     target_sources(evm-cuda PRIVATE gpu/host/frame_cuda.cu)
 endif()
 
 # Self-contained host bridge unit-test executable. Uses the GoogleTest already
-# pulled in by Hunter so we don't need the full evmone test framework.
+# pulled in by Hunter so we don't need the full cevm test framework.
 hunter_add_package(GTest)
 find_package(GTest CONFIG QUIET)
 if(GTest_FOUND)
