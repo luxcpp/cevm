@@ -32,10 +32,10 @@ constexpr uint32_t kItemSizes[] = {
     sizeof(DecodedTx),     // Decode
     sizeof(VerifiedTx),    // Crypto
     sizeof(CommitItem),    // Commit
-    sizeof(uint32_t) * 4,  // StateRequest (placeholder for v0.31)
-    sizeof(uint32_t) * 4,  // StateResp     (placeholder)
-    sizeof(uint32_t) * 4,  // Vote          (placeholder)
-    sizeof(uint32_t) * 4,  // QuorumOut     (placeholder)
+    sizeof(StateRequest),  // StateRequest (out: GPU -> host)
+    sizeof(StatePage),     // StateResp    (in:  host -> GPU)
+    sizeof(uint32_t) * 4,  // Vote      (placeholder for v0.37)
+    sizeof(uint32_t) * 4,  // QuorumOut (placeholder for v0.37)
 };
 static_assert(sizeof(kItemSizes) / sizeof(kItemSizes[0]) == kNumServices,
               "kItemSizes must cover every ServiceId");
@@ -194,14 +194,82 @@ public:
             in.blob_size   = static_cast<uint32_t>(tx.bytes.size());
             in.gas_limit   = tx.gas_limit;
             in.nonce       = tx.nonce;
-            in.origin_lo   = static_cast<uint32_t>(tx.origin & 0xFFFFFFFFu);
-            in.origin_hi   = static_cast<uint32_t>(tx.origin >> 32);
+            // High bit of origin_hi flags "needs_state". The kernel's
+            // decode stage routes flagged txs to the StateRequest service
+            // instead of the Crypto/Commit fast path.
+            uint32_t origin_lo = static_cast<uint32_t>(tx.origin & 0xFFFFFFFFu);
+            uint32_t origin_hi = static_cast<uint32_t>(tx.origin >> 32);
+            if (tx.needs_state) origin_hi |= 0x80000000u;
+            in.origin_lo = origin_lo;
+            in.origin_hi = origin_hi;
             blob_arena_.insert(blob_arena_.end(), tx.bytes.begin(), tx.bytes.end());
 
             items[tail & ingress.mask] = in;
             std::atomic_thread_fence(std::memory_order_release);
             ingress.tail = tail + 1u;
             ingress.pushed += 1u;
+        }
+    }
+
+    std::vector<HostStateRequest> poll_state_requests(SlotHandle h) override {
+        std::lock_guard<std::mutex> g(mu_);
+        std::vector<HostStateRequest> out;
+        if (!check_handle(h)) return out;
+
+        auto* hdrs = static_cast<RingHeader*>([slot_.hdrs_buf contents]);
+        RingHeader& req = hdrs[static_cast<uint32_t>(ServiceId::StateRequest)];
+        auto* items = reinterpret_cast<StateRequest*>(
+            static_cast<uint8_t*>([slot_.items_buf contents]) + req.items_ofs);
+
+        while (true) {
+            uint32_t head = req.head;
+            uint32_t tail = req.tail;
+            if (head >= tail) break;
+            const auto& d = items[head & req.mask];
+            HostStateRequest hr{};
+            hr.tx_index = d.tx_index;
+            hr.key_type = d.key_type;
+            hr.priority = d.priority;
+            hr.key_lo   = d.key_lo;
+            hr.key_hi   = d.key_hi;
+            out.push_back(hr);
+            req.head     = head + 1u;
+            req.consumed += 1u;
+        }
+        return out;
+    }
+
+    void push_state_pages(SlotHandle h,
+                          std::span<const HostStatePage> pages) override {
+        std::lock_guard<std::mutex> g(mu_);
+        if (!check_handle(h)) return;
+        if (pages.empty()) return;
+
+        auto* hdrs = static_cast<RingHeader*>([slot_.hdrs_buf contents]);
+        RingHeader& resp = hdrs[static_cast<uint32_t>(ServiceId::StateResp)];
+        auto* items = reinterpret_cast<StatePage*>(
+            static_cast<uint8_t*>([slot_.items_buf contents]) + resp.items_ofs);
+
+        for (const auto& p : pages) {
+            uint32_t head = resp.head;
+            uint32_t tail = resp.tail;
+            if (tail - head >= resp.capacity) break;
+
+            StatePage out{};
+            out.tx_index  = p.tx_index;
+            out.key_type  = p.key_type;
+            out.status    = p.status;
+            out.key_lo    = p.key_lo;
+            out.key_hi    = p.key_hi;
+            const size_t inline_cap = sizeof(out.data);
+            const size_t copy = std::min<size_t>(p.data.size(), inline_cap);
+            out.data_size = static_cast<uint32_t>(copy);
+            if (copy) std::memcpy(out.data, p.data.data(), copy);
+
+            items[tail & resp.mask] = out;
+            std::atomic_thread_fence(std::memory_order_release);
+            resp.tail   = tail + 1u;
+            resp.pushed += 1u;
         }
     }
 

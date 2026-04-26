@@ -127,6 +127,51 @@ struct alignas(16) CommitItem {
 static_assert(sizeof(CommitItem) == 32, "CommitItem layout drift");
 
 // =============================================================================
+// Cold-state page-fault rings (v0.32)
+// =============================================================================
+//
+// A tx that misses GPU-resident state emits a StateRequest and suspends.
+// The host drains the request ring, services it via mmap/LSM/cache, and
+// pushes a StatePage onto the response ring. The slot kernel then wakes
+// the suspended tx fiber and re-runs it from the suspend point.
+//
+// v0.32 ships the ring infrastructure + host APIs end-to-end so we can
+// validate the page-fault round-trip. Full fiber suspension/resume lives
+// in v0.36 alongside the on-device EVM interpreter; until then a tx is
+// classified as "needs_state" by a host-supplied flag (HostTxBlob::
+// needs_state) and the kernel emits a request on its behalf at the
+// decode stage.
+
+enum class StateKeyType : uint32_t {
+    Account = 0,
+    Storage = 1,
+    Code    = 2,
+};
+
+struct alignas(16) StateRequest {
+    uint32_t tx_index;
+    uint32_t key_type;       ///< StateKeyType
+    uint32_t priority;       ///< 0=normal, 1=deadline-critical
+    uint32_t _pad0;
+    uint64_t key_lo;         ///< first half of the 16-byte key digest
+    uint64_t key_hi;         ///< second half
+};
+
+static_assert(sizeof(StateRequest) == 32, "StateRequest layout drift");
+
+struct alignas(16) StatePage {
+    uint32_t tx_index;       ///< matches the request
+    uint32_t key_type;
+    uint32_t status;         ///< 0=ok, 1=missing, 2=fault
+    uint32_t data_size;      ///< up to 4 KiB inline; larger pages out-of-band
+    uint64_t key_lo;
+    uint64_t key_hi;
+    uint8_t  data[64];       ///< inline payload — accounts/storage slots fit
+};
+
+static_assert(sizeof(StatePage) == 96, "StatePage layout drift");
+
+// =============================================================================
 // Slot descriptor (host -> GPU, written once per slot)
 // =============================================================================
 

@@ -45,6 +45,36 @@ struct HostTxBlob {
     uint32_t nonce = 0;
     uint64_t origin = 0;            ///< first 8 bytes of sender; full address
                                     ///< recovery moves into the kernel later
+    bool needs_state = false;       ///< host hint that this tx will miss
+                                    ///< GPU-resident state and must page-
+                                    ///< fault; flips routing to the
+                                    ///< StateRequest service in decode.
+                                    ///< v0.36 replaces this with on-device
+                                    ///< miss detection from SLOAD/SSTORE/
+                                    ///< EXTCODE* opcodes.
+};
+
+/// State-request page-fault descriptor — host-facing view of what the GPU
+/// asked for. Host's job is to look up the underlying account/storage/
+/// code and post back a HostStatePage on the response ring.
+struct HostStateRequest {
+    uint32_t tx_index = 0;
+    uint32_t key_type = 0;          ///< StateKeyType
+    uint32_t priority = 0;
+    uint64_t key_lo = 0;
+    uint64_t key_hi = 0;
+};
+
+/// State page — host's reply. data_size==0 means "missing" and the kernel
+/// faults the tx as Error in v0.32; v0.36 adds richer fault paths.
+struct HostStatePage {
+    uint32_t tx_index = 0;
+    uint32_t key_type = 0;
+    uint32_t status = 0;            ///< 0=ok, 1=missing, 2=fault
+    uint64_t key_lo = 0;
+    uint64_t key_hi = 0;
+    std::vector<uint8_t> data;      ///< up to 64 bytes inline; larger
+                                    ///< pages stage out-of-band (v0.34)
 };
 
 /// Engine — one per device. Owns the slot kernel pipeline state, the
@@ -82,6 +112,25 @@ public:
     /// Non-blocking: read the latest published SlotResult. Mostly useful
     /// from a separate poller thread.
     virtual SlotResult poll_result(SlotHandle h) const = 0;
+
+    /// Drain GPU-emitted state requests. The host services these via its
+    /// LSM/cache/disk path and posts pages back via push_state_pages.
+    /// Returns however many requests were available; empty vector means
+    /// no faults pending. Caller's loop typically:
+    ///
+    ///     while (slot in progress)
+    ///         requests = poll_state_requests()
+    ///         if requests.empty() run_epoch()
+    ///         else
+    ///             pages = state_db.batch_get(requests)
+    ///             push_state_pages(pages)
+    virtual std::vector<HostStateRequest> poll_state_requests(SlotHandle h) = 0;
+
+    /// Post host responses back to the slot kernel. Pages are matched to
+    /// suspended fibers by tx_index + key digest. v0.32 stores the page
+    /// in the StateResp ring; v0.36 wires fiber resume.
+    virtual void push_state_pages(SlotHandle h,
+                                  std::span<const HostStatePage> pages) = 0;
 
     /// Tell the kernel to drain and finalize at the end of the next epoch.
     virtual void request_close(SlotHandle h) = 0;

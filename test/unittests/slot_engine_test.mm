@@ -25,6 +25,8 @@
 #include <thread>
 #include <vector>
 
+using evm::gpu::slot::HostStatePage;
+using evm::gpu::slot::HostStateRequest;
 using evm::gpu::slot::HostTxBlob;
 using evm::gpu::slot::ServiceId;
 using evm::gpu::slot::SlotDescriptor;
@@ -229,6 +231,72 @@ void test_end_to_end_stress()
     PASS("end_to_end_stress");
 }
 
+// ---------------------------------------------------------------------------
+// 6. Async cold-state page-fault round trip (v0.32)
+//
+// Mix of fast-path txs (no state miss) and slow-path txs (needs_state).
+// The host poll loop services state requests, posts pages back, and the
+// kernel resumes the suspended fibers via the StateResp service. The slot
+// finalizes only when every tx has reached commit.
+// ---------------------------------------------------------------------------
+void test_state_page_fault_round_trip()
+{
+    auto engine = SlotEngine::create();
+    EXPECT("sf.create", engine != nullptr);
+    auto h = engine->begin_slot(make_desc(6));
+    EXPECT("sf.handle", h.valid());
+
+    constexpr size_t N_FAST = 64;
+    constexpr size_t N_SLOW = 16;
+    std::vector<HostTxBlob> txs;
+    for (size_t i = 0; i < N_FAST; ++i) txs.push_back(make_tx(i + 1, uint32_t(i)));
+    for (size_t i = 0; i < N_SLOW; ++i) {
+        auto t = make_tx(0xA0000 + i + 1, uint32_t(N_FAST + i));
+        t.needs_state = true;
+        txs.push_back(t);
+    }
+    engine->push_txs(h, txs);
+
+    // Run epochs and service state requests as they appear. The slot
+    // engine cannot finalize while requests are pending.
+    engine->request_close(h);
+    SlotResult r{};
+    size_t pages_serviced = 0;
+    for (int epoch = 0; epoch < 64; ++epoch) {
+        r = engine->run_epoch(h);
+        auto requests = engine->poll_state_requests(h);
+        if (!requests.empty()) {
+            std::vector<HostStatePage> pages;
+            pages.reserve(requests.size());
+            for (const auto& req : requests) {
+                HostStatePage p{};
+                p.tx_index = req.tx_index;
+                p.key_type = req.key_type;
+                p.status   = 0;          // host found the page
+                p.key_lo   = req.key_lo;
+                p.key_hi   = req.key_hi;
+                p.data.assign({0xDE, 0xAD, 0xBE, 0xEF});
+                pages.push_back(std::move(p));
+            }
+            engine->push_state_pages(h, pages);
+            pages_serviced += pages.size();
+        }
+        if (r.status != 0u) break;
+    }
+
+    EXPECT("sf.finalized", r.status == 1u);
+    EXPECT("sf.tx_total", r.tx_count == N_FAST + N_SLOW);
+    EXPECT("sf.pages_match", pages_serviced == N_SLOW);
+
+    auto rstats = engine->ring_stats(h, ServiceId::StateRequest);
+    auto pstats = engine->ring_stats(h, ServiceId::StateResp);
+    EXPECT("sf.req_consumed",  rstats.consumed == N_SLOW);
+    EXPECT("sf.resp_consumed", pstats.consumed == N_SLOW);
+
+    engine->end_slot(h);
+    PASS("state_page_fault_round_trip");
+}
+
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/)
@@ -243,6 +311,7 @@ int main(int /*argc*/, char** /*argv*/)
         test_multi_tx_counters();
         test_bounded_backpressure();
         test_end_to_end_stress();
+        test_state_page_fault_round_trip();
         std::printf("[slot_engine_test] passed=%d failed=%d\n",
                     g_passed, g_failed);
         return g_failed == 0 ? 0 : 1;

@@ -111,6 +111,25 @@ struct alignas(16) CommitItem {
     ulong _pad0;
 };
 
+struct alignas(16) StateRequest {
+    uint  tx_index;
+    uint  key_type;
+    uint  priority;
+    uint  _pad0;
+    ulong key_lo;
+    ulong key_hi;
+};
+
+struct alignas(16) StatePage {
+    uint  tx_index;
+    uint  key_type;
+    uint  status;
+    uint  data_size;
+    ulong key_lo;
+    ulong key_hi;
+    uchar data[64];
+};
+
 // =============================================================================
 // Ring helpers — relaxed atomics + threadgroup_barrier(mem_device).
 // Same pattern proven in v3_persistent.metal (v0.30 wave-dispatch).
@@ -196,26 +215,76 @@ static inline uint drain_ingress(
 }
 
 static inline uint drain_decode(
-    device RingHeader* decode_hdr, device DecodedTx*  decode_items,
-    device RingHeader* crypto_hdr, device VerifiedTx* crypto_items,
+    device RingHeader* decode_hdr,    device DecodedTx*    decode_items,
+    device RingHeader* crypto_hdr,    device VerifiedTx*   crypto_items,
+    device RingHeader* statereq_hdr,  device StateRequest* statereq_items,
     uint budget)
 {
-    // v0.31 stub: no real sender recovery yet. We pass origin straight
-    // through; the secp256k1 step lands here in v0.32 (the existing
-    // metal_op_ecrecover_batch can be invoked over the slot's input arena).
+    // v0.32: txs flagged as needs_state (high bit of origin_hi) suspend
+    // here — we emit a StateRequest and skip the Crypto/Commit path. The
+    // wake-up + admit happens later in drain_state_resp once the host
+    // posts a StatePage. v0.36's on-device EVM replaces this host hint
+    // with real SLOAD/SSTORE/EXTCODE* miss detection.
     uint processed = 0u;
     for (uint i = 0u; i < budget; ++i) {
         DecodedTx d;
         if (!ring_try_pop(decode_hdr, decode_items, d))
             break;
+        const uint needs_state_bit = 0x80000000u;
+        if ((d.origin_hi & needs_state_bit) != 0u) {
+            StateRequest sr;
+            sr.tx_index = d.tx_index;
+            sr.key_type = 0u;          // Account default; a real fiber VM
+                                       // emits this from the opcode that
+                                       // missed.
+            sr.priority = 0u;
+            sr._pad0    = 0u;
+            sr.key_lo   = ulong(d.origin_lo);
+            sr.key_hi   = ulong(d.origin_hi & ~needs_state_bit);
+            if (!ring_try_push(statereq_hdr, statereq_items, sr)) {
+                (void)ring_try_push(decode_hdr, decode_items, d);
+                break;
+            }
+            ++processed;
+            continue;
+        }
         VerifiedTx v;
         v.tx_index  = d.tx_index;
-        v.admission = (d.status == 0u) ? 0u : 1u;  // 0=admit
+        v.admission = (d.status == 0u) ? 0u : 1u;
         v.gas_limit = d.gas_limit;
         v.origin_lo = d.origin_lo;
         v.origin_hi = d.origin_hi;
         if (!ring_try_push(crypto_hdr, crypto_items, v)) {
             (void)ring_try_push(decode_hdr, decode_items, d);
+            break;
+        }
+        ++processed;
+    }
+    return processed;
+}
+
+static inline uint drain_state_resp(
+    device RingHeader* resp_hdr,   device StatePage*  resp_items,
+    device RingHeader* crypto_hdr, device VerifiedTx* crypto_items,
+    uint budget)
+{
+    // Wake-up path: a host-posted StatePage carries the tx_index of the
+    // suspended fiber. v0.32 simply re-injects the tx into the Crypto
+    // queue with admission=0 (page accepted). v0.36 plumbs the page
+    // payload back into the EVM frame at the suspend PC.
+    uint processed = 0u;
+    for (uint i = 0u; i < budget; ++i) {
+        StatePage p;
+        if (!ring_try_pop(resp_hdr, resp_items, p))
+            break;
+        VerifiedTx v;
+        v.tx_index  = p.tx_index;
+        v.admission = (p.status == 0u) ? 0u : 1u;
+        v.gas_limit = 21000u;          // until fiber resume lands
+        v.origin_lo = uint(p.key_lo & 0xFFFFFFFFu);
+        v.origin_hi = uint(p.key_hi & 0xFFFFFFFFu);
+        if (!ring_try_push(crypto_hdr, crypto_items, v)) {
+            (void)ring_try_push(resp_hdr, resp_items, p);
             break;
         }
         ++processed;
@@ -331,15 +400,19 @@ kernel void slot_scheduler_kernel(
     // Derive per-service ring views from the headers' items_ofs fields.
     // Items are interleaved in one MTLBuffer; the host computed offsets
     // when allocating the arena.
-    device RingHeader* ingress_hdr = hdrs + 0;
-    device RingHeader* decode_hdr  = hdrs + 1;
-    device RingHeader* crypto_hdr  = hdrs + 2;
-    device RingHeader* commit_hdr  = hdrs + 3;
+    device RingHeader* ingress_hdr   = hdrs + 0;
+    device RingHeader* decode_hdr    = hdrs + 1;
+    device RingHeader* crypto_hdr    = hdrs + 2;
+    device RingHeader* commit_hdr    = hdrs + 3;
+    device RingHeader* statereq_hdr  = hdrs + 4;
+    device RingHeader* stateresp_hdr = hdrs + 5;
 
-    device IngressTx*  ingress_items = (device IngressTx*) (items_arena + ingress_hdr->items_ofs);
-    device DecodedTx*  decode_items  = (device DecodedTx*) (items_arena + decode_hdr->items_ofs);
-    device VerifiedTx* crypto_items  = (device VerifiedTx*)(items_arena + crypto_hdr->items_ofs);
-    device CommitItem* commit_items  = (device CommitItem*)(items_arena + commit_hdr->items_ofs);
+    device IngressTx*    ingress_items   = (device IngressTx*)   (items_arena + ingress_hdr->items_ofs);
+    device DecodedTx*    decode_items    = (device DecodedTx*)   (items_arena + decode_hdr->items_ofs);
+    device VerifiedTx*   crypto_items    = (device VerifiedTx*)  (items_arena + crypto_hdr->items_ofs);
+    device CommitItem*   commit_items    = (device CommitItem*)  (items_arena + commit_hdr->items_ofs);
+    device StateRequest* statereq_items  = (device StateRequest*)(items_arena + statereq_hdr->items_ofs);
+    device StatePage*    stateresp_items = (device StatePage*)   (items_arena + stateresp_hdr->items_ofs);
 
     if (gid == uint(0)) {
         (void)drain_ingress(ingress_hdr, ingress_items,
@@ -348,6 +421,7 @@ kernel void slot_scheduler_kernel(
     } else if (gid == uint(1)) {
         (void)drain_decode(decode_hdr, decode_items,
                            crypto_hdr, crypto_items,
+                           statereq_hdr, statereq_items,
                            budget);
     } else if (gid == uint(2)) {
         (void)drain_crypto(crypto_hdr, crypto_items,
@@ -355,9 +429,15 @@ kernel void slot_scheduler_kernel(
                            budget);
     } else if (gid == uint(3)) {
         (void)drain_commit(commit_hdr, commit_items, result, budget);
+    } else if (gid == uint(5)) {
+        // ServiceId::StateResp — host-posted state pages wake suspended
+        // fibers by re-injecting them into the Crypto queue.
+        (void)drain_state_resp(stateresp_hdr, stateresp_items,
+                               crypto_hdr, crypto_items,
+                               budget);
     } else {
-        // ServiceId::StateRequest, StateResp, Vote, QuorumOut land in
-        // v0.32+ — for v0.31 these workgroups exit immediately.
+        // ServiceId::StateRequest is host-drained — kernel only emits
+        // into it from drain_decode. Vote / QuorumOut land in v0.37.
     }
 
     // Finalization. The naive "all rings empty" check fires too early —
