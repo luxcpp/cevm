@@ -124,7 +124,9 @@ struct Round {
     id<MTLBuffer> mvcc_buf       = nil;
     id<MTLBuffer> dag_buf        = nil;
     id<MTLBuffer> fibers_buf     = nil;
-    id<MTLBuffer> mvcc_count_buf = nil;
+    id<MTLBuffer> mvcc_count_buf      = nil;
+    id<MTLBuffer> vote_verified_buf   = nil;
+    id<MTLBuffer> vote_capacity_buf   = nil;
 };
 
 class QuasarGPUEngineImpl final : public QuasarGPUEngine {
@@ -132,10 +134,12 @@ public:
     QuasarGPUEngineImpl(id<MTLDevice> device,
                         id<MTLCommandQueue> queue,
                         id<MTLComputePipelineState> pso,
+                        id<MTLComputePipelineState> verify_pso,
                         NSString* device_name)
         : device_(device)
         , queue_(queue)
         , pso_(pso)
+        , verify_pso_(verify_pso)
         , device_name_str_([device_name UTF8String]) {}
 
     ~QuasarGPUEngineImpl() override {
@@ -171,10 +175,13 @@ public:
         round_.dag_buf        = [device_ newBufferWithLength:sizeof(DagNodeHost) * kMaxFibers     options:MTLResourceStorageModeShared];
         round_.fibers_buf     = [device_ newBufferWithLength:sizeof(FiberSlot) * kMaxFibers       options:MTLResourceStorageModeShared];
         round_.mvcc_count_buf = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
+        round_.vote_verified_buf = [device_ newBufferWithLength:sizeof(uint32_t) * kDefaultRingCapacity options:MTLResourceStorageModeShared];
+        round_.vote_capacity_buf = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
 
         if (!round_.desc_buf || !round_.result_buf || !round_.hdrs_buf
             || !round_.items_buf || !round_.tx_index_buf || !round_.mvcc_buf
-            || !round_.dag_buf  || !round_.fibers_buf || !round_.mvcc_count_buf)
+            || !round_.dag_buf  || !round_.fibers_buf || !round_.mvcc_count_buf
+            || !round_.vote_verified_buf || !round_.vote_capacity_buf)
             return QuasarRoundHandle{0};
 
         std::memcpy([round_.desc_buf contents], &round_.desc, sizeof(QuasarRoundDescriptor));
@@ -183,8 +190,10 @@ public:
         std::memset([round_.mvcc_buf contents], 0, sizeof(MvccSlot) * kDefaultMvccSlots);
         std::memset([round_.dag_buf contents], 0, sizeof(DagNodeHost) * kMaxFibers);
         std::memset([round_.fibers_buf contents], 0, sizeof(FiberSlot) * kMaxFibers);
+        std::memset([round_.vote_verified_buf contents], 0, sizeof(uint32_t) * kDefaultRingCapacity);
         *static_cast<uint32_t*>([round_.tx_index_buf contents]) = 0;
         *static_cast<uint32_t*>([round_.mvcc_count_buf contents]) = kDefaultMvccSlots;
+        *static_cast<uint32_t*>([round_.vote_capacity_buf contents]) = kDefaultRingCapacity;
 
         // Stamp the result.mode so the host doesn't have to read it back
         // separately.
@@ -378,18 +387,35 @@ public:
         desc_dev->closing_flag    = round_.desc.closing_flag;
 
         @autoreleasepool {
+            // v0.38 - two encoders in one MTLCommandBuffer.
             id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
+
+            id<MTLComputeCommandEncoder> venc = [cmd computeCommandEncoder];
+            [venc setComputePipelineState:verify_pso_];
+            [venc setBuffer:round_.desc_buf          offset:0 atIndex:0];
+            [venc setBuffer:round_.hdrs_buf          offset:0 atIndex:1];
+            [venc setBuffer:round_.items_buf         offset:0 atIndex:2];
+            [venc setBuffer:round_.vote_verified_buf offset:0 atIndex:3];
+            [venc setBuffer:round_.vote_capacity_buf offset:0 atIndex:4];
+            const NSUInteger vtpg = std::min<NSUInteger>(
+                verify_pso_.maxTotalThreadsPerThreadgroup, 256);
+            [venc dispatchThreads:MTLSizeMake(kDefaultRingCapacity, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(vtpg, 1, 1)];
+            [venc endEncoding];
+
             id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
             [enc setComputePipelineState:pso_];
-            [enc setBuffer:round_.desc_buf       offset:0 atIndex:0];
-            [enc setBuffer:round_.result_buf     offset:0 atIndex:1];
-            [enc setBuffer:round_.hdrs_buf       offset:0 atIndex:2];
-            [enc setBuffer:round_.items_buf      offset:0 atIndex:3];
-            [enc setBuffer:round_.tx_index_buf   offset:0 atIndex:4];
-            [enc setBuffer:round_.mvcc_buf       offset:0 atIndex:5];
-            [enc setBuffer:round_.dag_buf        offset:0 atIndex:6];
-            [enc setBuffer:round_.fibers_buf     offset:0 atIndex:7];
-            [enc setBuffer:round_.mvcc_count_buf offset:0 atIndex:8];
+            [enc setBuffer:round_.desc_buf          offset:0 atIndex:0];
+            [enc setBuffer:round_.result_buf        offset:0 atIndex:1];
+            [enc setBuffer:round_.hdrs_buf          offset:0 atIndex:2];
+            [enc setBuffer:round_.items_buf         offset:0 atIndex:3];
+            [enc setBuffer:round_.tx_index_buf      offset:0 atIndex:4];
+            [enc setBuffer:round_.mvcc_buf          offset:0 atIndex:5];
+            [enc setBuffer:round_.dag_buf           offset:0 atIndex:6];
+            [enc setBuffer:round_.fibers_buf        offset:0 atIndex:7];
+            [enc setBuffer:round_.mvcc_count_buf    offset:0 atIndex:8];
+            [enc setBuffer:round_.vote_verified_buf offset:0 atIndex:9];
+            [enc setBuffer:round_.vote_capacity_buf offset:0 atIndex:10];
 
             [enc dispatchThreadgroups:MTLSizeMake(kNumServices, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -458,6 +484,7 @@ private:
     id<MTLDevice>               device_;
     id<MTLCommandQueue>         queue_;
     id<MTLComputePipelineState> pso_;
+    id<MTLComputePipelineState> verify_pso_;
     std::string                 device_name_str_;
 
     mutable std::mutex   mu_;
@@ -468,7 +495,10 @@ private:
 
 }  // namespace
 
-std::unique_ptr<QuasarGPUEngine> QuasarGPUEngine::create()
+// Internal factory — public QuasarGPUEngine::create() lives in the
+// runtime dispatcher (quasar_gpu_runtime.cpp), which picks Metal on Apple
+// and CUDA when EVM_CUDA is on.
+std::unique_ptr<QuasarGPUEngine> create_quasar_gpu_engine_metal()
 {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -488,7 +518,13 @@ std::unique_ptr<QuasarGPUEngine> QuasarGPUEngine::create()
             [device newComputePipelineStateWithFunction:fn error:&err];
         if (!pso) return nullptr;
 
-        return std::make_unique<QuasarGPUEngineImpl>(device, queue, pso, [device name]);
+        id<MTLFunction> vfn = [lib newFunctionWithName:@"quasar_verify_votes_kernel"];
+        if (!vfn) return nullptr;
+        id<MTLComputePipelineState> verify_pso =
+            [device newComputePipelineStateWithFunction:vfn error:&err];
+        if (!verify_pso) return nullptr;
+
+        return std::make_unique<QuasarGPUEngineImpl>(device, queue, pso, verify_pso, [device name]);
     }
 }
 

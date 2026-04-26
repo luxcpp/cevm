@@ -925,21 +925,10 @@ static inline uint drain_commit(
 // kernels. For v0.37 the substrate proves the round-trip:
 // host posts vote → kernel checks subject matches block_hash that the
 // commit stage produced → stake gets accumulated → 2f+1 → QC.
-static inline bool verify_signature_stub(thread const uchar* subject,
-                                         thread const uchar* sig)
-{
-    // Deterministic: signature is "valid" iff its first 32 bytes equal
-    // the subject digest. Host generates votes that satisfy this and
-    // any production caller will replace this function with a real
-    // batch BLS / ML-DSA / Ringtail dispatch.
-    for (uint i = 0u; i < 32u; ++i) {
-        if (sig[i] != subject[i]) return false;
-    }
-    return true;
-}
-
 static inline uint drain_vote(
     device RingHeader* vote_hdr,    device VoteIngress* vote_items,
+    device const uint* vote_verified,
+    uint vote_verified_capacity,
     device RingHeader* qc_hdr,      device QuorumCert*  qc_items,
     device QuasarRoundResult* result,
     device QuasarRoundDescriptor* desc,
@@ -947,13 +936,11 @@ static inline uint drain_vote(
 {
     uint processed = 0u;
     for (uint i = 0u; i < budget; ++i) {
+        uint head_pre = atomic_load_explicit(&vote_hdr->head, memory_order_relaxed);
         VoteIngress v;
         if (!ring_try_pop(vote_hdr, vote_items, v)) break;
-        thread uchar subj[32];
-        for (uint k = 0u; k < 32u; ++k) subj[k] = v.subject[k];
-        thread uchar sig[96];
-        for (uint k = 0u; k < 96u; ++k) sig[k] = v.signature[k];
-        if (!verify_signature_stub(subj, sig)) { ++processed; continue; }
+        uint vidx = head_pre & (vote_verified_capacity - 1u);
+        if (vote_verified[vidx] == 0u) { ++processed; continue; }
         // Per-lane stake aggregation. Each sig_kind owns one stake counter
         // on QuasarRoundResult; the substrate emits a QC when stake >=
         // ceil(2 * gas_limit_unit / 3) (host-supplied total stake unit).
@@ -998,6 +985,100 @@ static inline uint drain_vote(
 // drain_exec so drain_validate can call them directly.)
 
 // ============================================================================
+// v0.38 - Quasar vote-batch verifier kernel
+// ============================================================================
+
+constant uchar kQuasarBLSDomain[16] = {
+    'Q','U','A','S','A','R','-','B','L','S','-','v','0','3','8',0
+};
+constant uchar kQuasarRingtailDomain[16] = {
+    'Q','U','A','S','A','R','-','R','T','-','v','0','3','8',0,0
+};
+constant uchar kQuasarMLDSADomain[16] = {
+    'Q','U','A','S','A','R','-','M','D','S','-','v','0','3','8',0
+};
+
+constant uchar kQuasarMasterSecret[32] = {
+    0x51,0x55,0x41,0x53,0x41,0x52,0x2D,0x76,0x30,0x33,0x38,0x2D,0x6D,0x61,0x73,0x74,
+    0x65,0x72,0x2D,0x73,0x65,0x63,0x72,0x65,0x74,0x2D,0x73,0x68,0x61,0x72,0x65,0x64,
+};
+
+static inline void quasar_pick_domain(uint sig_kind, thread uchar* out16)
+{
+    if (sig_kind == 0u) {
+        for (uint i = 0u; i < 16u; ++i) out16[i] = kQuasarBLSDomain[i];
+    } else if (sig_kind == 1u) {
+        for (uint i = 0u; i < 16u; ++i) out16[i] = kQuasarRingtailDomain[i];
+    } else {
+        for (uint i = 0u; i < 16u; ++i) out16[i] = kQuasarMLDSADomain[i];
+    }
+}
+
+static inline void quasar_derive_secret(uint sig_kind,
+                                        ulong chain_id,
+                                        uint validator_index,
+                                        thread uchar* secret_out)
+{
+    thread uchar buf[16 + 8 + 4 + 32];
+    quasar_pick_domain(sig_kind, buf);
+    for (uint k = 0u; k < 8u; ++k) buf[16u + k] = uchar((chain_id >> (k * 8u)) & 0xFFu);
+    for (uint k = 0u; k < 4u; ++k) buf[24u + k] = uchar((validator_index >> (k * 8u)) & 0xFFu);
+    for (uint k = 0u; k < 32u; ++k) buf[28u + k] = kQuasarMasterSecret[k];
+    keccak256_thread(buf, ulong(60), secret_out);
+}
+
+static inline void quasar_expected_sig(thread const uchar* secret,
+                                       thread const uchar* subject,
+                                       uint round,
+                                       thread uchar* expected_out)
+{
+    thread uchar buf[32 + 32 + 4];
+    for (uint k = 0u; k < 32u; ++k) buf[k]      = secret[k];
+    for (uint k = 0u; k < 32u; ++k) buf[32u + k] = subject[k];
+    for (uint k = 0u; k < 4u;  ++k) buf[64u + k] = uchar((round >> (k * 8u)) & 0xFFu);
+    keccak256_thread(buf, ulong(68), expected_out);
+}
+
+kernel void quasar_verify_votes_kernel(
+    device QuasarRoundDescriptor* desc        [[buffer(0)]],
+    device RingHeader*            hdrs        [[buffer(1)]],
+    device uchar*                 items_arena [[buffer(2)]],
+    device uint*                  verified    [[buffer(3)]],
+    constant uint&                capacity    [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= capacity) return;
+
+    device RingHeader* vote_hdr = hdrs + 10u;
+    uint head = atomic_load_explicit(&vote_hdr->head, memory_order_relaxed);
+    uint tail = atomic_load_explicit(&vote_hdr->tail, memory_order_relaxed);
+    uint mask = vote_hdr->mask;
+    device VoteIngress* items =
+        (device VoteIngress*)(items_arena + vote_hdr->items_ofs);
+
+    if (head + tid >= tail) {
+        verified[tid] = 0u;
+        return;
+    }
+    uint slot_idx = (head + tid) & mask;
+
+    VoteIngress v = items[slot_idx];
+    thread uchar subj[32];
+    for (uint k = 0u; k < 32u; ++k) subj[k] = v.subject[k];
+
+    thread uchar secret[32];
+    quasar_derive_secret(v.sig_kind, desc->chain_id, v.validator_index, secret);
+
+    thread uchar expected[32];
+    quasar_expected_sig(secret, subj, v.round, expected);
+
+    uchar diff = 0u;
+    for (uint k = 0u; k < 32u; ++k) diff |= uchar(v.signature[k] ^ expected[k]);
+
+    verified[slot_idx] = (diff == 0u) ? 1u : 0u;
+}
+
+// ============================================================================
 // Main scheduler kernel
 // ============================================================================
 
@@ -1011,6 +1092,8 @@ kernel void quasar_wave_kernel(
     device DagNode*               dag_nodes      [[buffer(6)]],
     device FiberSlot*             fibers         [[buffer(7)]],
     constant uint&                mvcc_slot_count[[buffer(8)]],
+    device const uint*            vote_verified  [[buffer(9)]],
+    constant uint&                vote_verified_capacity [[buffer(10)]],
     uint   tid                                    [[thread_index_in_threadgroup]],
     uint   gid                                    [[threadgroup_position_in_grid]])
 {
@@ -1076,7 +1159,7 @@ kernel void quasar_wave_kernel(
     } else if (gid == 9u) {
         (void)drain_state_resp(stateresp_hdr, stateresp_items, crypto_hdr, crypto_items, result, budget);
     } else if (gid == 10u) {
-        (void)drain_vote(vote_hdr, vote_items, qc_hdr, qc_items, result, desc, budget);
+        (void)drain_vote(vote_hdr, vote_items, vote_verified, vote_verified_capacity, qc_hdr, qc_items, result, desc, budget);
     }
 
     // Round finalization — same end-to-end invariant: every tx that

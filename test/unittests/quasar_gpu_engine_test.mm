@@ -21,6 +21,7 @@
 #import <Foundation/Foundation.h>
 
 #include "consensus/quasar/gpu/quasar_gpu_engine.hpp"
+#include "consensus/quasar/gpu/quasar_sig.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -353,67 +354,67 @@ void test_block_stm_conflict_repair()
     PASS("block_stm_conflict_repair");
 }
 
-// 8. Quasar quorum aggregation per lane.
-//
-// In the v0.37 substrate the verify-stub accepts a vote iff the first 32
-// bytes of the signature equal the subject digest. We therefore craft
-// votes that match — proving the round-trip from host vote ingestion to
-// per-lane stake aggregation to QC emission, exactly as the real BLS /
-// ML-DSA / Ringtail batch verifiers will plug in.
+// 8. Quasar quorum aggregation per lane - v0.38 real verifier.
 void test_quasar_quorum_round_trip()
 {
     auto e = QuasarGPUEngine::create();
     auto desc = make_desc(8);
-    desc.base_fee = 90u;          // total stake unit; threshold = 2/3 = 60
+    desc.chain_id = 1u;
+    desc.base_fee = 90u;
     auto h = e->begin_round(desc);
 
-    // Run a round with one tx so the result has real roots.
     std::vector<HostTxBlob> txs = { make_tx(0xBABEu, 0u) };
     e->push_txs(h, txs);
     e->request_close(h);
     auto r = e->run_until_done(h, 8);
     EXPECT("q.finalized", r.status == 1u);
 
-    // Use the block hash as the vote subject. The verify-stub accepts
-    // signatures whose first 32 bytes equal subject — so we craft votes
-    // accordingly. Real BLS / ML-DSA shows up by replacing
-    // verify_signature_stub with a batch dispatch.
     uint8_t subject[32];
     std::memcpy(subject, r.block_hash, 32);
+    const uint32_t round = 8u;
 
-    // BLS lane: validators 0..2, stakes 30,30,30 → total 90 ≥ 2/3 → QC.
-    // ML-DSA lane: validator 0 only, stake 10 → no QC.
-    // Ringtail lane: validators 0,1, stakes 30,30 → 60 ≥ 60 → QC.
-    std::vector<HostVote> votes;
     auto mk = [&](uint32_t vi, uint32_t weight, uint32_t kind) {
         HostVote v{};
         v.validator_index = vi;
-        v.round           = 8u;
+        v.round           = round;
         v.stake_weight    = weight;
         v.sig_kind        = kind;
         std::memcpy(v.block_hash, subject, 32);
-        v.signature.assign(96, 0);
-        std::memcpy(v.signature.data(), subject, 32);
+        v.signature = quasar::gpu::sig::sign(kind, desc.chain_id, vi, round, subject);
         return v;
     };
-    votes.push_back(mk(0, 30, 0));  // BLS
-    votes.push_back(mk(1, 30, 0));  // BLS
-    votes.push_back(mk(2, 30, 0));  // BLS
-    votes.push_back(mk(0, 10, 2));  // ML-DSA
-    votes.push_back(mk(0, 30, 1));  // Ringtail
-    votes.push_back(mk(1, 30, 1));  // Ringtail
+
+    std::vector<HostVote> votes;
+    votes.push_back(mk(0, 30, 0));
+    votes.push_back(mk(1, 30, 0));
+    votes.push_back(mk(2, 30, 0));
+    HostVote bad_bls = mk(3, 60, 0);
+    bad_bls.signature[0] ^= 0xFFu;
+    votes.push_back(bad_bls);
+
+    votes.push_back(mk(0, 10, 2));
+    HostVote replay = mk(4, 80, 0);
+    replay.sig_kind = 2;
+    votes.push_back(replay);
+
+    votes.push_back(mk(0, 30, 1));
+    votes.push_back(mk(1, 30, 1));
     e->push_votes(h, votes);
 
-    // Run another wave tick to drain Vote → QuorumOut.
     auto r2 = e->run_epoch(h);
     auto certs = e->poll_quorum_certs(h);
 
+    std::printf("  q.stake bls=%u rt=%u mldsa=%u certs=%zu\n",
+                r2.quorum_stake_bls, r2.quorum_stake_rt,
+                r2.quorum_stake_mldsa, certs.size());
+
     EXPECT("q.bls_quorum",   r2.quorum_status_bls   == 1u);
-    EXPECT("q.bls_stake",    r2.quorum_stake_bls    == 90u);
+    EXPECT("q.bls_stake_excludes_tamper", r2.quorum_stake_bls    == 90u);
     EXPECT("q.rt_quorum",    r2.quorum_status_rt    == 1u);
     EXPECT("q.rt_stake",     r2.quorum_stake_rt     == 60u);
     EXPECT("q.mldsa_no_q",   r2.quorum_status_mldsa == 0u);
-    EXPECT("q.certs_count",  certs.size() == 2u);   // BLS + Ringtail
+    EXPECT("q.mldsa_stake_excludes_replay", r2.quorum_stake_mldsa == 10u);
+    EXPECT("q.certs_count",  certs.size() == 2u);
     e->end_round(h);
     PASS("quasar_quorum_round_trip");
 }

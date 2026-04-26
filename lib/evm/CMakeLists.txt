@@ -161,7 +161,20 @@ if(CEVM_CUDA)
         gpu/cuda/evm_kernel.cu
         gpu/cuda/evm_kernel_host.cpp
         gpu/cuda/evm_kernel_host.hpp
+        # QuasarGPU CUDA backend (mirror of lib/consensus/quasar/gpu/quasar_wave.metal +
+        # quasar_gpu_engine.mm). Same QuasarGPUEngine API, persistent CTAs.
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_wave.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_gpu_engine_cuda.cpp
     )
+    # On non-Apple CUDA-only builds, evm-kernel-metal is not built, so the
+    # runtime dispatcher needs to live in evm-cuda. On Apple+CUDA dual
+    # builds the dispatcher already lives in evm-kernel-metal — don't
+    # double-include.
+    if(NOT APPLE)
+        target_sources(evm-cuda PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_gpu_runtime.cpp
+        )
+    endif()
     target_compile_features(evm-cuda PUBLIC cxx_std_20)
     set_target_properties(evm-cuda PROPERTIES
         CUDA_STANDARD 17
@@ -171,6 +184,7 @@ if(CEVM_CUDA)
     )
     target_include_directories(evm-cuda PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../>   # lib/ for consensus/quasar/gpu/...
         $<BUILD_INTERFACE:${include_dir}>
     )
     target_link_libraries(evm-cuda PUBLIC
@@ -178,8 +192,9 @@ if(CEVM_CUDA)
         CUDA::cudart
     )
 
-    # Wire EVM_CUDA into evm-gpu so the dispatcher routes through CUDA.
+    # Wire EVM_CUDA into evm-gpu and the QuasarGPU runtime dispatcher.
     target_compile_definitions(evm-gpu PUBLIC EVM_CUDA)
+    target_compile_definitions(evm-cuda PUBLIC EVM_CUDA)
     target_link_libraries(evm-gpu PUBLIC evm-cuda)
     _luxcpp_evm_apply_coverage(evm-cuda)
 endif()
@@ -454,6 +469,7 @@ if(APPLE)
         gpu/kernel/evm_kernel_host.mm
         gpu/kernel/v3_persistent_host.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_gpu_engine.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_gpu_runtime.cpp
     )
     target_include_directories(evm-kernel-metal PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../>
@@ -567,7 +583,7 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_gpu_engine_test.mm)
     target_compile_features(quasar-gpu-engine-test PRIVATE cxx_std_20)
     target_link_libraries(quasar-gpu-engine-test PRIVATE
-        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx cevm::precompiles
         "-framework Metal" "-framework Foundation"
     )
     target_include_directories(quasar-gpu-engine-test PRIVATE
