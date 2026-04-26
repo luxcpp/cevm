@@ -309,27 +309,15 @@ int main(int /*argc*/, char** /*argv*/)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     @autoreleasepool {
-        // V3 persistent-kernel architecture is incompatible with Apple
-        // Silicon's GPU compute scheduler, which does not pre-empt hot-
-        // spinning workgroups. The exec workgroup hogs all cycles and
-        // starves the validate/commit siblings even when launched as a
-        // single-grid dispatch. Re-architecture (one-shot dispatch per
-        // wave, matching evm_kernel.metal) is tracked for v0.30. Until
-        // then, skip the runtime tests so CI stays green.
-        std::printf("[v3_persistent_test] SKIP: persistent-kernel runtime "
-                    "starves on Apple Silicon; v0.30 will switch to one-shot "
-                    "dispatch. Build/link verified.\n");
+        std::printf("[v3_persistent_test] starting\n");
         std::fflush(stdout);
-        return 0;
+        test_queue_drain_basic();
+        test_empty_wave();
+        test_counters_monotonic();
+        test_shutdown();
+        test_backpressure();
+        std::printf("[v3_persistent_test] passed=%d failed=%d\n",
+                    g_passed, g_failed);
+        return g_failed == 0 ? 0 : 1;
     }
 }
-
-// Suppress unused-function warnings for the disabled test bodies.
-[[maybe_unused]] static auto _unused_tests = []() {
-    (void)&test_queue_drain_basic;
-    (void)&test_empty_wave;
-    (void)&test_counters_monotonic;
-    (void)&test_shutdown;
-    (void)&test_backpressure;
-    return 0;
-}();

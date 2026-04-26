@@ -2,13 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file v3_persistent_host.mm
-/// V3 persistent-kernel host driver implementation.
+/// V3 wave-dispatch host driver.
+///
+/// One MTLCommandBuffer per host wave. Each enqueue_wave call:
+///   1. Reserves a contiguous range in the cumulative inputs/results arena
+///      (so counters and committed[] are monotonic across waves).
+///   2. Encodes one MTLComputeCommandEncoder dispatching v3_wave_kernel
+///      with N workgroups (one per tx). The kernel runs each tx through
+///      exec → validate → commit in a straight line.
+///   3. Returns a WaveFuture that wraps the cmd buffer and signals
+///      completion via Metal's addCompletedHandler.
 
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 
 #include "v3_persistent_host.hpp"
-#include "v3_queue.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -18,7 +26,6 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace evm::gpu::kernel::v3 {
@@ -51,6 +58,22 @@ struct V3TxResultDev
 
 static_assert(sizeof(V3TxInputDev) == 40, "V3TxInputDev layout drift");
 static_assert(sizeof(V3TxResultDev) == 24, "V3TxResultDev layout drift");
+
+// MUST match V3Control in v3_persistent.metal byte-for-byte. Mirrors the
+// device-side struct used by the kernel for atomic counter writes.
+struct V3ControlDev
+{
+    uint32_t shutdown_flag;
+    uint32_t exec_alive;
+    uint32_t validate_alive;
+    uint32_t commit_alive;
+    uint32_t exec_done;
+    uint32_t validate_done;
+    uint32_t commit_done;
+    uint32_t _pad0;
+};
+
+static_assert(sizeof(V3ControlDev) == 32, "V3ControlDev layout drift");
 
 // -----------------------------------------------------------------------------
 // Metal source loader — same search policy as evm_kernel_host.mm.
@@ -86,19 +109,16 @@ id<MTLLibrary> compile_v3_source(id<MTLDevice> device)
 }
 
 // -----------------------------------------------------------------------------
-// Per-batch state used by enqueue_wave + WaveFuture.
-//
-// One MTLBuffer for inputs, one for results, one for committed-flags. Each
-// V3PersistentRunner instance keeps a *batch arena* — a single pair of
-// big buffers that get reused across waves (the same trick as v0.28's
-// CachedBuf). For v0.29 we keep it simple and grow on demand.
+// Per-runner buffer arena. Buffers grow on demand to fit the cumulative
+// per-tx slot index across waves; results/committed[] therefore stay
+// addressable for any past wave's WaveFuture::collect().
 // -----------------------------------------------------------------------------
 struct BatchArena
 {
     id<MTLBuffer> inputs    = nil;
     id<MTLBuffer> results   = nil;
-    id<MTLBuffer> blob      = nil;   ///< code+calldata bytes
-    id<MTLBuffer> committed = nil;   ///< atomic_uint per tx
+    id<MTLBuffer> blob      = nil;
+    id<MTLBuffer> committed = nil;
 
     size_t inputs_cap_txs    = 0;
     size_t results_cap_txs   = 0;
@@ -110,98 +130,107 @@ struct BatchArena
         if (txs > inputs_cap_txs)
         {
             size_t cap = std::max<size_t>(64, txs * 2);
-            inputs = [device newBufferWithLength:cap * sizeof(V3TxInputDev)
-                                          options:MTLResourceStorageModeShared];
+            id<MTLBuffer> next = [device newBufferWithLength:cap * sizeof(V3TxInputDev)
+                                                     options:MTLResourceStorageModeShared];
+            if (inputs)
+                std::memcpy([next contents], [inputs contents],
+                            inputs_cap_txs * sizeof(V3TxInputDev));
+            inputs = next;
             inputs_cap_txs = cap;
         }
         if (txs > results_cap_txs)
         {
             size_t cap = std::max<size_t>(64, txs * 2);
-            results = [device newBufferWithLength:cap * sizeof(V3TxResultDev)
-                                           options:MTLResourceStorageModeShared];
-            std::memset([results contents], 0, cap * sizeof(V3TxResultDev));
+            id<MTLBuffer> next = [device newBufferWithLength:cap * sizeof(V3TxResultDev)
+                                                     options:MTLResourceStorageModeShared];
+            std::memset([next contents], 0, cap * sizeof(V3TxResultDev));
+            if (results)
+                std::memcpy([next contents], [results contents],
+                            results_cap_txs * sizeof(V3TxResultDev));
+            results = next;
             results_cap_txs = cap;
         }
         if (txs > committed_cap_txs)
         {
             size_t cap = std::max<size_t>(64, txs * 2);
-            committed = [device newBufferWithLength:cap * sizeof(std::uint32_t)
-                                             options:MTLResourceStorageModeShared];
-            std::memset([committed contents], 0, cap * sizeof(std::uint32_t));
+            id<MTLBuffer> next = [device newBufferWithLength:cap * sizeof(std::uint32_t)
+                                                     options:MTLResourceStorageModeShared];
+            std::memset([next contents], 0, cap * sizeof(std::uint32_t));
+            if (committed)
+                std::memcpy([next contents], [committed contents],
+                            committed_cap_txs * sizeof(std::uint32_t));
+            committed = next;
             committed_cap_txs = cap;
         }
         if (blob_bytes > blob_cap_bytes)
         {
             size_t cap = std::max<size_t>(4096, blob_bytes * 2);
-            blob = [device newBufferWithLength:cap
-                                        options:MTLResourceStorageModeShared];
+            id<MTLBuffer> next = [device newBufferWithLength:cap
+                                                     options:MTLResourceStorageModeShared];
+            if (blob)
+                std::memcpy([next contents], [blob contents], blob_cap_bytes);
+            blob = next;
             blob_cap_bytes = cap;
         }
     }
 };
 
 // -----------------------------------------------------------------------------
-// Concrete WaveFuture — holds a pointer into the runner's `committed` buffer
-// and polls until every tx in `range` has flag==1.
+// Concrete WaveFuture. Wraps the cmd buffer; resolves on its
+// addCompletedHandler.
 // -----------------------------------------------------------------------------
 class V3WaveFuture final : public WaveFuture
 {
 public:
-    V3WaveFuture(id<MTLBuffer> committed,
-                 id<MTLBuffer> results,
-                 id<MTLBuffer> blob,
+    V3WaveFuture(id<MTLBuffer> results,
                  size_t base,
                  size_t count)
-        : committed_(committed)
-        , results_(results)
-        , blob_(blob)
+        : results_(results)
         , base_(base)
         , count_(count) {}
 
+    /// Mark the wave complete. Called from the cmd buffer's completion
+    /// handler. Safe to call exactly once.
+    void mark_complete()
+    {
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            completed_ = true;
+        }
+        cv_.notify_all();
+    }
+
     bool ready() const override
     {
-        return all_committed();
+        std::lock_guard<std::mutex> g(mu_);
+        return completed_;
     }
 
     bool exec_done() const override
     {
-        // In v0.29 we don't break out exec vs commit completion at the
-        // wave granularity (only the V3Control's lifetime counters do).
-        // For tests that need this we expose ready() — once committed,
-        // exec is also done.
-        return all_committed();
+        // Wave model: exec finishes at the same time as commit.
+        return ready();
     }
 
     std::vector<TxResult> await() override
     {
-        // Spin-wait with backoff. v0.30 will use a notify channel from
-        // the commit kernel via shared addCompletedHandler-style watch.
-        for (;;)
         {
-            if (all_committed())
-                return collect();
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            std::unique_lock<std::mutex> g(mu_);
+            cv_.wait(g, [&]{ return completed_; });
         }
+        return collect();
     }
 
     bool await_for(std::chrono::milliseconds timeout) override
     {
-        auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (std::chrono::steady_clock::now() < deadline)
-        {
-            if (all_committed())
-                return true;
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
-        }
-        return all_committed();
+        std::unique_lock<std::mutex> g(mu_);
+        return cv_.wait_for(g, timeout, [&]{ return completed_; });
     }
 
-    /// Collect the (already-finished) results. Called by await() once
-    /// every flag is set; must NOT be called before then.
-    std::vector<TxResult> collect()
+private:
+    std::vector<TxResult> collect() const
     {
         const auto* res = static_cast<const V3TxResultDev*>([results_ contents]);
-        const auto* blob_ptr = static_cast<const uint8_t*>([blob_ contents]);
         std::vector<TxResult> out(count_);
         for (size_t i = 0; i < count_; ++i)
         {
@@ -216,82 +245,56 @@ public:
             case 5: r.status = TxStatus::CallNotSupported; break;
             default: r.status = TxStatus::Error;           break;
             }
-            r.gas_used = d.gas_used;
+            r.gas_used   = d.gas_used;
             r.gas_refund = 0;
-            // For v0.29 the executor returns the first min(code_size, 32)
-            // bytes of the input bytecode as output. The host tests assert
-            // this exact mapping.
-            if (d.output_size > 0)
-            {
-                // We have to know the code_offset / code_size to read it.
-                // Stash that in inputs[] caller-side — the future only
-                // needs results+blob+offsets we recorded when enqueueing.
-                // For simplicity v0.29 returns gas_used + status; the
-                // bytecode-keyed payload lives in the test fixture, which
-                // computes the expected payload locally.
-                (void)blob_ptr;
-                r.output.clear();
-            }
+            r.output.clear();
             out[i] = std::move(r);
         }
         return out;
     }
 
-    bool all_committed() const
-    {
-        const auto* flags = static_cast<const std::uint32_t*>([committed_ contents]);
-        for (size_t i = 0; i < count_; ++i)
-        {
-            if (flags[base_ + i] == 0u)
-                return false;
-        }
-        return true;
-    }
-
-private:
-    id<MTLBuffer> committed_;
     id<MTLBuffer> results_;
-    id<MTLBuffer> blob_;
-    size_t base_;
-    size_t count_;
+    size_t        base_;
+    size_t        count_;
+
+    mutable std::mutex      mu_;
+    std::condition_variable cv_;
+    bool                    completed_ = false;
 };
 
 // -----------------------------------------------------------------------------
-// V3PersistentRunner — concrete impl.
+// V3PersistentRunner — wave-dispatch implementation.
 // -----------------------------------------------------------------------------
 class V3PersistentRunnerImpl final : public V3PersistentRunner
 {
 public:
     V3PersistentRunnerImpl(id<MTLDevice> device,
-                           id<MTLCommandQueue> exec_queue,
-                           id<MTLCommandQueue> validate_queue,
-                           id<MTLCommandQueue> commit_queue,
-                           id<MTLComputePipelineState> pipeline_pso,
+                           id<MTLCommandQueue> queue,
+                           id<MTLComputePipelineState> wave_pso,
                            NSString* device_name)
         : device_(device)
-        , exec_queue_(exec_queue)
-        , validate_queue_(validate_queue)
-        , commit_queue_(commit_queue)
-        , pipeline_pso_(pipeline_pso)
+        , queue_(queue)
+        , wave_pso_(wave_pso)
         , device_name_str_([device_name UTF8String])
     {
-        allocate_queues();
-        launch_persistent();
+        ctl_buf_ = [device_ newBufferWithLength:sizeof(V3ControlDev)
+                                        options:MTLResourceStorageModeShared];
+        std::memset([ctl_buf_ contents], 0, sizeof(V3ControlDev));
     }
 
     ~V3PersistentRunnerImpl() override
     {
-        if (!shut_down_)
+        if (!shut_down_.load())
             shutdown();
     }
 
     const char* device_name() const override { return device_name_str_.c_str(); }
 
-    bool is_shut_down() const override { return shut_down_; }
+    bool is_shut_down() const override { return shut_down_.load(); }
 
     Counters counters() const override
     {
-        const auto* c = static_cast<const V3Control*>([ctl_buf_ contents]);
+        const auto* c = static_cast<const V3ControlDev*>([ctl_buf_ contents]);
         Counters out;
         out.executed       = c->exec_done;
         out.validated      = c->validate_done;
@@ -306,8 +309,9 @@ public:
         std::span<const HostTransaction> txs,
         const BlockContext&) override
     {
-        if (shut_down_)
+        if (shut_down_.load())
             throw std::runtime_error("V3PersistentRunner: enqueue_wave after shutdown");
+
         if (txs.empty())
         {
             class Empty : public WaveFuture {
@@ -320,14 +324,14 @@ public:
             return std::make_unique<Empty>();
         }
 
-        // Serialize wave admission so base_ allocation is monotonic.
+        // Serialize wave admission so the per-runner cumulative `base` is
+        // monotonic and arena growth doesn't race with another encoder.
         std::lock_guard<std::mutex> g(admission_mu_);
 
         const size_t base  = next_tx_base_;
         const size_t count = txs.size();
         const size_t end   = base + count;
 
-        // Compute blob size first.
         size_t blob_extra = 0;
         for (const auto& t : txs)
             blob_extra += t.code.size() + t.calldata.size();
@@ -365,43 +369,50 @@ public:
         next_blob_offset_ = off;
         next_tx_base_ = end;
 
-        // Reset committed flags for this range (memcpy-equivalent).
+        // Reset committed flags for this range.
         auto* flags = static_cast<std::uint32_t*>([arena_.committed contents]);
-        for (size_t i = 0; i < count; ++i)
-            flags[base + i] = 0;
+        std::memset(flags + base, 0, count * sizeof(std::uint32_t));
 
-        // Push WorkItems onto the exec queue. The host pushes via the
-        // SAME single-producer protocol the kernel pop-side expects.
-        // Backpressure: if the queue is full, spin-yield until exec_worker
-        // drains. This is the path the backpressure test exercises.
-        auto* eq_hdr = static_cast<QueueHeader*>([exec_q_hdr_ contents]);
-        auto* eq_it  = static_cast<WorkItem*>([exec_q_items_ contents]);
-        for (size_t i = 0; i < count; ++i)
+        // Encode dispatch.
+        auto future = std::make_shared<V3WaveFuture>(arena_.results, base, count);
+
+        const uint32_t base_u32  = static_cast<uint32_t>(base);
+        const uint32_t count_u32 = static_cast<uint32_t>(count);
+
+        id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:wave_pso_];
+        [enc setBuffer:arena_.inputs    offset:0 atIndex:0];
+        [enc setBuffer:arena_.results   offset:0 atIndex:1];
+        [enc setBuffer:arena_.committed offset:0 atIndex:2];
+        [enc setBuffer:ctl_buf_         offset:0 atIndex:3];
+        [enc setBytes:&base_u32  length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&count_u32 length:sizeof(uint32_t) atIndex:5];
+
+        // One workgroup per tx; tid==0 of each does the work. 32 lanes per
+        // group keeps the dispatch on a SIMD-aligned boundary even though
+        // the kernel only uses lane 0 today — leaves room for fanning the
+        // EVM interpreter across lanes when v0.31 wires it in.
+        [enc dispatchThreadgroups:MTLSizeMake(count, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [enc endEncoding];
+
+        std::weak_ptr<V3WaveFuture> weak_future = future;
+        [cmd addCompletedHandler:^(id<MTLCommandBuffer>) {
+            if (auto f = weak_future.lock())
+                f->mark_complete();
+        }];
+
+        // Track in-flight buffers so shutdown() can join them.
         {
-            WorkItem w{};
-            w.tx_index    = static_cast<uint32_t>(base + i);
-            w.incarnation = 0u;
-            w.wave_id     = wave_counter_;
-            w.flags       = 0u;
-            for (;;)
-            {
-                std::atomic_thread_fence(std::memory_order_acquire);
-                uint32_t head = __atomic_load_n(&eq_hdr->head, __ATOMIC_ACQUIRE);
-                uint32_t tail = __atomic_load_n(&eq_hdr->tail, __ATOMIC_RELAXED);
-                if (tail - head < Q_CAPACITY)
-                {
-                    eq_it[tail & Q_MASK] = w;
-                    __atomic_store_n(&eq_hdr->tail, tail + 1u, __ATOMIC_RELEASE);
-                    break;
-                }
-                // Backpressure path: yield CPU, kernel will drain.
-                std::this_thread::yield();
-            }
+            std::lock_guard<std::mutex> ig(inflight_mu_);
+            inflight_.push_back(cmd);
         }
-        ++wave_counter_;
+        // Drop already-completed buffers from the in-flight list.
+        prune_inflight();
 
-        return std::make_unique<V3WaveFuture>(
-            arena_.committed, arena_.results, arena_.blob, base, count);
+        [cmd commit];
+        return std::unique_ptr<WaveFuture>(new SharedFutureHolder(future));
     }
 
     std::unique_ptr<WaveFuture> enqueue_wave(
@@ -413,130 +424,69 @@ public:
 
     void shutdown() override
     {
-        if (shut_down_)
-            return;
-        shut_down_ = true;
+        bool expected = false;
+        if (!shut_down_.compare_exchange_strong(expected, true))
+            return;  // already shut down — idempotent
 
-        // Signal kernels to drain & exit.
-        auto* c = static_cast<V3Control*>([ctl_buf_ contents]);
-        __atomic_store_n(&c->shutdown_flag, 1u, __ATOMIC_RELEASE);
-
-        // Wait for the unified pipeline command buffer to complete. All
-        // three workgroups exit their spin loops once shutdown_flag==1
-        // and their respective queues are empty.
-        if (cmd_exec_) [cmd_exec_ waitUntilCompleted];
+        // Wait for every in-flight cmd buffer. The completion handlers
+        // mark their futures complete first, so by the time we return
+        // every WaveFuture is resolved.
+        std::vector<id<MTLCommandBuffer>> snapshot;
+        {
+            std::lock_guard<std::mutex> ig(inflight_mu_);
+            snapshot = inflight_;
+            inflight_.clear();
+        }
+        for (id<MTLCommandBuffer> c : snapshot)
+            [c waitUntilCompleted];
     }
 
 private:
-    void allocate_queues()
+    /// Wraps a shared_ptr<V3WaveFuture> so the public unique_ptr<WaveFuture>
+    /// API works while the cmd-buffer completion handler holds a separate
+    /// strong reference for the lifetime of the GPU work.
+    class SharedFutureHolder final : public WaveFuture
     {
-        const size_t q_items_bytes = Q_CAPACITY * sizeof(WorkItem);
-        exec_q_hdr_     = [device_ newBufferWithLength:sizeof(QueueHeader) options:MTLResourceStorageModeShared];
-        exec_q_items_   = [device_ newBufferWithLength:q_items_bytes        options:MTLResourceStorageModeShared];
-        validate_q_hdr_ = [device_ newBufferWithLength:sizeof(QueueHeader) options:MTLResourceStorageModeShared];
-        validate_q_items_= [device_ newBufferWithLength:q_items_bytes       options:MTLResourceStorageModeShared];
-        commit_q_hdr_   = [device_ newBufferWithLength:sizeof(QueueHeader) options:MTLResourceStorageModeShared];
-        commit_q_items_ = [device_ newBufferWithLength:q_items_bytes        options:MTLResourceStorageModeShared];
-        ctl_buf_        = [device_ newBufferWithLength:sizeof(V3Control)   options:MTLResourceStorageModeShared];
+    public:
+        explicit SharedFutureHolder(std::shared_ptr<V3WaveFuture> f)
+            : f_(std::move(f)) {}
 
-        // Initialize headers.
-        auto init_hdr = [](id<MTLBuffer> b) {
-            auto* h = static_cast<QueueHeader*>([b contents]);
-            h->head = 0; h->tail = 0; h->mask = Q_MASK; h->_pad0 = 0;
-        };
-        init_hdr(exec_q_hdr_);
-        init_hdr(validate_q_hdr_);
-        init_hdr(commit_q_hdr_);
+        std::vector<TxResult> await() override            { return f_->await(); }
+        bool await_for(std::chrono::milliseconds t) override { return f_->await_for(t); }
+        bool ready() const override                       { return f_->ready(); }
+        bool exec_done() const override                   { return f_->exec_done(); }
 
-        auto* c = static_cast<V3Control*>([ctl_buf_ contents]);
-        std::memset(c, 0, sizeof(V3Control));
+    private:
+        std::shared_ptr<V3WaveFuture> f_;
+    };
+
+    void prune_inflight()
+    {
+        std::lock_guard<std::mutex> ig(inflight_mu_);
+        inflight_.erase(
+            std::remove_if(inflight_.begin(), inflight_.end(),
+                [](id<MTLCommandBuffer> c) {
+                    auto s = [c status];
+                    return s == MTLCommandBufferStatusCompleted
+                        || s == MTLCommandBufferStatusError;
+                }),
+            inflight_.end());
     }
 
-    /// Launch the unified pipeline kernel as a 3-workgroup grid.
-    ///
-    /// Apple Silicon's compute scheduler does not co-execute persistent
-    /// kernels submitted as separate dispatches — the first hot-spinner
-    /// starves the rest. The reliable pattern is one kernel grid with
-    /// three workgroups; gid picks the role (exec/validate/commit). Metal
-    /// schedules all workgroups onto compute units the same way it does
-    /// any normal multi-workgroup kernel.
-    void launch_persistent()
-    {
-        ensure_arena_placeholder();
+    id<MTLDevice>               device_;
+    id<MTLCommandQueue>         queue_;
+    id<MTLComputePipelineState> wave_pso_;
+    std::string                 device_name_str_;
 
-        NSArray<id<MTLBuffer>>* pipeline_buffers = @[
-            exec_q_hdr_,      exec_q_items_,
-            validate_q_hdr_,  validate_q_items_,
-            commit_q_hdr_,    commit_q_items_,
-            ctl_buf_,
-            arena_.inputs,    arena_.results,
-            arena_.committed,
-        ];
-
-        id<MTLCommandBuffer> cmd = [exec_queue_ commandBuffer];
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-        [enc setComputePipelineState:pipeline_pso_];
-        for (NSUInteger i = 0; i < pipeline_buffers.count; ++i)
-            [enc setBuffer:pipeline_buffers[i] offset:0 atIndex:i];
-        [enc dispatchThreadgroups:MTLSizeMake(3, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        cmd_exec_ = cmd;
-        cmd_validate_ = nil;
-        cmd_commit_ = nil;
-    }
-
-    void ensure_arena_placeholder()
-    {
-        if (!arena_.inputs)
-            arena_.inputs = [device_ newBufferWithLength:sizeof(V3TxInputDev) * 64
-                                                  options:MTLResourceStorageModeShared];
-        arena_.inputs_cap_txs = 64;
-        if (!arena_.results)
-        {
-            arena_.results = [device_ newBufferWithLength:sizeof(V3TxResultDev) * 64
-                                                   options:MTLResourceStorageModeShared];
-            std::memset([arena_.results contents], 0, sizeof(V3TxResultDev) * 64);
-        }
-        arena_.results_cap_txs = 64;
-        if (!arena_.committed)
-        {
-            arena_.committed = [device_ newBufferWithLength:sizeof(std::uint32_t) * 64
-                                                     options:MTLResourceStorageModeShared];
-            std::memset([arena_.committed contents], 0, sizeof(std::uint32_t) * 64);
-        }
-        arena_.committed_cap_txs = 64;
-        if (!arena_.blob)
-            arena_.blob = [device_ newBufferWithLength:4096
-                                                options:MTLResourceStorageModeShared];
-        arena_.blob_cap_bytes = 4096;
-    }
-
-    id<MTLDevice> device_;
-    id<MTLCommandQueue> exec_queue_;
-    id<MTLCommandQueue> validate_queue_;
-    id<MTLCommandQueue> commit_queue_;
-    id<MTLComputePipelineState> pipeline_pso_;
-    std::string device_name_str_;
-
-    id<MTLBuffer> exec_q_hdr_;
-    id<MTLBuffer> exec_q_items_;
-    id<MTLBuffer> validate_q_hdr_;
-    id<MTLBuffer> validate_q_items_;
-    id<MTLBuffer> commit_q_hdr_;
-    id<MTLBuffer> commit_q_items_;
     id<MTLBuffer> ctl_buf_;
-    BatchArena arena_;
-
-    id<MTLCommandBuffer> cmd_exec_     = nil;
-    id<MTLCommandBuffer> cmd_validate_ = nil;
-    id<MTLCommandBuffer> cmd_commit_   = nil;
+    BatchArena    arena_;
 
     std::mutex admission_mu_;
     size_t   next_tx_base_     = 0;
     size_t   next_blob_offset_ = 0;
-    uint32_t wave_counter_     = 0;
+
+    mutable std::mutex                       inflight_mu_;
+    std::vector<id<MTLCommandBuffer>>        inflight_;
 
     std::atomic<bool> shut_down_{false};
 };
@@ -549,29 +499,22 @@ std::unique_ptr<V3PersistentRunner> V3PersistentRunner::create()
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) return nullptr;
 
-        // One queue per persistent kernel — they must run concurrently, not
-        // serialized. A single queue would launch them in commit order and
-        // exec_worker (which never voluntarily exits) would starve
-        // validate_worker and commit_worker.
-        id<MTLCommandQueue> exec_q     = [device newCommandQueue];
-        id<MTLCommandQueue> validate_q = [device newCommandQueue];
-        id<MTLCommandQueue> commit_q   = [device newCommandQueue];
-        if (!exec_q || !validate_q || !commit_q) return nullptr;
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        if (!queue) return nullptr;
 
         id<MTLLibrary> lib = compile_v3_source(device);
         if (!lib) return nullptr;
 
-        NSError* err = nil;
-        id<MTLFunction> f_pipeline = [lib newFunctionWithName:@"v3_pipeline_worker"];
-        if (!f_pipeline) return nullptr;
+        id<MTLFunction> f_wave = [lib newFunctionWithName:@"v3_wave_kernel"];
+        if (!f_wave) return nullptr;
 
-        id<MTLComputePipelineState> pso_pipeline =
-            [device newComputePipelineStateWithFunction:f_pipeline error:&err];
-        if (!pso_pipeline) return nullptr;
+        NSError* err = nil;
+        id<MTLComputePipelineState> pso_wave =
+            [device newComputePipelineStateWithFunction:f_wave error:&err];
+        if (!pso_wave) return nullptr;
 
         return std::make_unique<V3PersistentRunnerImpl>(
-            device, exec_q, validate_q, commit_q,
-            pso_pipeline, [device name]);
+            device, queue, pso_wave, [device name]);
     }
 }
 

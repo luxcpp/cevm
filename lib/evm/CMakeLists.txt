@@ -452,6 +452,7 @@ target_link_libraries(evm-bench-kernel PRIVATE evm-kernel)
 if(APPLE)
     add_library(evm-kernel-metal STATIC
         gpu/kernel/evm_kernel_host.mm
+        gpu/kernel/v3_persistent_host.mm
     )
     target_compile_features(evm-kernel-metal PUBLIC cxx_std_20)
     target_link_libraries(evm-kernel-metal PUBLIC evm-kernel)
@@ -533,6 +534,22 @@ if(APPLE)
         "-framework Metal" "-framework Foundation"
     )
     target_include_directories(metal-host-test PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
+    # V3 wave-dispatch runner tests (drain, backpressure, shutdown,
+    # counter monotonicity, empty-wave). Same bare-Apple pattern as
+    # metal-host-test — no GoogleTest dep.
+    add_executable(v3-persistent-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/v3_persistent_test.mm)
+    target_compile_features(v3-persistent-test PRIVATE cxx_std_20)
+    target_link_libraries(v3-persistent-test PRIVATE
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(v3-persistent-test PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
         $<BUILD_INTERFACE:${include_dir}>

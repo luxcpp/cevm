@@ -2,64 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file v3_persistent.metal
-/// V3 persistent kernels — the queue-driven pipeline.
+/// V3 wave-dispatch kernel — one Metal dispatch per host wave.
 ///
-/// Three kernels, all persistent (single launch covers the lifetime of a
-/// V3PersistentRunner):
-///   * exec_worker     — pulls (tx_idx, incarnation) off exec_q,
-///                       runs the interpreter, pushes onto validate_q
-///   * validate_worker — pulls off validate_q, confirms read-set, pushes
-///                       onto commit_q
-///   * commit_worker   — pulls off commit_q, marks tx committed
+/// v0.29 attempted persistent kernels with cross-workgroup queues. Apple
+/// Silicon's compute scheduler does not pre-empt hot-spinning workgroups,
+/// so the exec workgroup starved validate/commit no matter how the grid
+/// was structured. v0.30 reverts to the same one-shot pattern every other
+/// passing GPU test in this tree uses (evm_kernel.metal, block_stm,
+/// metal_host): the host encodes one MTLComputeCommandEncoder per wave
+/// with N workgroups (one per tx). Each workgroup runs the full
+/// exec → validate → commit pipeline for its tx in a straight line.
 ///
-/// All three spin on `V3Control::shutdown_flag`; once flipped they drain
-/// the queue they're servicing and return.
-///
-/// Metal MSL note: only memory_order_relaxed is exposed on device atomics.
-/// We rely on:
-///   * atomic_compare_exchange_weak_explicit for queue-pop CAS — failures
-///     just retry, so the visibility of the loser's read doesn't matter
-///   * Apple Silicon's unified memory + the fact that the host's
-///     [cmd commit] establishes a release fence visible to the kernel,
-///     and the kernel's writes become visible to the host on
-///     [cmd waitUntilCompleted] — so cross-kernel ordering is structural
-///   * For inter-kernel ordering (exec → validate → commit) the CAS
-///     ensures a workitem isn't double-consumed; the data dependency
-///     (validate reads results[w.tx_index] written by exec) is honored
-///     via the queue itself: a slot is only enqueued AFTER its result is
-///     written
-///
-/// v0.29 scope: end-to-end queue mechanics with a simplified executor that
-/// proves persistence + pipelining + backpressure + shutdown. The full
-/// EVM interpreter (matching evm_kernel.metal) is wired in v0.30 alongside
-/// MVCC. The simplified executor returns deterministic synthetic results
-/// keyed off code_size, so V3 tests can assert the exact value seen at
-/// commit time without depending on the legacy evm_execute opcode set.
+/// The Counters block keeps the same shape v0.29 exposed (executed,
+/// validated, committed, *_alive) so the public C++ API does not change.
+/// alive counters are no longer meaningful on the wave model — there is
+/// no long-lived workgroup to count — and stay at zero between waves.
 
 #include <metal_stdlib>
 using namespace metal;
 
 // -----------------------------------------------------------------------------
-// Layout — matches lib/evm/gpu/kernel/v3_queue.hpp
+// Layout — matches lib/evm/gpu/kernel/v3_queue.hpp byte-for-byte.
 // -----------------------------------------------------------------------------
-
-constant uint Q_LOG2_CAPACITY = 14u;
-constant uint Q_CAPACITY      = 1u << Q_LOG2_CAPACITY;
-constant uint Q_MASK          = Q_CAPACITY - 1u;
-
-struct WorkItem {
-    uint tx_index;
-    uint incarnation;
-    uint wave_id;
-    uint flags;
-};
-
-struct alignas(16) QueueHeader {
-    atomic_uint head;
-    atomic_uint tail;
-    uint        mask;
-    uint        _pad0;
-};
 
 struct alignas(16) V3Control {
     atomic_uint shutdown_flag;
@@ -72,10 +36,6 @@ struct alignas(16) V3Control {
     atomic_uint commit_done;
     uint        _pad0;
 };
-
-// -----------------------------------------------------------------------------
-// Per-tx slots in unified memory.
-// -----------------------------------------------------------------------------
 
 struct V3TxInput {
     uint  code_size;
@@ -97,353 +57,57 @@ struct V3TxResult {
 };
 
 // -----------------------------------------------------------------------------
-// Queue helpers — Metal MSL only supports memory_order_relaxed on device
-// atomics. The CAS pop relies on the loser-retries pattern; visibility
-// across kernels is established by Apple Silicon's unified-memory model
-// and the host's command-buffer dependency between [cmd commit] /
-// [cmd waitUntilCompleted].
+// Per-tx executor. Deterministic synthetic results keyed off code_size — same
+// contract v3_persistent_test.mm asserts on. The full EVM interpreter wires
+// in via a separate v0.31 task; this kernel exists to prove the wave-dispatch
+// pipeline + counter monotonicity that the V3 design doc calls for.
 // -----------------------------------------------------------------------------
-
-// Cross-workgroup queue. MSL device atomics only support relaxed; we use
-// threadgroup_barrier(mem_flags::mem_device) on both producer and consumer
-// to make non-atomic items[] writes visible to other workgroups.
-//
-// On the producer side: write items[tail & MASK], barrier, atomic_store
-// of tail. The barrier flushes the store to device memory before tail
-// is bumped, so any consumer that observes the new tail also sees the
-// item.
-//
-// On the consumer side: load tail, if non-empty CAS-decrement head, then
-// barrier so the items[head & MASK] read picks up the producer's L2-visible
-// write rather than a stale L1 line.
-static inline bool q_push(device QueueHeader* q,
-                          device WorkItem*    items,
-                          WorkItem            w)
-{
-    uint head = atomic_load_explicit(&q->head, memory_order_relaxed);
-    uint tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
-    if (tail - head >= Q_CAPACITY) {
-        return false;  // full
-    }
-    items[tail & Q_MASK] = w;
-    threadgroup_barrier(mem_flags::mem_device);
-    atomic_store_explicit(&q->tail, tail + 1u, memory_order_relaxed);
-    return true;
-}
-
-static inline bool q_pop(device QueueHeader* q,
-                         device WorkItem*    items,
-                         thread WorkItem&    out)
-{
-    while (true) {
-        uint head = atomic_load_explicit(&q->head, memory_order_relaxed);
-        uint tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
-        if (head >= tail) {
-            return false;
-        }
-        uint expected = head;
-        if (atomic_compare_exchange_weak_explicit(
-                &q->head, &expected, head + 1u,
-                memory_order_relaxed, memory_order_relaxed))
-        {
-            threadgroup_barrier(mem_flags::mem_device);
-            out = items[head & Q_MASK];
-            return true;
-        }
-        // CAS lost — retry.
-    }
-}
-
-static inline bool shutdown_set(device V3Control* ctl)
-{
-    return atomic_load_explicit(&ctl->shutdown_flag,
-                                memory_order_relaxed) != 0u;
-}
 
 static inline void exec_one_tx(device const V3TxInput& in,
                                device V3TxResult&      r)
 {
-    r.status = 1u;  // Return
-    r.gas_used = ulong(in.code_size) * 21u + 21000u;
+    r.status      = 1u;  // TxStatus::Return
+    r.gas_used    = ulong(in.code_size) * 21u + 21000u;
     r.output_size = (in.code_size < 32u) ? in.code_size : 32u;
 }
 
 // -----------------------------------------------------------------------------
-// exec_worker — drains exec_q, runs exec_one_tx, pushes onto validate_q.
-// -----------------------------------------------------------------------------
-
-kernel void v3_exec_worker(
-    device QueueHeader*       exec_q       [[buffer(0)]],
-    device WorkItem*          exec_items   [[buffer(1)]],
-    device QueueHeader*       validate_q   [[buffer(2)]],
-    device WorkItem*          validate_items[[buffer(3)]],
-    device V3Control*         ctl          [[buffer(4)]],
-    device const V3TxInput*   inputs       [[buffer(5)]],
-    device V3TxResult*        results      [[buffer(6)]],
-    uint   tid                              [[thread_index_in_threadgroup]],
-    uint   gid                              [[threadgroup_position_in_grid]])
-{
-    if (tid != 0) return;
-
-    atomic_fetch_add_explicit(&ctl->exec_alive, 1u, memory_order_relaxed);
-
-    bool keep_going = true;
-    uint backoff = 0u;
-    while (keep_going) {
-        WorkItem w;
-        if (q_pop(exec_q, exec_items, w)) {
-            exec_one_tx(inputs[w.tx_index], results[w.tx_index]);
-            atomic_fetch_add_explicit(&ctl->exec_done, 1u, memory_order_relaxed);
-
-            // Push downstream — spin if validate_q is full unless we're shutting down.
-            bool pushed = false;
-            while (!pushed) {
-                pushed = q_push(validate_q, validate_items, w);
-                if (!pushed && shutdown_set(ctl)) {
-                    keep_going = false;
-                    break;
-                }
-            }
-            backoff = 0u;
-            continue;
-        }
-        // Empty queue — exit if shutdown signalled.
-        if (shutdown_set(ctl)) {
-            keep_going = false;
-            break;
-        }
-        backoff = (backoff < 64u) ? (backoff + 1u) : 64u;
-        for (uint i = 0; i < backoff; ++i) {
-            (void)atomic_load_explicit(&exec_q->head, memory_order_relaxed);
-        }
-    }
-
-    atomic_fetch_sub_explicit(&ctl->exec_alive, 1u, memory_order_relaxed);
-}
-
-// -----------------------------------------------------------------------------
-// validate_worker — empty read-set ⇒ pass to commit_q. v0.30 wires MVCC.
-// -----------------------------------------------------------------------------
-
-kernel void v3_validate_worker(
-    device QueueHeader*       validate_q     [[buffer(0)]],
-    device WorkItem*          validate_items [[buffer(1)]],
-    device QueueHeader*       commit_q       [[buffer(2)]],
-    device WorkItem*          commit_items   [[buffer(3)]],
-    device V3Control*         ctl            [[buffer(4)]],
-    device const V3TxInput*   inputs         [[buffer(5)]],
-    device V3TxResult*        results        [[buffer(6)]],
-    uint   tid                                [[thread_index_in_threadgroup]],
-    uint   gid                                [[threadgroup_position_in_grid]])
-{
-    if (tid != 0) return;
-
-    atomic_fetch_add_explicit(&ctl->validate_alive, 1u, memory_order_relaxed);
-
-    bool keep_going = true;
-    uint backoff = 0u;
-    while (keep_going) {
-        WorkItem w;
-        if (q_pop(validate_q, validate_items, w)) {
-            const device V3TxInput& in = inputs[w.tx_index];
-            if (in.read_set_size != 0u) {
-                // Non-empty read set — flag as Error. v0.30 will re-enqueue.
-                results[w.tx_index].status = 4u;
-            }
-            atomic_fetch_add_explicit(&ctl->validate_done, 1u, memory_order_relaxed);
-
-            bool pushed = false;
-            while (!pushed) {
-                pushed = q_push(commit_q, commit_items, w);
-                if (!pushed && shutdown_set(ctl)) {
-                    keep_going = false;
-                    break;
-                }
-            }
-            backoff = 0u;
-            continue;
-        }
-        if (shutdown_set(ctl)) {
-            keep_going = false;
-            break;
-        }
-        backoff = (backoff < 64u) ? (backoff + 1u) : 64u;
-        for (uint i = 0; i < backoff; ++i) {
-            (void)atomic_load_explicit(&validate_q->head, memory_order_relaxed);
-        }
-    }
-
-    atomic_fetch_sub_explicit(&ctl->validate_alive, 1u, memory_order_relaxed);
-}
-
-// -----------------------------------------------------------------------------
-// commit_worker — drains commit_q, flips per-tx committed[] flag.
-// -----------------------------------------------------------------------------
-
-kernel void v3_commit_worker(
-    device QueueHeader*       commit_q       [[buffer(0)]],
-    device WorkItem*          commit_items   [[buffer(1)]],
-    device V3Control*         ctl            [[buffer(2)]],
-    device atomic_uint*       committed      [[buffer(3)]],
-    uint   tid                                [[thread_index_in_threadgroup]],
-    uint   gid                                [[threadgroup_position_in_grid]])
-{
-    if (tid != 0) return;
-
-    atomic_fetch_add_explicit(&ctl->commit_alive, 1u, memory_order_relaxed);
-
-    bool keep_going = true;
-    uint backoff = 0u;
-    while (keep_going) {
-        WorkItem w;
-        if (q_pop(commit_q, commit_items, w)) {
-            atomic_store_explicit(&committed[w.tx_index], 1u,
-                                  memory_order_relaxed);
-            atomic_fetch_add_explicit(&ctl->commit_done, 1u,
-                                      memory_order_relaxed);
-            backoff = 0u;
-            continue;
-        }
-        if (shutdown_set(ctl)) {
-            keep_going = false;
-            break;
-        }
-        backoff = (backoff < 64u) ? (backoff + 1u) : 64u;
-        for (uint i = 0; i < backoff; ++i) {
-            (void)atomic_load_explicit(&commit_q->head, memory_order_relaxed);
-        }
-    }
-
-    atomic_fetch_sub_explicit(&ctl->commit_alive, 1u, memory_order_relaxed);
-}
-
-// -----------------------------------------------------------------------------
-// v3_pipeline_worker — single kernel that hosts all three roles.
+// v3_wave_kernel — one workgroup per tx.
 //
-// Apple Silicon's compute scheduler does not co-execute persistent kernels
-// submitted as separate dispatches (even from one command buffer with
-// MTLDispatchTypeConcurrent). The pragmatic fix is one kernel dispatched
-// with N workgroups, where each workgroup picks its role from gid:
-//   gid==0 → exec
-//   gid==1 → validate
-//   gid==2 → commit
-// All three live in the same kernel grid, so they get co-scheduled onto
-// the GPU's compute units the same way any normal multi-workgroup kernel
-// does.
+// Each workgroup uses tid==0 to run the tx through exec → validate → commit
+// in sequence. atomic counters give the host a monotonic view of pipeline
+// progress; per-tx commit flag tells WaveFuture::ready() the work is done.
 // -----------------------------------------------------------------------------
 
-static inline void exec_loop(
-    device QueueHeader* exec_q,
-    device WorkItem*    exec_items,
-    device QueueHeader* validate_q,
-    device WorkItem*    validate_items,
-    device V3Control*   ctl,
-    device const V3TxInput* inputs,
-    device V3TxResult*  results)
+kernel void v3_wave_kernel(
+    device const V3TxInput* inputs    [[buffer(0)]],
+    device V3TxResult*      results   [[buffer(1)]],
+    device atomic_uint*     committed [[buffer(2)]],
+    device V3Control*       ctl       [[buffer(3)]],
+    constant uint&          base      [[buffer(4)]],
+    constant uint&          count     [[buffer(5)]],
+    uint tid                          [[thread_index_in_threadgroup]],
+    uint gid                          [[threadgroup_position_in_grid]])
 {
-    atomic_fetch_add_explicit(&ctl->exec_alive, 1u, memory_order_relaxed);
-    bool keep_going = true;
-    uint backoff = 0u;
-    while (keep_going) {
-        WorkItem w;
-        if (q_pop(exec_q, exec_items, w)) {
-            exec_one_tx(inputs[w.tx_index], results[w.tx_index]);
-            atomic_fetch_add_explicit(&ctl->exec_done, 1u, memory_order_relaxed);
-            bool pushed = false;
-            while (!pushed) {
-                pushed = q_push(validate_q, validate_items, w);
-                if (!pushed && shutdown_set(ctl)) { keep_going = false; break; }
-            }
-            backoff = 0u;
-            continue;
-        }
-        if (shutdown_set(ctl)) break;
-        backoff = (backoff < 64u) ? (backoff + 1u) : 64u;
-        for (uint i = 0; i < backoff; ++i)
-            (void)atomic_load_explicit(&exec_q->head, memory_order_relaxed);
-    }
-    atomic_fetch_sub_explicit(&ctl->exec_alive, 1u, memory_order_relaxed);
-}
+    if (tid != 0u) return;
+    if (gid >= count) return;
 
-static inline void validate_loop(
-    device QueueHeader* validate_q,
-    device WorkItem*    validate_items,
-    device QueueHeader* commit_q,
-    device WorkItem*    commit_items,
-    device V3Control*   ctl,
-    device const V3TxInput* inputs,
-    device V3TxResult*  results)
-{
-    atomic_fetch_add_explicit(&ctl->validate_alive, 1u, memory_order_relaxed);
-    bool keep_going = true;
-    uint backoff = 0u;
-    while (keep_going) {
-        WorkItem w;
-        if (q_pop(validate_q, validate_items, w)) {
-            const device V3TxInput& in = inputs[w.tx_index];
-            if (in.read_set_size != 0u)
-                results[w.tx_index].status = 4u;
-            atomic_fetch_add_explicit(&ctl->validate_done, 1u, memory_order_relaxed);
-            bool pushed = false;
-            while (!pushed) {
-                pushed = q_push(commit_q, commit_items, w);
-                if (!pushed && shutdown_set(ctl)) { keep_going = false; break; }
-            }
-            backoff = 0u;
-            continue;
-        }
-        if (shutdown_set(ctl)) break;
-        backoff = (backoff < 64u) ? (backoff + 1u) : 64u;
-        for (uint i = 0; i < backoff; ++i)
-            (void)atomic_load_explicit(&validate_q->head, memory_order_relaxed);
-    }
-    atomic_fetch_sub_explicit(&ctl->validate_alive, 1u, memory_order_relaxed);
-}
+    const uint idx = base + gid;
 
-static inline void commit_loop(
-    device QueueHeader* commit_q,
-    device WorkItem*    commit_items,
-    device V3Control*   ctl,
-    device atomic_uint* committed)
-{
-    atomic_fetch_add_explicit(&ctl->commit_alive, 1u, memory_order_relaxed);
-    bool keep_going = true;
-    uint backoff = 0u;
-    while (keep_going) {
-        WorkItem w;
-        if (q_pop(commit_q, commit_items, w)) {
-            atomic_store_explicit(&committed[w.tx_index], 1u, memory_order_relaxed);
-            atomic_fetch_add_explicit(&ctl->commit_done, 1u, memory_order_relaxed);
-            backoff = 0u;
-            continue;
-        }
-        if (shutdown_set(ctl)) break;
-        backoff = (backoff < 64u) ? (backoff + 1u) : 64u;
-        for (uint i = 0; i < backoff; ++i)
-            (void)atomic_load_explicit(&commit_q->head, memory_order_relaxed);
-    }
-    atomic_fetch_sub_explicit(&ctl->commit_alive, 1u, memory_order_relaxed);
-}
+    // exec
+    exec_one_tx(inputs[idx], results[idx]);
+    atomic_fetch_add_explicit(&ctl->exec_done, 1u, memory_order_relaxed);
 
-kernel void v3_pipeline_worker(
-    device QueueHeader*       exec_q          [[buffer(0)]],
-    device WorkItem*          exec_items      [[buffer(1)]],
-    device QueueHeader*       validate_q      [[buffer(2)]],
-    device WorkItem*          validate_items  [[buffer(3)]],
-    device QueueHeader*       commit_q        [[buffer(4)]],
-    device WorkItem*          commit_items    [[buffer(5)]],
-    device V3Control*         ctl             [[buffer(6)]],
-    device const V3TxInput*   inputs          [[buffer(7)]],
-    device V3TxResult*        results         [[buffer(8)]],
-    device atomic_uint*       committed       [[buffer(9)]],
-    uint   tid                                [[thread_index_in_threadgroup]],
-    uint   gid                                [[threadgroup_position_in_grid]])
-{
-    if (tid != 0) return;
-    if (gid == 0u)
-        exec_loop(exec_q, exec_items, validate_q, validate_items, ctl, inputs, results);
-    else if (gid == 1u)
-        validate_loop(validate_q, validate_items, commit_q, commit_items, ctl, inputs, results);
-    else if (gid == 2u)
-        commit_loop(commit_q, commit_items, ctl, committed);
+    // validate (empty read-set ⇒ pass; non-empty ⇒ flag as Error per v0.29
+    // contract). Real MVCC re-execution is a v0.32+ concern.
+    if (inputs[idx].read_set_size != 0u) {
+        results[idx].status = 4u;  // TxStatus::Error
+    }
+    atomic_fetch_add_explicit(&ctl->validate_done, 1u, memory_order_relaxed);
+
+    // commit — flip the per-tx flag and bump the counter. WaveFuture polls
+    // the MTLCommandBuffer completion handler to know when results are
+    // ready; the per-tx flag is kept for the V2 streaming consumers.
+    atomic_store_explicit(&committed[idx], 1u, memory_order_relaxed);
+    atomic_fetch_add_explicit(&ctl->commit_done, 1u, memory_order_relaxed);
 }
