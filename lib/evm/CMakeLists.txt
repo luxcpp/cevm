@@ -615,6 +615,23 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
+    # v0.41 — real BLS12-381 aggregate verifier tests (Quasar 4.0
+    # activation 2026-02-14). Replaces the v0.38 keccak-stub on the BLS
+    # lane. Verifier is platform-independent (host blst), so the test is
+    # a plain C++ executable — no Metal / CUDA dependency. Lives next to
+    # the GPU substrate (lib/consensus/quasar/gpu/) so it ships on the
+    # same release cadence.
+    add_executable(quasar-bls-verifier-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_bls_verifier_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp)
+    target_compile_features(quasar-bls-verifier-test PRIVATE cxx_std_20)
+    target_link_libraries(quasar-bls-verifier-test PRIVATE blst::blst)
+    target_include_directories(quasar-bls-verifier-test PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
 endif()
 
 # State layer: full Ethereum state (accounts, storage, journal) for cevm
