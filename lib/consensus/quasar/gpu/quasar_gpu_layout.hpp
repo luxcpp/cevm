@@ -107,13 +107,17 @@ struct alignas(16) DecodedTx {
 };
 static_assert(sizeof(DecodedTx) == 48, "DecodedTx layout drift");
 
+// v0.41 — VerifiedTx now carries the bytecode slice (blob_offset/blob_size)
+// so drain_exec can index into the per-round code arena. Replaces the
+// previous _pad0; the 32-byte envelope is unchanged.
 struct alignas(16) VerifiedTx {
     uint32_t tx_index;
     uint32_t admission;
     uint64_t gas_limit;
     uint32_t origin_lo;
     uint32_t origin_hi;
-    uint64_t _pad0;
+    uint32_t blob_offset;
+    uint32_t blob_size;
 };
 static_assert(sizeof(VerifiedTx) == 32, "VerifiedTx layout drift");
 
@@ -211,9 +215,12 @@ struct alignas(16) DagNode {
     uint32_t pending_origin_hi;
     uint32_t pending_admission;
     uint32_t state;                ///< DagNodeState
+    // v0.41: bytecode slice — drain_exec needs it on every re-emit.
+    uint32_t pending_blob_offset;
+    uint32_t pending_blob_size;
 };
-// 16 (header) + 16 (parents[4]) + 64 (children[16]) + 24 (envelope+state)
-// = 120 bytes; alignas(16) bumps to 128.
+// 16 (header) + 16 (parents[4]) + 64 (children[16]) + 32 (envelope+state+blob)
+// = 128 bytes; alignas(16) is identity at this size.
 static_assert(sizeof(DagNode) == 128, "DagNode layout drift");
 
 /// DagWriterSlot — open-addressing table for most recent prior writers.
@@ -237,6 +244,44 @@ struct PredictedKey {
     uint32_t valid;
 };
 static_assert(sizeof(PredictedKey) == 24, "PredictedKey layout drift");
+
+// =============================================================================
+// EVM fiber VM (v0.41) — bytecode interpreter constants
+// =============================================================================
+//
+// drain_exec walks each tx's bytecode through a switch-based opcode dispatch
+// driven by FiberSlot. The fiber holds a 256-bit-wide stack of
+// kFiberStackDepth entries (each a 4-limb little-endian U256), 1 KB of
+// zero-initialized scratch memory, and a per-fiber instruction budget that
+// bounds the dispatch loop so a malformed program can't run forever.
+inline constexpr uint32_t kFiberStackDepth   = 64u;
+inline constexpr uint32_t kFiberStackLimbs   = 4u;        ///< U256 = 4 × 64-bit
+inline constexpr uint32_t kFiberMemoryBytes  = 1024u;
+inline constexpr uint32_t kFiberInstrBudget  = 100000u;   ///< runaway guard
+
+// FiberSlot::status — substrate semantics, reused by the EVM fiber VM.
+inline constexpr uint32_t kFiberReady        = 0u;
+inline constexpr uint32_t kFiberRunning      = 1u;
+inline constexpr uint32_t kFiberWaitingState = 2u;
+inline constexpr uint32_t kFiberCommittable  = 3u;
+inline constexpr uint32_t kFiberReverted     = 4u;
+
+// ExecResult::status — terminal disposition reported by drain_exec.
+inline constexpr uint32_t kExecStatusReturn  = 1u;
+inline constexpr uint32_t kExecStatusRevert  = 2u;
+inline constexpr uint32_t kExecStatusOOG     = 3u;
+inline constexpr uint32_t kExecStatusError   = 4u;
+inline constexpr uint32_t kExecStatusSuspend = 5u;
+
+// Berlin-ish gas costs (subset; v0.43 layers full EIP-2929 cold/warm and
+// per-byte calldata accounting).
+inline constexpr uint64_t kGasDefault    = 3u;
+inline constexpr uint64_t kGasJumpdest   = 1u;
+inline constexpr uint64_t kGasSloadWarm  = 100u;
+inline constexpr uint64_t kGasSstore     = 5000u;
+inline constexpr uint64_t kGasKeccakBase = 30u;
+inline constexpr uint64_t kGasKeccakWord = 6u;
+inline constexpr uint64_t kGasExpByte    = 50u;          ///< per byte of exponent
 
 // =============================================================================
 // Cold-state page-fault rings

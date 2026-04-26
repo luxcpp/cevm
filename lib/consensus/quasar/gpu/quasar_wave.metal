@@ -47,7 +47,32 @@ constant uint kMaxDagParents     = 4u;
 constant uint kMaxDagChildren    = 16u;
 constant uint kMaxPredictedKeys  = 4u;
 constant uint kFiberStackDepth   = 64u;
+constant uint kFiberStackLimbs   = 4u;       ///< v0.41 — 256-bit
 constant uint kFiberMemoryBytes  = 1024u;
+constant uint kFiberInstrBudget  = 100000u;  ///< per-fiber dispatch loop cap
+
+// FiberSlot status — substrate semantics, reused by the v0.41 EVM VM.
+constant uint kFiberReady        = 0u;
+constant uint kFiberRunning      = 1u;
+constant uint kFiberWaitingState = 2u;
+constant uint kFiberCommittable  = 3u;
+constant uint kFiberReverted     = 4u;
+
+// ExecResult status — terminal disposition reported by drain_exec.
+constant uint kExecStatusReturn  = 1u;
+constant uint kExecStatusRevert  = 2u;
+constant uint kExecStatusOOG     = 3u;
+constant uint kExecStatusError   = 4u;
+constant uint kExecStatusSuspend = 5u;
+
+// Berlin-ish gas costs — must match quasar_gpu_layout.hpp.
+constant ulong kGasDefault     = 3UL;
+constant ulong kGasJumpdest    = 1UL;
+constant ulong kGasSloadWarm   = 100UL;
+constant ulong kGasSstore      = 5000UL;
+constant ulong kGasKeccakBase  = 30UL;
+constant ulong kGasKeccakWord  = 6UL;
+constant ulong kGasExpByte     = 50UL;
 
 // v0.40 — DagNode lifecycle states. drain_dagready re-checks state
 // after publishing the parent→child edge; if it sees Committed, it
@@ -100,7 +125,8 @@ struct alignas(16) VerifiedTx {
     ulong gas_limit;
     uint  origin_lo;
     uint  origin_hi;
-    ulong _pad0;
+    uint  blob_offset;        ///< v0.41 — bytecode slice in code arena
+    uint  blob_size;
 };
 
 struct RWSetEntry {
@@ -150,6 +176,9 @@ struct alignas(16) DagNode {
     uint  pending_origin_hi;
     uint  pending_admission;
     atomic_uint state;
+    // v0.41: bytecode slice — drain_exec needs it on every re-emit.
+    uint pending_blob_offset;
+    uint pending_blob_size;
 };
 
 // v0.40 — per-key writer table. drain_dagready is single-threaded
@@ -251,11 +280,18 @@ struct alignas(16) QuasarRoundResult {
 
 // Per-tx fiber slot — kept resident across wave ticks until the tx
 // commits or fails. Lives in a host-allocated arena indexed by tx_index.
+//
+// v0.41: stack widened to 256 bits per entry (4 ulong limbs, LE). The EVM
+// bytecode interpreter in drain_exec uses this directly. `gas_limit` is
+// captured on entry so we can emit gas_used = gas_limit - gas at the
+// terminal point. `msize` tracks the high-water mark of memory touches.
+// `code_offset/code_size` snapshot the tx's bytecode slice in the code
+// arena so the dispatch loop reads from a stable pointer across ticks.
 struct FiberSlot {
     uint  tx_index;
     uint  pc;
-    uint  sp;
-    uint  status;          ///< 0=ready, 1=running, 2=waiting_state, 3=committable, 4=reverted
+    uint  sp;                  ///< stack depth in 256-bit entries
+    uint  status;              ///< 0=ready, 1=running, 2=waiting_state, 3=committable, 4=reverted
     ulong gas;
     uint  rw_count;
     uint  incarnation;
@@ -263,11 +299,15 @@ struct FiberSlot {
     uint  pending_key_lo_hi;
     uint  pending_key_hi_lo;
     uint  pending_key_hi_hi;
+    uint  origin_lo;           ///< v0.41 — captured for ADDRESS/CALLER/ORIGIN
+    uint  origin_hi;
+    ulong gas_limit;           ///< v0.41 — entry gas, for gas_used computation
+    uint  msize;               ///< v0.41 — memory high-water mark (bytes)
+    uint  code_offset;         ///< v0.41 — bytecode slice in code arena
+    uint  code_size;
     uint  _pad0;
     RWSetEntry rw[kMaxRWSetPerTx];
-    ulong stack[kFiberStackDepth];     ///< 64 entries × 8 bytes — single-limb
-                                       ///< value model; full uint256 lands
-                                       ///< when the EVM corpus needs it
+    ulong stack[kFiberStackDepth * kFiberStackLimbs];   ///< 64 × 4 limbs (256-bit)
     uchar memory[kFiberMemoryBytes];
 };
 
@@ -578,11 +618,13 @@ static inline uint drain_decode(
             continue;
         }
         VerifiedTx v;
-        v.tx_index  = d.tx_index;
-        v.admission = (d.status == 0u) ? 0u : 1u;
-        v.gas_limit = d.gas_limit;
-        v.origin_lo = d.origin_lo;
-        v.origin_hi = d.origin_hi;
+        v.tx_index    = d.tx_index;
+        v.admission   = (d.status == 0u) ? 0u : 1u;
+        v.gas_limit   = d.gas_limit;
+        v.origin_lo   = d.origin_lo;
+        v.origin_hi   = d.origin_hi;
+        v.blob_offset = d.blob_offset;
+        v.blob_size   = d.blob_size;
         if (!ring_try_push(crypto_hdr, crypto_items, v)) {
             (void)ring_try_push(decode_hdr, decode_items, d);
             break;
@@ -722,12 +764,13 @@ static inline uint dag_writer_locate(
 static inline VerifiedTx dag_envelope_to_verified(device const DagNode* n)
 {
     VerifiedTx v;
-    v.tx_index  = n->tx_index;
-    v.admission = n->pending_admission;
-    v.gas_limit = n->pending_gas_limit;
-    v.origin_lo = n->pending_origin_lo;
-    v.origin_hi = n->pending_origin_hi;
-    v._pad0     = 0UL;
+    v.tx_index    = n->tx_index;
+    v.admission   = n->pending_admission;
+    v.gas_limit   = n->pending_gas_limit;
+    v.origin_lo   = n->pending_origin_lo;
+    v.origin_hi   = n->pending_origin_hi;
+    v.blob_offset = n->pending_blob_offset;
+    v.blob_size   = n->pending_blob_size;
     return v;
 }
 
@@ -763,6 +806,8 @@ static inline uint drain_dagready(
         T->pending_origin_lo  = v.origin_lo;
         T->pending_origin_hi  = v.origin_hi;
         T->pending_admission  = v.admission;
+        T->pending_blob_offset = v.blob_offset;
+        T->pending_blob_size   = v.blob_size;
         T->parent_count       = 0u;
         atomic_store_explicit(&T->child_count,        0u, memory_order_relaxed);
         atomic_store_explicit(&T->unresolved_parents, 0u, memory_order_relaxed);
@@ -879,19 +924,525 @@ static inline void mvcc_apply_writes(
     }
 }
 
-// drain_exec (v0.36 substrate): runs the synthetic per-tx program over
-// the MVCC arena. Reads the current version of the tx's exec_key, writes
-// (version+1), records both in the RW set, and emits an ExecResult to
-// the Validate ring.
+// =============================================================================
+// v0.41 — U256 arithmetic library (4 × 64-bit limbs, little-endian)
+// =============================================================================
 //
-// Full EVM fiber VM with bytecode interpretation lands in v0.39 — this
-// substrate proves the ring routing + MVCC + Validate/Repair pipeline
-// works end-to-end and exposes real conflict_count / repair_count
-// telemetry on QuasarRoundResult.
+// Strategy:
+//   add/sub  : limb-level carry chain
+//   mul      : 4×4 schoolbook, low 256 bits
+//   div/mod  : bit-at-a-time long division (256 iterations); correct on
+//              every input including divide-by-zero (returns 0/x per EVM)
+//   shl/shr  : limb-shift + bit-shift split
+//   sar      : sign-extends from bit 255
+//   sdiv/smod: two's-complement wrappers around divmod
+//
+// All operations are pure functions on `thread const U256&`; they don't
+// touch device memory and don't allocate. The EVM dispatch loop pulls
+// values onto the thread-local register file and writes results back
+// to the device fiber stack.
+
+struct U256 { ulong v[4]; };
+
+static inline U256 u256_zero()      { U256 z; z.v[0]=0UL; z.v[1]=0UL; z.v[2]=0UL; z.v[3]=0UL; return z; }
+static inline U256 u256_one()       { U256 z = u256_zero(); z.v[0] = 1UL; return z; }
+static inline U256 u256_u64(ulong x){ U256 z = u256_zero(); z.v[0] = x; return z; }
+
+static inline bool u256_iszero(thread const U256& a) {
+    return (a.v[0] | a.v[1] | a.v[2] | a.v[3]) == 0UL;
+}
+static inline bool u256_eq(thread const U256& a, thread const U256& b) {
+    return a.v[0]==b.v[0] && a.v[1]==b.v[1] && a.v[2]==b.v[2] && a.v[3]==b.v[3];
+}
+static inline bool u256_lt(thread const U256& a, thread const U256& b) {
+    if (a.v[3] != b.v[3]) return a.v[3] < b.v[3];
+    if (a.v[2] != b.v[2]) return a.v[2] < b.v[2];
+    if (a.v[1] != b.v[1]) return a.v[1] < b.v[1];
+    return a.v[0] < b.v[0];
+}
+static inline bool u256_slt(thread const U256& a, thread const U256& b) {
+    bool an = (a.v[3] >> 63) != 0UL;
+    bool bn = (b.v[3] >> 63) != 0UL;
+    if (an != bn) return an;        ///< neg < non-neg
+    return u256_lt(a, b);
+}
+
+static inline U256 u256_add(thread const U256& a, thread const U256& b) {
+    U256 r;
+    ulong carry = 0UL;
+    for (uint i = 0u; i < 4u; ++i) {
+        ulong sum = a.v[i] + b.v[i];
+        ulong c1  = (sum < a.v[i]) ? 1UL : 0UL;
+        ulong sum2 = sum + carry;
+        ulong c2  = (sum2 < sum) ? 1UL : 0UL;
+        r.v[i] = sum2;
+        carry = c1 + c2;
+    }
+    return r;
+}
+
+static inline U256 u256_sub(thread const U256& a, thread const U256& b) {
+    U256 r;
+    ulong borrow = 0UL;
+    for (uint i = 0u; i < 4u; ++i) {
+        ulong bi  = b.v[i];
+        ulong diff = a.v[i] - bi;
+        ulong b1   = (a.v[i] < bi) ? 1UL : 0UL;
+        ulong diff2 = diff - borrow;
+        ulong b2    = (diff < borrow) ? 1UL : 0UL;
+        r.v[i] = diff2;
+        borrow = b1 + b2;
+    }
+    return r;
+}
+
+static inline U256 u256_neg(thread const U256& a) {
+    U256 z = u256_zero();
+    return u256_sub(z, a);
+}
+
+// Multiply two 64-bit values into a 128-bit pair (lo, hi).
+static inline void mul64(ulong a, ulong b, thread ulong& lo, thread ulong& hi) {
+    ulong a_lo = a & 0xFFFFFFFFUL;
+    ulong a_hi = a >> 32;
+    ulong b_lo = b & 0xFFFFFFFFUL;
+    ulong b_hi = b >> 32;
+    ulong ll = a_lo * b_lo;
+    ulong lh = a_lo * b_hi;
+    ulong hl = a_hi * b_lo;
+    ulong hh = a_hi * b_hi;
+    ulong mid = (ll >> 32) + (lh & 0xFFFFFFFFUL) + (hl & 0xFFFFFFFFUL);
+    lo = (ll & 0xFFFFFFFFUL) | (mid << 32);
+    hi = hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
+}
+
+static inline U256 u256_mul(thread const U256& a, thread const U256& b) {
+    ulong r[4]; r[0]=0UL; r[1]=0UL; r[2]=0UL; r[3]=0UL;
+    for (uint i = 0u; i < 4u; ++i) {
+        ulong carry = 0UL;
+        for (uint j = 0u; j + i < 4u; ++j) {
+            ulong lo, hi;
+            mul64(a.v[i], b.v[j], lo, hi);
+            ulong sum1 = r[i+j] + lo;
+            ulong c1   = (sum1 < r[i+j]) ? 1UL : 0UL;
+            ulong sum2 = sum1 + carry;
+            ulong c2   = (sum2 < sum1) ? 1UL : 0UL;
+            r[i+j] = sum2;
+            carry = hi + c1 + c2;
+        }
+    }
+    U256 out; out.v[0]=r[0]; out.v[1]=r[1]; out.v[2]=r[2]; out.v[3]=r[3];
+    return out;
+}
+
+static inline U256 u256_and(thread const U256& a, thread const U256& b) {
+    U256 r; for (uint i=0u;i<4u;++i) r.v[i] = a.v[i] & b.v[i]; return r;
+}
+static inline U256 u256_or(thread const U256& a, thread const U256& b) {
+    U256 r; for (uint i=0u;i<4u;++i) r.v[i] = a.v[i] | b.v[i]; return r;
+}
+static inline U256 u256_xor(thread const U256& a, thread const U256& b) {
+    U256 r; for (uint i=0u;i<4u;++i) r.v[i] = a.v[i] ^ b.v[i]; return r;
+}
+static inline U256 u256_not(thread const U256& a) {
+    U256 r; for (uint i=0u;i<4u;++i) r.v[i] = ~a.v[i]; return r;
+}
+
+static inline U256 u256_shl(thread const U256& a, uint n) {
+    if (n >= 256u) return u256_zero();
+    U256 r = u256_zero();
+    uint limb_shift = n / 64u;
+    uint bit_shift  = n % 64u;
+    for (uint i = 0u; i < 4u; ++i) {
+        uint dst = i + limb_shift;
+        if (dst >= 4u) break;
+        r.v[dst] |= (a.v[i] << bit_shift);
+        if (bit_shift != 0u && dst + 1u < 4u) {
+            r.v[dst + 1u] |= (a.v[i] >> (64u - bit_shift));
+        }
+    }
+    return r;
+}
+
+static inline U256 u256_shr(thread const U256& a, uint n) {
+    if (n >= 256u) return u256_zero();
+    U256 r = u256_zero();
+    uint limb_shift = n / 64u;
+    uint bit_shift  = n % 64u;
+    for (uint i = 0u; i < 4u; ++i) {
+        if (i < limb_shift) continue;
+        uint src = i;
+        uint dst = i - limb_shift;
+        r.v[dst] |= (a.v[src] >> bit_shift);
+        if (bit_shift != 0u && src + 1u < 4u) {
+            r.v[dst] |= (a.v[src + 1u] << (64u - bit_shift));
+        }
+    }
+    return r;
+}
+
+static inline U256 u256_sar(thread const U256& a, uint n) {
+    bool neg = (a.v[3] >> 63) != 0UL;
+    if (n >= 256u) {
+        if (!neg) return u256_zero();
+        U256 ones; for (uint i=0u;i<4u;++i) ones.v[i] = 0xFFFFFFFFFFFFFFFFUL;
+        return ones;
+    }
+    U256 r = u256_shr(a, n);
+    if (neg) {
+        // OR in the sign extension over the top n bits.
+        uint keep = 256u - n;
+        // Build a mask with bits [256-n .. 255] = 1.
+        for (uint i = 0u; i < 4u; ++i) {
+            uint base = i * 64u;
+            for (uint b = 0u; b < 64u; ++b) {
+                uint pos = base + b;
+                if (pos >= keep) r.v[i] |= (1UL << b);
+            }
+        }
+    }
+    return r;
+}
+
+// 256-bit unsigned long division. Bit-at-a-time; 256 iterations, exact.
+// On divide-by-zero returns (q=0, r=0) per EVM semantics.
+static inline void u256_divmod(thread const U256& a, thread const U256& b,
+                               thread U256& q, thread U256& r)
+{
+    if (u256_iszero(b)) { q = u256_zero(); r = u256_zero(); return; }
+    q = u256_zero();
+    r = u256_zero();
+    for (int i = 255; i >= 0; --i) {
+        // r = (r << 1) | bit_i(a)
+        r = u256_shl(r, 1u);
+        uint limb = uint(i) / 64u;
+        uint bit  = uint(i) % 64u;
+        ulong abit = (a.v[limb] >> bit) & 1UL;
+        r.v[0] |= abit;
+        if (!u256_lt(r, b)) {
+            r = u256_sub(r, b);
+            // q |= (1 << i)
+            q.v[limb] |= (1UL << bit);
+        }
+    }
+}
+
+static inline U256 u256_sdiv(thread const U256& a, thread const U256& b) {
+    if (u256_iszero(b)) return u256_zero();
+    bool an = (a.v[3] >> 63) != 0UL;
+    bool bn = (b.v[3] >> 63) != 0UL;
+    U256 ua = an ? u256_neg(a) : a;
+    U256 ub = bn ? u256_neg(b) : b;
+    U256 q, r; u256_divmod(ua, ub, q, r);
+    if (an != bn) q = u256_neg(q);
+    return q;
+}
+
+static inline U256 u256_smod(thread const U256& a, thread const U256& b) {
+    if (u256_iszero(b)) return u256_zero();
+    bool an = (a.v[3] >> 63) != 0UL;
+    bool bn = (b.v[3] >> 63) != 0UL;
+    U256 ua = an ? u256_neg(a) : a;
+    U256 ub = bn ? u256_neg(b) : b;
+    U256 q, r; u256_divmod(ua, ub, q, r);
+    if (an) r = u256_neg(r);
+    return r;
+}
+
+// EVM BYTE: extract the i-th most-significant byte of x as a U256.
+// Convention: i=0 returns the highest byte, i=31 the lowest. i>=32 → 0.
+static inline U256 u256_byte(thread const U256& i_, thread const U256& x) {
+    if (!u256_lt(i_, u256_u64(32UL))) return u256_zero();
+    uint i = uint(i_.v[0]);
+    uint pos = 31u - i;            ///< least-significant-byte index
+    uint limb = pos / 8u;
+    uint shift = (pos % 8u) * 8u;
+    ulong b = (x.v[limb] >> shift) & 0xFFUL;
+    return u256_u64(b);
+}
+
+// SIGNEXTEND: treat x as a (i+1)-byte value (i in [0..31]), sign-extend to
+// 256 bits. i>=31 → x unchanged.
+static inline U256 u256_signextend(thread const U256& i_, thread const U256& x) {
+    if (!u256_lt(i_, u256_u64(31UL))) return x;
+    uint i = uint(i_.v[0]);
+    uint sign_bit_pos = (i + 1u) * 8u - 1u;
+    uint limb = sign_bit_pos / 64u;
+    uint bit  = sign_bit_pos % 64u;
+    bool neg = ((x.v[limb] >> bit) & 1UL) != 0UL;
+    // Build mask of bits [sign_bit_pos+1 .. 255].
+    U256 r = x;
+    for (uint k = sign_bit_pos + 1u; k < 256u; ++k) {
+        uint kl = k / 64u;
+        uint kb = k % 64u;
+        if (neg) r.v[kl] |=  (1UL << kb);
+        else     r.v[kl] &= ~(1UL << kb);
+    }
+    return r;
+}
+
+// EXP: a^b. Square-and-multiply over U256.
+static inline U256 u256_exp(thread const U256& a, thread const U256& b) {
+    U256 r = u256_one();
+    U256 base = a;
+    U256 e = b;
+    for (int bit = 0; bit < 256; ++bit) {
+        if ((e.v[0] & 1UL) != 0UL) r = u256_mul(r, base);
+        e = u256_shr(e, 1u);
+        if (u256_iszero(e)) break;
+        base = u256_mul(base, base);
+    }
+    return r;
+}
+
+// Number of significant bytes in `e` (0..32). Used for EXP gas costing.
+static inline uint u256_byte_len(thread const U256& e) {
+    for (int i = 31; i >= 0; --i) {
+        uint limb = uint(i) / 8u;
+        uint shift = (uint(i) % 8u) * 8u;
+        if (((e.v[limb] >> shift) & 0xFFUL) != 0UL) return uint(i) + 1u;
+    }
+    return 0u;
+}
+
+// =============================================================================
+// Fiber stack / memory helpers
+// =============================================================================
+
+static inline void fiber_push(device FiberSlot* f, thread const U256& x)
+{
+    if (f->sp >= kFiberStackDepth) return;
+    uint base = f->sp * kFiberStackLimbs;
+    f->stack[base + 0u] = x.v[0];
+    f->stack[base + 1u] = x.v[1];
+    f->stack[base + 2u] = x.v[2];
+    f->stack[base + 3u] = x.v[3];
+    f->sp += 1u;
+}
+
+static inline U256 fiber_pop(device FiberSlot* f)
+{
+    U256 r = u256_zero();
+    if (f->sp == 0u) return r;
+    f->sp -= 1u;
+    uint base = f->sp * kFiberStackLimbs;
+    r.v[0] = f->stack[base + 0u];
+    r.v[1] = f->stack[base + 1u];
+    r.v[2] = f->stack[base + 2u];
+    r.v[3] = f->stack[base + 3u];
+    return r;
+}
+
+static inline U256 fiber_peek(device FiberSlot* f, uint depth)
+{
+    U256 r = u256_zero();
+    if (depth >= f->sp) return r;
+    uint idx = f->sp - 1u - depth;
+    uint base = idx * kFiberStackLimbs;
+    r.v[0] = f->stack[base + 0u];
+    r.v[1] = f->stack[base + 1u];
+    r.v[2] = f->stack[base + 2u];
+    r.v[3] = f->stack[base + 3u];
+    return r;
+}
+
+static inline void fiber_poke(device FiberSlot* f, uint depth, thread const U256& x)
+{
+    if (depth >= f->sp) return;
+    uint idx = f->sp - 1u - depth;
+    uint base = idx * kFiberStackLimbs;
+    f->stack[base + 0u] = x.v[0];
+    f->stack[base + 1u] = x.v[1];
+    f->stack[base + 2u] = x.v[2];
+    f->stack[base + 3u] = x.v[3];
+}
+
+// Memory MSTORE: write 32-byte big-endian U256 at byte offset.
+// MSTORE8: write low byte. MLOAD: read 32-byte big-endian U256.
+// All clamp to kFiberMemoryBytes; out-of-range is a no-op (still updates msize
+// for accurate MSIZE reporting).
+static inline void fiber_mstore(device FiberSlot* f, uint off, thread const U256& x)
+{
+    uint end = off + 32u;
+    if (end > f->msize) f->msize = end;
+    if (end > kFiberMemoryBytes) return;
+    for (uint i = 0u; i < 32u; ++i) {
+        // Big-endian: most-significant byte first.
+        uint pos = 31u - i;             ///< least-significant-byte index
+        uint limb = pos / 8u;
+        uint shift = (pos % 8u) * 8u;
+        f->memory[off + i] = uchar((x.v[limb] >> shift) & 0xFFUL);
+    }
+}
+
+static inline void fiber_mstore8(device FiberSlot* f, uint off, thread const U256& x)
+{
+    uint end = off + 1u;
+    if (end > f->msize) f->msize = end;
+    if (end > kFiberMemoryBytes) return;
+    f->memory[off] = uchar(x.v[0] & 0xFFUL);
+}
+
+static inline U256 fiber_mload(device FiberSlot* f, uint off)
+{
+    uint end = off + 32u;
+    if (end > f->msize) f->msize = end;
+    U256 r = u256_zero();
+    if (end > kFiberMemoryBytes) return r;
+    for (uint i = 0u; i < 32u; ++i) {
+        uint pos = 31u - i;
+        uint limb = pos / 8u;
+        uint shift = (pos % 8u) * 8u;
+        r.v[limb] |= (ulong(f->memory[off + i]) << shift);
+    }
+    return r;
+}
+
+// Append an entry to the fiber's RW set; saturates at kMaxRWSetPerTx
+// (further entries are dropped — same conservative semantics as Block-STM
+// CPU reference under read-set capacity pressure).
+static inline void fiber_rw_add(device FiberSlot* f,
+                                ulong key_lo, ulong key_hi,
+                                uint version_seen, uint kind)
+{
+    if (f->rw_count >= kMaxRWSetPerTx) return;
+    f->rw[f->rw_count].key_lo       = key_lo;
+    f->rw[f->rw_count].key_hi       = key_hi;
+    f->rw[f->rw_count].version_seen = version_seen;
+    f->rw[f->rw_count].kind         = kind;
+    f->rw_count += 1u;
+}
+
+// =============================================================================
+// EVM opcode constants (subset implemented in v0.41)
+// =============================================================================
+
+constant uchar OP_STOP        = 0x00;
+constant uchar OP_ADD         = 0x01;
+constant uchar OP_MUL         = 0x02;
+constant uchar OP_SUB         = 0x03;
+constant uchar OP_DIV         = 0x04;
+constant uchar OP_SDIV        = 0x05;
+constant uchar OP_MOD         = 0x06;
+constant uchar OP_SMOD        = 0x07;
+constant uchar OP_ADDMOD      = 0x08;
+constant uchar OP_MULMOD      = 0x09;
+constant uchar OP_EXP         = 0x0a;
+constant uchar OP_SIGNEXTEND  = 0x0b;
+constant uchar OP_LT          = 0x10;
+constant uchar OP_GT          = 0x11;
+constant uchar OP_SLT         = 0x12;
+constant uchar OP_SGT         = 0x13;
+constant uchar OP_EQ          = 0x14;
+constant uchar OP_ISZERO      = 0x15;
+constant uchar OP_AND         = 0x16;
+constant uchar OP_OR          = 0x17;
+constant uchar OP_XOR         = 0x18;
+constant uchar OP_NOT         = 0x19;
+constant uchar OP_BYTE        = 0x1a;
+constant uchar OP_SHL         = 0x1b;
+constant uchar OP_SHR         = 0x1c;
+constant uchar OP_SAR         = 0x1d;
+constant uchar OP_KECCAK256   = 0x20;
+constant uchar OP_ADDRESS     = 0x30;
+constant uchar OP_ORIGIN      = 0x32;
+constant uchar OP_CALLER      = 0x33;
+constant uchar OP_CALLVALUE   = 0x34;
+constant uchar OP_CALLDATALOAD = 0x35;
+constant uchar OP_CALLDATASIZE = 0x36;
+constant uchar OP_CHAINID     = 0x46;
+constant uchar OP_GASLIMIT    = 0x45;
+constant uchar OP_POP         = 0x50;
+constant uchar OP_MLOAD       = 0x51;
+constant uchar OP_MSTORE      = 0x52;
+constant uchar OP_MSTORE8     = 0x53;
+constant uchar OP_SLOAD       = 0x54;
+constant uchar OP_SSTORE      = 0x55;
+constant uchar OP_JUMP        = 0x56;
+constant uchar OP_JUMPI       = 0x57;
+constant uchar OP_PC          = 0x58;
+constant uchar OP_MSIZE       = 0x59;
+constant uchar OP_GAS         = 0x5a;
+constant uchar OP_JUMPDEST    = 0x5b;
+constant uchar OP_PUSH0       = 0x5f;
+constant uchar OP_PUSH1       = 0x60;
+constant uchar OP_PUSH32      = 0x7f;
+constant uchar OP_DUP1        = 0x80;
+constant uchar OP_DUP16       = 0x8f;
+constant uchar OP_SWAP1       = 0x90;
+constant uchar OP_SWAP16      = 0x9f;
+constant uchar OP_RETURN      = 0xf3;
+constant uchar OP_REVERT      = 0xfd;
+constant uchar OP_INVALID     = 0xfe;
+
+// Hash a slice of fiber memory with keccak256, writing 32 bytes to `out`.
+// Mirrors keccak256() but reads from the device fiber memory pointer.
+static inline void keccak256_fiber_mem(device const uchar* data, ulong len,
+                                       thread uchar* out)
+{
+    ulong s[25];
+    for (uint i = 0u; i < 25u; ++i) s[i] = 0UL;
+    constexpr uint rate_bytes = 136u;
+    ulong off = 0UL;
+    while (len - off >= rate_bytes) {
+        for (uint i = 0u; i < rate_bytes; ++i) {
+            uint lane = i / 8u;
+            uint shift = (i % 8u) * 8u;
+            s[lane] ^= ulong(data[off + i]) << shift;
+        }
+        keccak_f1600(s);
+        off += rate_bytes;
+    }
+    uchar block[rate_bytes];
+    ulong rem = len - off;
+    for (uint i = 0u; i < rate_bytes; ++i) block[i] = 0u;
+    for (ulong i = 0UL; i < rem; ++i) block[i] = data[off + i];
+    block[uint(rem)]       ^= 0x01u;
+    block[rate_bytes - 1u] ^= 0x80u;
+    for (uint i = 0u; i < rate_bytes; ++i) {
+        uint lane  = i / 8u;
+        uint shift = (i % 8u) * 8u;
+        s[lane] ^= ulong(block[i]) << shift;
+    }
+    keccak_f1600(s);
+    for (uint i = 0u; i < 32u; ++i) {
+        uint lane  = i / 8u;
+        uint shift = (i % 8u) * 8u;
+        out[i] = uchar((s[lane] >> shift) & 0xFFu);
+    }
+}
+
+// =============================================================================
+// drain_exec (v0.41) — real EVM bytecode interpreter
+// =============================================================================
+//
+// Per-tx state lives in FiberSlot indexed by tx_index. Each call to
+// drain_exec pops a VerifiedTx from the Exec ring, initializes (or
+// re-initializes) the fiber from the tx envelope, and runs the dispatch
+// loop until one of:
+//
+//   * STOP / RETURN              → status = Return
+//   * REVERT                     → status = Revert
+//   * INVALID / unknown opcode   → status = Error (consume all gas)
+//   * gas == 0                   → status = OOG
+//   * pc >= code_size            → status = Return  (implicit STOP)
+//   * SLOAD on never-loaded slot → status = Suspend (StateRequest emitted)
+//   * instruction budget hit     → status = OOG     (runaway guard)
+//
+// On any terminal status, the substrate emits an ExecResult to Validate.
+// On suspend, the fiber stays resident in the slot and the tx is *not*
+// pushed back to Exec; the cold-state response will resume it via
+// drain_state_resp → Crypto → Exec (re-running drain_exec on the same
+// fiber, which sees `status == kFiberWaitingState` and resumes from `pc`).
 static inline uint drain_exec(
     device RingHeader* exec_hdr,     device VerifiedTx* exec_items,
     device RingHeader* validate_hdr, device ExecResult* validate_items,
+    device RingHeader* statereq_hdr, device StateRequest* statereq_items,
     device MvccSlot*   mvcc_table,   uint mvcc_slot_count,
+    device FiberSlot*  fibers,       uint fiber_capacity,
+    device const uchar* code_arena,  uint code_arena_size,
+    device QuasarRoundDescriptor* desc,
+    device QuasarRoundResult* result,
     uint budget)
 {
     uint processed = 0u;
@@ -899,46 +1450,555 @@ static inline uint drain_exec(
         VerifiedTx v;
         if (!ring_try_pop(exec_hdr, exec_items, v)) break;
 
-        // Decode exec_key from origin (after stripping flag bits).
-        ulong key_lo = ulong(v.origin_lo);
-        ulong key_hi = ulong(v.origin_hi & ~kFlagMask);
-        if (key_lo == 0UL && key_hi == 0UL) key_lo = 1UL;  // never empty
+        // Bounds-check tx_index and clamp to fiber arena.
+        if (v.tx_index >= fiber_capacity) {
+            // No fiber slot — emit synthetic Error so drain_validate moves on.
+            ExecResult er;
+            er.tx_index    = v.tx_index;
+            er.incarnation = 0u;
+            er.status      = kExecStatusError;
+            er.gas_used    = v.gas_limit;
+            er.rw_count    = 0u;
+            for (uint k = 0u; k < kMaxRWSetPerTx; ++k) {
+                er.rw[k].key_lo = 0UL; er.rw[k].key_hi = 0UL;
+                er.rw[k].version_seen = 0u; er.rw[k].kind = 0u;
+            }
+            if (!ring_try_push(validate_hdr, validate_items, er)) {
+                (void)ring_try_push(exec_hdr, exec_items, v);
+                break;
+            }
+            ++processed;
+            continue;
+        }
+
+        device FiberSlot* f = &fibers[v.tx_index];
+
+        // Initialize the fiber if it's fresh OR if we're re-running after
+        // Repair (incarnation bump). Suspend resume reuses the existing
+        // fiber state; it enters with status == kFiberWaitingState.
+        bool is_resume = (f->status == kFiberWaitingState);
+        if (!is_resume) {
+            f->tx_index    = v.tx_index;
+            f->pc          = 0u;
+            f->sp          = 0u;
+            f->status      = kFiberRunning;
+            f->gas         = v.gas_limit;
+            f->gas_limit   = v.gas_limit;
+            f->rw_count    = 0u;
+            f->incarnation = (v.admission == 0u) ? 0u : v.admission;
+            f->origin_lo   = v.origin_lo;
+            f->origin_hi   = v.origin_hi;
+            f->msize       = 0u;
+            f->code_offset = v.blob_offset;
+            f->code_size   = v.blob_size;
+        } else {
+            f->status = kFiberRunning;
+        }
+
+        // Bytecode pointer + bounds. If blob_size==0 (legacy substrate
+        // path: needs_exec without blob) we emit a synthetic R+W on the
+        // origin key so existing v0.36 / Block-STM tests still see
+        // contention behaviour, then return.
+        device const uchar* code = code_arena + f->code_offset;
+        uint code_size = f->code_size;
+        bool legacy = (code_size == 0u || (f->code_offset + code_size) > code_arena_size);
+
+        if (legacy) {
+            // Synthesize one R+W at the origin-derived key — preserves
+            // v0.36 substrate behaviour for tests that don't push real
+            // bytecode (e.g. block_stm_independent_txs).
+            ulong key_lo = ulong(f->origin_lo);
+            ulong key_hi = ulong(f->origin_hi & ~kFlagMask);
+            if (key_lo == 0UL && key_hi == 0UL) key_lo = 1UL;
+            uint slot_idx = mvcc_locate(mvcc_table, mvcc_slot_count, key_lo, key_hi);
+            uint observed_version = 0u;
+            if (slot_idx != kMvccInvalidIdx) {
+                observed_version = atomic_load_explicit(
+                    &mvcc_table[slot_idx].version, memory_order_relaxed);
+            }
+            fiber_rw_add(f, key_lo, key_hi, observed_version, 0u);
+            fiber_rw_add(f, key_lo, key_hi, observed_version, 1u);
+
+            ExecResult er;
+            er.tx_index    = v.tx_index;
+            er.incarnation = f->incarnation;
+            er.status      = kExecStatusReturn;
+            er.gas_used    = 21000UL;
+            er.rw_count    = f->rw_count;
+            for (uint k = 0u; k < kMaxRWSetPerTx; ++k) {
+                if (k < f->rw_count) er.rw[k] = f->rw[k];
+                else { er.rw[k].key_lo = 0UL; er.rw[k].key_hi = 0UL;
+                       er.rw[k].version_seen = 0u; er.rw[k].kind = 0u; }
+            }
+            if (!ring_try_push(validate_hdr, validate_items, er)) {
+                (void)ring_try_push(exec_hdr, exec_items, v);
+                break;
+            }
+            f->status = kFiberCommittable;
+            ++processed;
+            continue;
+        }
+
+        // ====================================================================
+        // Dispatch loop
+        // ====================================================================
+        uint final_status = 0u;        ///< 0 = still running
+        bool suspended = false;
+        for (uint step = 0u; step < kFiberInstrBudget; ++step) {
+            if (f->pc >= code_size) { final_status = kExecStatusReturn; break; }
+            uchar op = code[f->pc];
+
+            // Per-opcode gas. Default is 3 (kGasDefault); special cases below.
+            ulong cost = kGasDefault;
+            if      (op == OP_SLOAD)     cost = kGasSloadWarm;
+            else if (op == OP_SSTORE)    cost = kGasSstore;
+            else if (op == OP_KECCAK256) cost = kGasKeccakBase;
+            else if (op == OP_JUMPDEST)  cost = kGasJumpdest;
+            else if (op == OP_POP)       cost = 2UL;
+            else if (op == OP_PC || op == OP_GAS || op == OP_MSIZE
+                  || op == OP_ADDRESS || op == OP_CALLER || op == OP_ORIGIN
+                  || op == OP_CALLVALUE || op == OP_CALLDATASIZE
+                  || op == OP_CHAINID || op == OP_GASLIMIT) cost = 2UL;
+            else if (op == OP_EXP) {
+                // base + 50 * byte_len(exp); peek the exponent (top of stack
+                // after `base`), so it's stack[sp-2].
+                if (f->sp >= 2u) {
+                    U256 e = fiber_peek(f, 0u);
+                    cost = 10UL + kGasExpByte * ulong(u256_byte_len(e));
+                } else cost = 10UL;
+            }
+
+            if (f->gas < cost) { final_status = kExecStatusOOG; break; }
+            f->gas -= cost;
+
+            if (op == OP_STOP) { final_status = kExecStatusReturn; break; }
+            else if (op == OP_ADD) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_add(a, b));
+                f->pc += 1u;
+            }
+            else if (op == OP_MUL) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_mul(a, b));
+                f->pc += 1u;
+            }
+            else if (op == OP_SUB) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_sub(a, b));
+                f->pc += 1u;
+            }
+            else if (op == OP_DIV) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                U256 q, r; u256_divmod(a, b, q, r);
+                fiber_push(f, q);
+                f->pc += 1u;
+            }
+            else if (op == OP_SDIV) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_sdiv(a, b));
+                f->pc += 1u;
+            }
+            else if (op == OP_MOD) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                U256 q, r;
+                if (u256_iszero(b)) r = u256_zero(); else u256_divmod(a, b, q, r);
+                fiber_push(f, r);
+                f->pc += 1u;
+            }
+            else if (op == OP_SMOD) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_smod(a, b));
+                f->pc += 1u;
+            }
+            else if (op == OP_ADDMOD) {
+                U256 m = fiber_pop(f); U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                U256 s = u256_add(a, b);
+                U256 q, r;
+                if (u256_iszero(m)) r = u256_zero(); else u256_divmod(s, m, q, r);
+                fiber_push(f, r);
+                f->pc += 1u;
+            }
+            else if (op == OP_MULMOD) {
+                U256 m = fiber_pop(f); U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                U256 p = u256_mul(a, b);
+                U256 q, r;
+                if (u256_iszero(m)) r = u256_zero(); else u256_divmod(p, m, q, r);
+                fiber_push(f, r);
+                f->pc += 1u;
+            }
+            else if (op == OP_EXP) {
+                U256 e = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_exp(a, e));
+                f->pc += 1u;
+            }
+            else if (op == OP_SIGNEXTEND) {
+                U256 x = fiber_pop(f); U256 i_ = fiber_pop(f);
+                fiber_push(f, u256_signextend(i_, x));
+                f->pc += 1u;
+            }
+            else if (op == OP_LT) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_lt(a, b) ? u256_one() : u256_zero());
+                f->pc += 1u;
+            }
+            else if (op == OP_GT) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_lt(b, a) ? u256_one() : u256_zero());
+                f->pc += 1u;
+            }
+            else if (op == OP_SLT) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_slt(a, b) ? u256_one() : u256_zero());
+                f->pc += 1u;
+            }
+            else if (op == OP_SGT) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_slt(b, a) ? u256_one() : u256_zero());
+                f->pc += 1u;
+            }
+            else if (op == OP_EQ) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_eq(a, b) ? u256_one() : u256_zero());
+                f->pc += 1u;
+            }
+            else if (op == OP_ISZERO) {
+                U256 a = fiber_pop(f);
+                fiber_push(f, u256_iszero(a) ? u256_one() : u256_zero());
+                f->pc += 1u;
+            }
+            else if (op == OP_AND) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_and(a, b));
+                f->pc += 1u;
+            }
+            else if (op == OP_OR) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_or(a, b));
+                f->pc += 1u;
+            }
+            else if (op == OP_XOR) {
+                U256 b = fiber_pop(f); U256 a = fiber_pop(f);
+                fiber_push(f, u256_xor(a, b));
+                f->pc += 1u;
+            }
+            else if (op == OP_NOT) {
+                U256 a = fiber_pop(f);
+                fiber_push(f, u256_not(a));
+                f->pc += 1u;
+            }
+            else if (op == OP_BYTE) {
+                U256 x = fiber_pop(f); U256 i_ = fiber_pop(f);
+                fiber_push(f, u256_byte(i_, x));
+                f->pc += 1u;
+            }
+            else if (op == OP_SHL) {
+                U256 v_ = fiber_pop(f); U256 sh = fiber_pop(f);
+                uint n = (sh.v[1] | sh.v[2] | sh.v[3]) != 0UL ? 256u : uint(sh.v[0]);
+                fiber_push(f, u256_shl(v_, n));
+                f->pc += 1u;
+            }
+            else if (op == OP_SHR) {
+                U256 v_ = fiber_pop(f); U256 sh = fiber_pop(f);
+                uint n = (sh.v[1] | sh.v[2] | sh.v[3]) != 0UL ? 256u : uint(sh.v[0]);
+                fiber_push(f, u256_shr(v_, n));
+                f->pc += 1u;
+            }
+            else if (op == OP_SAR) {
+                U256 v_ = fiber_pop(f); U256 sh = fiber_pop(f);
+                uint n = (sh.v[1] | sh.v[2] | sh.v[3]) != 0UL ? 256u : uint(sh.v[0]);
+                fiber_push(f, u256_sar(v_, n));
+                f->pc += 1u;
+            }
+            else if (op == OP_KECCAK256) {
+                U256 len = fiber_pop(f); U256 off = fiber_pop(f);
+                uint o = uint(off.v[0]); uint l = uint(len.v[0]);
+                ulong word_cost = kGasKeccakWord * ulong((l + 31u) / 32u);
+                if (f->gas < word_cost) { final_status = kExecStatusOOG; break; }
+                f->gas -= word_cost;
+                if (o + l > kFiberMemoryBytes) { final_status = kExecStatusError; break; }
+                if (o + l > f->msize) f->msize = o + l;
+                uchar digest[32];
+                keccak256_fiber_mem(&f->memory[o], ulong(l), digest);
+                U256 r = u256_zero();
+                for (uint k = 0u; k < 32u; ++k) {
+                    uint pos = 31u - k;
+                    uint limb = pos / 8u;
+                    uint shift = (pos % 8u) * 8u;
+                    r.v[limb] |= (ulong(digest[k]) << shift);
+                }
+                fiber_push(f, r);
+                f->pc += 1u;
+            }
+            else if (op == OP_ADDRESS || op == OP_CALLER || op == OP_ORIGIN) {
+                U256 r = u256_zero();
+                r.v[0] = ulong(f->origin_lo) | (ulong(f->origin_hi & ~kFlagMask) << 32);
+                fiber_push(f, r);
+                f->pc += 1u;
+            }
+            else if (op == OP_CALLVALUE) {
+                fiber_push(f, u256_zero());
+                f->pc += 1u;
+            }
+            else if (op == OP_CALLDATALOAD) {
+                (void)fiber_pop(f);     // offset (unused — calldata not wired in v0.41)
+                fiber_push(f, u256_zero());
+                f->pc += 1u;
+            }
+            else if (op == OP_CALLDATASIZE) {
+                fiber_push(f, u256_zero());
+                f->pc += 1u;
+            }
+            else if (op == OP_CHAINID) {
+                fiber_push(f, u256_u64(desc->chain_id));
+                f->pc += 1u;
+            }
+            else if (op == OP_GASLIMIT) {
+                fiber_push(f, u256_u64(desc->gas_limit));
+                f->pc += 1u;
+            }
+            else if (op == OP_POP) {
+                (void)fiber_pop(f);
+                f->pc += 1u;
+            }
+            else if (op == OP_MLOAD) {
+                U256 off = fiber_pop(f);
+                fiber_push(f, fiber_mload(f, uint(off.v[0])));
+                f->pc += 1u;
+            }
+            else if (op == OP_MSTORE) {
+                U256 v_ = fiber_pop(f); U256 off = fiber_pop(f);
+                fiber_mstore(f, uint(off.v[0]), v_);
+                f->pc += 1u;
+            }
+            else if (op == OP_MSTORE8) {
+                U256 v_ = fiber_pop(f); U256 off = fiber_pop(f);
+                fiber_mstore8(f, uint(off.v[0]), v_);
+                f->pc += 1u;
+            }
+            else if (op == OP_MSIZE) {
+                uint m = (f->msize + 31u) & ~uint(31);
+                fiber_push(f, u256_u64(ulong(m)));
+                f->pc += 1u;
+            }
+            else if (op == OP_SLOAD) {
+                U256 key = fiber_pop(f);
+                ulong key_lo = key.v[0];
+                ulong key_hi = key.v[1] | key.v[2] | key.v[3];
+                if (key_lo == 0UL && key_hi == 0UL) key_lo = 1UL;
+                uint slot_idx = mvcc_locate(mvcc_table, mvcc_slot_count, key_lo, key_hi);
+
+                // Cold-miss detection: a slot is cold when no tx has ever
+                // observed it (version == 0 AND last_writer_tx still at the
+                // initial 0). Cold reads suspend the fiber and emit a
+                // StateRequest; the cold-state loop re-routes the tx
+                // through Crypto → Exec, where we resume from the same pc.
+                bool is_cold = false;
+                if (slot_idx == kMvccInvalidIdx) {
+                    is_cold = true;
+                } else {
+                    device MvccSlot* s = &mvcc_table[slot_idx];
+                    uint cur_ver  = atomic_load_explicit(&s->version, memory_order_relaxed);
+                    uint cur_lwtx = atomic_load_explicit(&s->last_writer_tx, memory_order_relaxed);
+                    is_cold = (cur_ver == 0u && cur_lwtx == 0u);
+                }
+
+                if (is_cold) {
+                    StateRequest sr;
+                    sr.tx_index = v.tx_index;
+                    sr.key_type = 1u;       // Storage
+                    sr.priority = 0u;
+                    sr._pad0    = 0u;
+                    sr.key_lo   = key_lo;
+                    sr.key_hi   = key_hi;
+                    if (!ring_try_push(statereq_hdr, statereq_items, sr)) {
+                        // Backpressure on StateRequest: re-push the tx,
+                        // abort drain pass, retry next wave tick.
+                        (void)ring_try_push(exec_hdr, exec_items, v);
+                        return processed;
+                    }
+                    // Restore the popped key so resume re-runs SLOAD.
+                    fiber_push(f, key);
+                    f->status = kFiberWaitingState;
+                    f->pending_key_lo_lo = uint(key_lo & 0xFFFFFFFFu);
+                    f->pending_key_lo_hi = uint(key_lo >> 32);
+                    f->pending_key_hi_lo = uint(key_hi & 0xFFFFFFFFu);
+                    f->pending_key_hi_hi = uint(key_hi >> 32);
+                    atomic_fetch_add_explicit(&result->fibers_suspended, 1u,
+                                              memory_order_relaxed);
+                    suspended = true;
+                    break;
+                }
+
+                // Warm path: record the read in the RW set and push 0
+                // (the slot value body persists into v0.45's value journal —
+                // for now Block-STM only checks version-conflict shape).
+                uint observed_version = (slot_idx == kMvccInvalidIdx) ? 0u
+                    : atomic_load_explicit(&mvcc_table[slot_idx].version,
+                                           memory_order_relaxed);
+                fiber_rw_add(f, key_lo, key_hi, observed_version, 0u);
+                fiber_push(f, u256_zero());
+                f->pc += 1u;
+            }
+            else if (op == OP_SSTORE) {
+                U256 val = fiber_pop(f); U256 key = fiber_pop(f);
+                ulong key_lo = key.v[0];
+                ulong key_hi = key.v[1] | key.v[2] | key.v[3];
+                if (key_lo == 0UL && key_hi == 0UL) key_lo = 1UL;
+                uint slot_idx = mvcc_locate(mvcc_table, mvcc_slot_count, key_lo, key_hi);
+                uint observed_version = 0u;
+                if (slot_idx != kMvccInvalidIdx) {
+                    observed_version = atomic_load_explicit(
+                        &mvcc_table[slot_idx].version, memory_order_relaxed);
+                }
+                fiber_rw_add(f, key_lo, key_hi, observed_version, 1u);
+                (void)val;       // value body lands in v0.45 journal
+                f->pc += 1u;
+            }
+            else if (op == OP_JUMP) {
+                U256 dst = fiber_pop(f);
+                uint d = uint(dst.v[0]);
+                if (d >= code_size || code[d] != OP_JUMPDEST) {
+                    final_status = kExecStatusError; break;
+                }
+                f->pc = d;
+            }
+            else if (op == OP_JUMPI) {
+                U256 cond = fiber_pop(f); U256 dst = fiber_pop(f);
+                if (!u256_iszero(cond)) {
+                    uint d = uint(dst.v[0]);
+                    if (d >= code_size || code[d] != OP_JUMPDEST) {
+                        final_status = kExecStatusError; break;
+                    }
+                    f->pc = d;
+                } else {
+                    f->pc += 1u;
+                }
+            }
+            else if (op == OP_PC) {
+                fiber_push(f, u256_u64(ulong(f->pc)));
+                f->pc += 1u;
+            }
+            else if (op == OP_GAS) {
+                fiber_push(f, u256_u64(f->gas));
+                f->pc += 1u;
+            }
+            else if (op == OP_JUMPDEST) {
+                f->pc += 1u;
+            }
+            else if (op == OP_PUSH0) {
+                fiber_push(f, u256_zero());
+                f->pc += 1u;
+            }
+            else if (op >= OP_PUSH1 && op <= OP_PUSH32) {
+                uint n = uint(op - OP_PUSH1) + 1u;
+                U256 r = u256_zero();
+                for (uint k = 0u; k < n; ++k) {
+                    uint pos = f->pc + 1u + k;
+                    uchar b = (pos < code_size) ? code[pos] : uchar(0);
+                    uint bit_pos = (n - 1u - k) * 8u;
+                    uint limb = bit_pos / 64u;
+                    uint shift = bit_pos % 64u;
+                    r.v[limb] |= ulong(b) << shift;
+                }
+                fiber_push(f, r);
+                f->pc += 1u + n;
+            }
+            else if (op >= OP_DUP1 && op <= OP_DUP16) {
+                uint depth = uint(op - OP_DUP1);
+                U256 x = fiber_peek(f, depth);
+                fiber_push(f, x);
+                f->pc += 1u;
+            }
+            else if (op >= OP_SWAP1 && op <= OP_SWAP16) {
+                uint depth = uint(op - OP_SWAP1) + 1u;
+                U256 top = fiber_peek(f, 0u);
+                U256 oth = fiber_peek(f, depth);
+                fiber_poke(f, 0u, oth);
+                fiber_poke(f, depth, top);
+                f->pc += 1u;
+            }
+            else if (op == OP_RETURN) {
+                (void)fiber_pop(f); (void)fiber_pop(f);
+                final_status = kExecStatusReturn; break;
+            }
+            else if (op == OP_REVERT) {
+                (void)fiber_pop(f); (void)fiber_pop(f);
+                final_status = kExecStatusRevert; break;
+            }
+            else if (op == OP_INVALID) {
+                final_status = kExecStatusError; break;
+            }
+            else {
+                // Unimplemented opcode → INVALID semantics (consume all gas).
+                // CALL/CREATE/EXTCODE/LOG/MCOPY/TLOAD/TSTORE/RETURNDATA*/
+                // BLOCKHASH/BASEFEE/BLOBHASH land in v0.42–v0.45.
+                final_status = kExecStatusError; break;
+            }
+        }
+
+        if (suspended) {
+            ++processed;
+            continue;
+        }
+
+        if (final_status == 0u) {
+            // Hit instruction budget — treat as OOG so Validate sees a
+            // concrete status and the tx counts as terminal.
+            final_status = kExecStatusOOG;
+        }
+
+        // INVALID / Error consume all gas; OOG also consumes all gas; Return
+        // and Revert report what was actually used.
+        ulong gas_used;
+        if (final_status == kExecStatusError || final_status == kExecStatusOOG) {
+            gas_used = f->gas_limit;
+        } else {
+            gas_used = (f->gas_limit > f->gas) ? (f->gas_limit - f->gas) : 0UL;
+        }
+        if (gas_used < 21000UL) gas_used = 21000UL;     // intrinsic floor
 
         ExecResult er;
         er.tx_index    = v.tx_index;
-        er.incarnation = 0u;
-        er.status      = 1u;          // Return
-        er.gas_used    = 21000u;
-        er.rw_count    = 2u;          // read-then-write — Block-STM model
-
-        // Read MVCC version, record observation, then mark a write at
-        // the same key. Validate compares rw[0].version_seen against
-        // the current MVCC version: if another tx committed a write
-        // between this exec and validate, version advances → conflict
-        // → repair.
-        uint slot_idx = mvcc_locate(mvcc_table, mvcc_slot_count, key_lo, key_hi);
-        uint observed_version = 0u;
-        if (slot_idx != kMvccInvalidIdx) {
-            observed_version = atomic_load_explicit(
-                &mvcc_table[slot_idx].version, memory_order_relaxed);
+        er.incarnation = f->incarnation;
+        er.status      = final_status;
+        er.gas_used    = gas_used;
+        er.rw_count    = f->rw_count;
+        for (uint k = 0u; k < kMaxRWSetPerTx; ++k) {
+            if (k < f->rw_count) {
+                er.rw[k] = f->rw[k];
+            } else {
+                er.rw[k].key_lo = 0UL; er.rw[k].key_hi = 0UL;
+                er.rw[k].version_seen = 0u; er.rw[k].kind = 0u;
+            }
         }
-        er.rw[0].key_lo       = key_lo;
-        er.rw[0].key_hi       = key_hi;
-        er.rw[0].version_seen = observed_version;
-        er.rw[0].kind         = 0u;                  // read
-        er.rw[1].key_lo       = key_lo;
-        er.rw[1].key_hi       = key_hi;
-        er.rw[1].version_seen = observed_version;
-        er.rw[1].kind         = 1u;                  // write
-        for (uint k = 2u; k < kMaxRWSetPerTx; ++k) {
-            er.rw[k].key_lo = 0UL; er.rw[k].key_hi = 0UL;
-            er.rw[k].version_seen = 0u; er.rw[k].kind = 0u;
+
+        // Block-STM substrate guarantee: every tx that reaches Validate
+        // touches at least one RW key so MVCC validation has something to
+        // compare. Pure-compute programs (no SLOAD/SSTORE) get a
+        // synthetic R+W on the origin-derived key — same shape as the
+        // v0.36 substrate, so existing tests still see contention.
+        if (er.rw_count == 0u) {
+            ulong key_lo = ulong(f->origin_lo);
+            ulong key_hi = ulong(f->origin_hi & ~kFlagMask);
+            if (key_lo == 0UL && key_hi == 0UL) key_lo = 1UL;
+            uint slot_idx = mvcc_locate(mvcc_table, mvcc_slot_count, key_lo, key_hi);
+            uint observed_version = 0u;
+            if (slot_idx != kMvccInvalidIdx) {
+                observed_version = atomic_load_explicit(
+                    &mvcc_table[slot_idx].version, memory_order_relaxed);
+            }
+            er.rw[0].key_lo = key_lo; er.rw[0].key_hi = key_hi;
+            er.rw[0].version_seen = observed_version; er.rw[0].kind = 0u;
+            er.rw[1].key_lo = key_lo; er.rw[1].key_hi = key_hi;
+            er.rw[1].version_seen = observed_version; er.rw[1].kind = 1u;
+            er.rw_count = 2u;
         }
 
         if (!ring_try_push(validate_hdr, validate_items, er)) {
             (void)ring_try_push(exec_hdr, exec_items, v);
             break;
         }
+        f->status = kFiberCommittable;
         ++processed;
     }
     return processed;
@@ -1021,13 +2081,17 @@ static inline uint drain_repair(
         ExecResult er;
         if (!ring_try_pop(repair_hdr, repair_items, er)) break;
         VerifiedTx v;
-        v.tx_index  = er.tx_index;
-        v.admission = 0u;
-        v.gas_limit = er.gas_used;
+        v.tx_index    = er.tx_index;
+        v.admission   = 0u;
+        v.gas_limit   = er.gas_used;
         // Reconstruct origin from rw[0].key (carries exec_key + flags).
-        v.origin_lo = uint(er.rw[0].key_lo & 0xFFFFFFFFu);
-        v.origin_hi = uint(er.rw[0].key_hi & 0xFFFFFFFFu) | kNeedsExec;
-        v._pad0     = 0UL;
+        v.origin_lo   = uint(er.rw[0].key_lo & 0xFFFFFFFFu);
+        v.origin_hi   = uint(er.rw[0].key_hi & 0xFFFFFFFFu) | kNeedsExec;
+        // Repair re-emits don't carry bytecode (no fiber persistence
+        // across the Validate→Repair→Exec hop yet); v0.42 wires this when
+        // the fiber slot becomes durable.
+        v.blob_offset = 0u;
+        v.blob_size   = 0u;
         if (!ring_try_push(exec_hdr, exec_items, v)) {
             (void)ring_try_push(repair_hdr, repair_items, er);
             break;
@@ -1049,11 +2113,13 @@ static inline uint drain_state_resp(
         StatePage p;
         if (!ring_try_pop(resp_hdr, resp_items, p)) break;
         VerifiedTx v;
-        v.tx_index  = p.tx_index;
-        v.admission = (p.status == 0u) ? 0u : 1u;
-        v.gas_limit = 21000u;
-        v.origin_lo = uint(p.key_lo & 0xFFFFFFFFu);
-        v.origin_hi = uint(p.key_hi & 0xFFFFFFFFu);
+        v.tx_index    = p.tx_index;
+        v.admission   = (p.status == 0u) ? 0u : 1u;
+        v.gas_limit   = 21000u;
+        v.origin_lo   = uint(p.key_lo & 0xFFFFFFFFu);
+        v.origin_hi   = uint(p.key_hi & 0xFFFFFFFFu);
+        v.blob_offset = 0u;
+        v.blob_size   = 0u;
         if (!ring_try_push(crypto_hdr, crypto_items, v)) {
             (void)ring_try_push(resp_hdr, resp_items, p);
             break;
@@ -1310,6 +2376,10 @@ kernel void quasar_wave_kernel(
     device const PredictedKey*    predicted_keys        [[buffer(13)]],
     constant uint&                predicted_capacity    [[buffer(14)]],
     constant uint&                dag_node_capacity     [[buffer(15)]],
+    // v0.41 — EVM bytecode interpreter inputs.
+    device const uchar*           code_arena            [[buffer(16)]],
+    constant uint&                code_arena_size       [[buffer(17)]],
+    constant uint&                fiber_capacity        [[buffer(18)]],
     uint   tid                                          [[thread_index_in_threadgroup]],
     uint   gid                                          [[threadgroup_position_in_grid]])
 {
@@ -1348,8 +2418,6 @@ kernel void quasar_wave_kernel(
     device VoteIngress*  vote_items      = (device VoteIngress*) (items_arena + vote_hdr->items_ofs);
     device QuorumCert*   qc_items        = (device QuorumCert*)  (items_arena + qc_hdr->items_ofs);
 
-    (void)fibers;  // v0.39 fiber VM hook here
-
     if (gid == 0u) {
         (void)drain_ingress(ingress_hdr, ingress_items, decode_hdr, decode_items, tx_index_seq, budget);
     } else if (gid == 1u) {
@@ -1365,8 +2433,13 @@ kernel void quasar_wave_kernel(
                              dag_writer_table, dag_writer_slot_count,
                              predicted_keys, predicted_capacity, budget);
     } else if (gid == 4u) {
+        // v0.41 — real EVM bytecode interpreter
         (void)drain_exec(exec_hdr, exec_items, validate_hdr, validate_items,
-                         mvcc_table, mvcc_slot_count, budget);
+                         statereq_hdr, statereq_items,
+                         mvcc_table, mvcc_slot_count,
+                         fibers, fiber_capacity,
+                         code_arena, code_arena_size,
+                         desc, result, budget);
     } else if (gid == 5u) {
         (void)drain_validate(validate_hdr, validate_items, commit_hdr, commit_items,
                              repair_hdr, repair_items, mvcc_table, mvcc_slot_count,

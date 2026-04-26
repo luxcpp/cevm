@@ -27,11 +27,13 @@ constexpr uint32_t kMaxDagParents         = 4u;
 constexpr uint32_t kMaxDagChildren        = 16u;
 constexpr uint32_t kMaxPredictedKeys      = 4u;
 constexpr uint32_t kFiberStackDepth       = 64u;
+constexpr uint32_t kFiberStackLimbs       = 4u;       ///< v0.41 — 256-bit
 constexpr uint32_t kFiberMemoryBytes      = 1024u;
 constexpr uint32_t kDefaultMvccSlots      = 8192u;
 constexpr uint32_t kDefaultDagWriterSlots = 8192u;
 constexpr uint32_t kMaxFibers             = 4096u;
 constexpr uint32_t kDagNodeCapacity       = kMaxFibers;
+constexpr uint32_t kCodeArenaBytes        = 256u * 1024u;   ///< v0.41 — bytecode pool
 
 constexpr uint32_t kItemSizes[] = {
     sizeof(IngressTx), sizeof(DecodedTx), sizeof(VerifiedTx), sizeof(VerifiedTx),
@@ -41,6 +43,7 @@ constexpr uint32_t kItemSizes[] = {
 static_assert(sizeof(kItemSizes) / sizeof(kItemSizes[0]) == kNumServices,
               "kItemSizes must cover every ServiceId");
 
+// MUST match struct FiberSlot in quasar_wave.metal byte-for-byte.
 struct alignas(16) FiberSlot {
     uint32_t tx_index;
     uint32_t pc;
@@ -53,9 +56,15 @@ struct alignas(16) FiberSlot {
     uint32_t pending_key_lo_hi;
     uint32_t pending_key_hi_lo;
     uint32_t pending_key_hi_hi;
+    uint32_t origin_lo;
+    uint32_t origin_hi;
+    uint64_t gas_limit;
+    uint32_t msize;
+    uint32_t code_offset;
+    uint32_t code_size;
     uint32_t _pad0;
     RWSetEntry rw[kMaxRWSetPerTx];
-    uint64_t  stack[kFiberStackDepth];
+    uint64_t  stack[kFiberStackDepth * kFiberStackLimbs];   ///< v0.41 — 256-bit
     uint8_t   memory[kFiberMemoryBytes];
 };
 
@@ -71,6 +80,8 @@ struct alignas(16) DagNodeHost {
     uint32_t pending_origin_hi;
     uint32_t pending_admission;
     uint32_t state;
+    uint32_t pending_blob_offset;       ///< v0.41
+    uint32_t pending_blob_size;
 };
 
 struct PredictedKeyHost {
@@ -132,6 +143,11 @@ struct Round {
     id<MTLBuffer> predicted_buf       = nil;
     id<MTLBuffer> predicted_cap_buf   = nil;
     id<MTLBuffer> dag_node_cap_buf    = nil;
+    // v0.41 — EVM bytecode interpreter buffers.
+    id<MTLBuffer> code_buf            = nil;
+    id<MTLBuffer> code_size_buf       = nil;
+    id<MTLBuffer> fiber_cap_buf       = nil;
+    uint32_t      next_code_offset    = 0u;
 
     uint32_t      next_predicted_idx  = 0u;
 };
@@ -191,6 +207,10 @@ public:
         round_.predicted_buf       = [device_ newBufferWithLength:sizeof(PredictedKeyHost) * kPredictedSlotsPerRound options:MTLResourceStorageModeShared];
         round_.predicted_cap_buf   = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
         round_.dag_node_cap_buf    = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
+        // v0.41 — EVM bytecode arena.
+        round_.code_buf            = [device_ newBufferWithLength:kCodeArenaBytes                      options:MTLResourceStorageModeShared];
+        round_.code_size_buf       = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
+        round_.fiber_cap_buf       = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
 
         if (!round_.desc_buf || !round_.result_buf || !round_.hdrs_buf
             || !round_.items_buf || !round_.tx_index_buf || !round_.mvcc_buf
@@ -198,7 +218,8 @@ public:
             || !round_.vote_verified_buf || !round_.vote_capacity_buf
             || !round_.dag_writer_buf || !round_.dag_writer_count_buf
             || !round_.predicted_buf || !round_.predicted_cap_buf
-            || !round_.dag_node_cap_buf)
+            || !round_.dag_node_cap_buf
+            || !round_.code_buf || !round_.code_size_buf || !round_.fiber_cap_buf)
             return QuasarRoundHandle{0};
 
         std::memcpy([round_.desc_buf contents], &round_.desc, sizeof(QuasarRoundDescriptor));
@@ -210,13 +231,17 @@ public:
         std::memset([round_.dag_writer_buf contents], 0, 32u * kDefaultDagWriterSlots);
         std::memset([round_.predicted_buf contents], 0, sizeof(PredictedKeyHost) * kPredictedSlotsPerRound);
         std::memset([round_.vote_verified_buf contents], 0, sizeof(uint32_t) * kDefaultRingCapacity);
+        std::memset([round_.code_buf contents], 0, kCodeArenaBytes);
         *static_cast<uint32_t*>([round_.tx_index_buf contents]) = 0;
         *static_cast<uint32_t*>([round_.mvcc_count_buf contents]) = kDefaultMvccSlots;
         *static_cast<uint32_t*>([round_.vote_capacity_buf contents]) = kDefaultRingCapacity;
         *static_cast<uint32_t*>([round_.dag_writer_count_buf contents]) = kDefaultDagWriterSlots;
         *static_cast<uint32_t*>([round_.predicted_cap_buf contents]) = kDagNodeCapacity;
         *static_cast<uint32_t*>([round_.dag_node_cap_buf contents]) = kDagNodeCapacity;
+        *static_cast<uint32_t*>([round_.code_size_buf contents]) = kCodeArenaBytes;
+        *static_cast<uint32_t*>([round_.fiber_cap_buf contents]) = kMaxFibers;
         round_.next_predicted_idx = 0u;
+        round_.next_code_offset = 0u;
 
         auto* result = static_cast<QuasarRoundResult*>([round_.result_buf contents]);
         result->mode = desc.mode;
@@ -249,15 +274,31 @@ public:
         auto* items = reinterpret_cast<IngressTx*>(
             static_cast<uint8_t*>([round_.items_buf contents]) + ingress.items_ofs);
         auto* predicted_arena = static_cast<PredictedKeyHost*>([round_.predicted_buf contents]);
+        auto* code_arena      = static_cast<uint8_t*>([round_.code_buf contents]);
 
         for (const auto& tx : txs) {
             uint32_t head = ingress.head;
             uint32_t tail = ingress.tail;
             if (tail - head >= ingress.capacity) break;
 
+            // v0.41 — write bytecode into the device code arena. If the
+            // arena is full, the tx is admitted with size=0 and drain_exec
+            // falls through to the legacy synthetic R+W path. The blob
+            // arena (host-side) keeps a copy for any future host-side
+            // RLP / CALLDATA replay paths.
+            uint32_t code_off  = round_.next_code_offset;
+            uint32_t code_size = static_cast<uint32_t>(tx.bytes.size());
+            if (code_off + code_size > kCodeArenaBytes) {
+                code_size = 0u;
+                code_off  = 0u;
+            } else if (code_size > 0u) {
+                std::memcpy(code_arena + code_off, tx.bytes.data(), code_size);
+                round_.next_code_offset += code_size;
+            }
+
             IngressTx in{};
-            in.blob_offset = static_cast<uint32_t>(blob_arena_.size());
-            in.blob_size   = static_cast<uint32_t>(tx.bytes.size());
+            in.blob_offset = code_off;
+            in.blob_size   = code_size;
             in.gas_limit   = tx.gas_limit;
             in.nonce       = tx.nonce;
             uint32_t origin_lo = static_cast<uint32_t>(tx.origin & 0xFFFFFFFFu);
@@ -466,6 +507,10 @@ public:
             [enc setBuffer:round_.predicted_buf        offset:0 atIndex:13];
             [enc setBuffer:round_.predicted_cap_buf    offset:0 atIndex:14];
             [enc setBuffer:round_.dag_node_cap_buf     offset:0 atIndex:15];
+            // v0.41 — EVM bytecode interpreter inputs.
+            [enc setBuffer:round_.code_buf             offset:0 atIndex:16];
+            [enc setBuffer:round_.code_size_buf        offset:0 atIndex:17];
+            [enc setBuffer:round_.fiber_cap_buf        offset:0 atIndex:18];
 
             [enc dispatchThreadgroups:MTLSizeMake(kNumServices, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
