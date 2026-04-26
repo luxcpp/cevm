@@ -45,8 +45,19 @@ constant uint kMaxRWSetPerTx     = 8u;
 constant uint kDefaultMvccSlots  = 8192u;
 constant uint kMaxDagParents     = 4u;
 constant uint kMaxDagChildren    = 16u;
+constant uint kMaxPredictedKeys  = 4u;
 constant uint kFiberStackDepth   = 64u;
 constant uint kFiberMemoryBytes  = 1024u;
+
+// v0.40 — DagNode lifecycle states. drain_dagready re-checks state
+// after publishing the parent→child edge; if it sees Committed, it
+// backs out its unresolved_parents claim. drain_commit sets
+// state=Committed AFTER walking children.
+constant uint kDagNodeUnset      = 0u;
+constant uint kDagNodeRegistered = 1u;
+constant uint kDagNodeEmitted    = 2u;
+constant uint kDagNodeCommitted  = 3u;
+constant uint kInvalidWriter     = 0xFFFFFFFFu;
 
 struct alignas(16) RingHeader {
     atomic_uint head;
@@ -129,9 +140,33 @@ struct alignas(16) DagNode {
     uint tx_index;
     uint parent_count;
     atomic_uint unresolved_parents;
-    uint child_count;
+    atomic_uint child_count;
     uint parents[kMaxDagParents];
     uint children[kMaxDagChildren];
+    // v0.40: cached envelope so drain_commit can re-emit a freed child
+    // straight to Exec without re-popping from DagReady.
+    ulong pending_gas_limit;
+    uint  pending_origin_lo;
+    uint  pending_origin_hi;
+    uint  pending_admission;
+    atomic_uint state;
+};
+
+// v0.40 — per-key writer table. drain_dagready is single-threaded
+// (gid=3,tid=0), so last_writer_tx is plain (not atomic).
+struct alignas(16) DagWriterSlot {
+    ulong key_lo;
+    ulong key_hi;
+    uint  last_writer_tx;
+    uint  _pad0;
+};
+
+// v0.40 — predicted access entry, indexed by tx_index.
+struct PredictedKey {
+    ulong key_lo;
+    ulong key_hi;
+    uint  is_write;
+    uint  valid;
 };
 
 struct alignas(16) StateRequest {
@@ -629,12 +664,170 @@ static inline uint drain_crypto(
     return processed;
 }
 
-// drain_dagready (v0.35): pass-through to Exec. Full DAG construction
-// (predicted-access-set conflict graph + frontier extraction) lands in
-// v0.40. The substrate is in place: DagNode arena bound, ServiceId::DagReady
-// has its own ring with VerifiedTx items, and the unresolved_parents
-// atomic counter is ready for the conflict-edge DEC-on-commit pattern.
+// =============================================================================
+// v0.40 — DAG construction (predicted-access-set conflict graph)
+// =============================================================================
+//
+// Data flow (Nebula mode):
+//   Host push_txs(): for tx at host-position k, copy predicted_access into
+//     predicted_keys[k * kMaxPredictedKeys .. (k+1) * kMaxPredictedKeys].
+//   drain_ingress() pops Ingress in FIFO order and assigns
+//     tx_index = atomic_fetch_add(tx_index_seq, 1). Both host and GPU
+//     process in insertion order within one round, so host slot k maps
+//     to GPU tx_index k.
+//   drain_dagready() ingests VerifiedTx, walks predicted_keys[tx_index],
+//     locates a DagWriterSlot per key (open-addressing on (key_lo,key_hi)),
+//     reads the most recent prior writer, registers a parent→child edge,
+//     and (if write) updates the slot's last_writer_tx to this tx.
+//   drain_commit(), on committing tx P, walks dag_nodes[P].children and
+//     atomically decrements each child's unresolved_parents. When a child
+//     hits zero, drain_commit re-emits it to Exec from the cached envelope
+//     in dag_nodes[child].pending_*.
+//
+// Antichain (Prism frontier): the set of DagNodes whose unresolved_parents
+// == 0 is the maximal antichain. drain_dagready emits exactly this set
+// each tick. The frontier evolves as drain_commit decrements children.
+
+constant uint kDagWriterInvalidIdx = 0xFFFFFFFFu;
+
+static inline uint dag_writer_index(ulong key_lo, ulong key_hi, uint mask)
+{
+    ulong h = 0xcbf29ce484222325UL;
+    h = (h ^ key_lo) * 0x100000001b3UL;
+    h = (h ^ key_hi) * 0x100000001b3UL;
+    return uint(h) & mask;
+}
+
+static inline uint dag_writer_locate(
+    device DagWriterSlot* table, uint slot_count, ulong key_lo, ulong key_hi)
+{
+    uint mask = slot_count - 1u;
+    uint idx  = dag_writer_index(key_lo, key_hi, mask);
+    for (uint probe = 0u; probe < slot_count; ++probe) {
+        device DagWriterSlot* s = &table[idx];
+        if (s->key_lo == 0UL && s->key_hi == 0UL) {
+            s->key_lo = key_lo;
+            s->key_hi = key_hi;
+            s->last_writer_tx = kInvalidWriter;
+            return idx;
+        }
+        if (s->key_lo == key_lo && s->key_hi == key_hi) {
+            return idx;
+        }
+        idx = (idx + 1u) & mask;
+    }
+    return kDagWriterInvalidIdx;
+}
+
+static inline VerifiedTx dag_envelope_to_verified(device const DagNode* n)
+{
+    VerifiedTx v;
+    v.tx_index  = n->tx_index;
+    v.admission = n->pending_admission;
+    v.gas_limit = n->pending_gas_limit;
+    v.origin_lo = n->pending_origin_lo;
+    v.origin_hi = n->pending_origin_hi;
+    v._pad0     = 0UL;
+    return v;
+}
+
+// drain_dagready (v0.40): real predicted-access-set DAG construction +
+// antichain emission to Exec.
 static inline uint drain_dagready(
+    device RingHeader* dagready_hdr, device VerifiedTx* dagready_items,
+    device RingHeader* exec_hdr,     device VerifiedTx* exec_items,
+    device DagNode*    dag_nodes,    uint   dag_node_capacity,
+    device DagWriterSlot* writer_table, uint writer_slot_count,
+    device const PredictedKey* predicted_keys, uint predicted_capacity,
+    uint budget)
+{
+    uint processed = 0u;
+    for (uint i = 0u; i < budget; ++i) {
+        VerifiedTx v;
+        if (!ring_try_pop(dagready_hdr, dagready_items, v)) break;
+
+        const uint tidx = v.tx_index;
+        if (tidx >= dag_node_capacity) {
+            // No DAG slot — fall back to direct Exec.
+            if (!ring_try_push(exec_hdr, exec_items, v)) {
+                (void)ring_try_push(dagready_hdr, dagready_items, v);
+                break;
+            }
+            ++processed;
+            continue;
+        }
+
+        device DagNode* T = &dag_nodes[tidx];
+        T->tx_index           = tidx;
+        T->pending_gas_limit  = v.gas_limit;
+        T->pending_origin_lo  = v.origin_lo;
+        T->pending_origin_hi  = v.origin_hi;
+        T->pending_admission  = v.admission;
+        T->parent_count       = 0u;
+        atomic_store_explicit(&T->child_count,        0u, memory_order_relaxed);
+        atomic_store_explicit(&T->unresolved_parents, 0u, memory_order_relaxed);
+        atomic_store_explicit(&T->state,              kDagNodeRegistered, memory_order_relaxed);
+        threadgroup_barrier(mem_flags::mem_device);
+
+        const uint base = (tidx < predicted_capacity)
+            ? (tidx * kMaxPredictedKeys) : 0u;
+        const bool has_predicted = (tidx < predicted_capacity);
+        for (uint k = 0u; k < kMaxPredictedKeys && has_predicted; ++k) {
+            device const PredictedKey* pk = &predicted_keys[base + k];
+            if (pk->valid == 0u) continue;
+            ulong key_lo = pk->key_lo;
+            ulong key_hi = pk->key_hi;
+            if (key_lo == 0UL && key_hi == 0UL) continue;
+
+            uint widx = dag_writer_locate(writer_table, writer_slot_count, key_lo, key_hi);
+            if (widx == kDagWriterInvalidIdx) continue;
+
+            uint prev = writer_table[widx].last_writer_tx;
+            if (prev != kInvalidWriter && prev != tidx && prev < dag_node_capacity) {
+                device DagNode* P = &dag_nodes[prev];
+                uint p_state = atomic_load_explicit(&P->state, memory_order_relaxed);
+                if (p_state != kDagNodeCommitted) {
+                    (void)atomic_fetch_add_explicit(&T->unresolved_parents, 1u, memory_order_relaxed);
+                    threadgroup_barrier(mem_flags::mem_device);
+                    uint cidx = atomic_fetch_add_explicit(&P->child_count, 1u, memory_order_relaxed);
+                    if (cidx < kMaxDagChildren) {
+                        P->children[cidx] = tidx;
+                    }
+                    threadgroup_barrier(mem_flags::mem_device);
+                    uint p_state2 = atomic_load_explicit(&P->state, memory_order_relaxed);
+                    if (p_state2 == kDagNodeCommitted) {
+                        (void)atomic_fetch_sub_explicit(&T->unresolved_parents, 1u, memory_order_relaxed);
+                    } else {
+                        if (T->parent_count < kMaxDagParents) {
+                            T->parents[T->parent_count] = prev;
+                            T->parent_count += 1u;
+                        }
+                    }
+                }
+            }
+
+            if (pk->is_write != 0u) {
+                writer_table[widx].last_writer_tx = tidx;
+            }
+        }
+
+        uint unresolved = atomic_load_explicit(&T->unresolved_parents, memory_order_relaxed);
+        if (unresolved == 0u) {
+            VerifiedTx out = dag_envelope_to_verified(T);
+            if (!ring_try_push(exec_hdr, exec_items, out)) {
+                break;
+            }
+            atomic_store_explicit(&T->state, kDagNodeEmitted, memory_order_relaxed);
+        }
+        ++processed;
+    }
+    return processed;
+}
+
+// (Old pass-through drain_dagready replaced by v0.40 predicted-access-set
+// version above. The signature changed; the kernel dispatch below was
+// updated accordingly.)
+static inline uint drain_dagready_passthrough(
     device RingHeader* dagready_hdr, device VerifiedTx* dagready_items,
     device RingHeader* exec_hdr,     device VerifiedTx* exec_items,
     uint budget)
@@ -872,11 +1065,12 @@ static inline uint drain_state_resp(
 }
 
 // drain_commit accumulates per-tx receipt hashes into a running keccak
-// of the receipts trie (linear chain order). At wave-tick boundaries the
-// running hash lives in result.receipts_root[]. State-root + execution-
-// root are placeholder hashes of the tx_index sequence + receipt chain.
+// of the receipts trie. v0.40: also walks dag_nodes[c.tx_index].children
+// and decrements unresolved_parents; re-emits any child that reaches zero.
 static inline uint drain_commit(
     device RingHeader* commit_hdr, device CommitItem* commit_items,
+    device DagNode*    dag_nodes,  uint dag_node_capacity,
+    device RingHeader* exec_hdr,   device VerifiedTx* exec_items,
     device QuasarRoundResult* result,
     uint budget)
 {
@@ -894,17 +1088,12 @@ static inline uint drain_commit(
         if (prev + gas_lo < prev) {
             atomic_fetch_add_explicit(&result->gas_used_hi, 1u, memory_order_relaxed);
         }
-        // Update receipts_root via hash chain: H(running || receipt_hash).
-        // Single-writer correctness comes from one workgroup running this
-        // service per tick; the host serializes commit ordering at the
-        // ring head. Multi-consumer commit lands in v0.38.
         thread uchar buf[64];
         for (uint k = 0u; k < 32u; ++k) buf[k]      = result->receipts_root[k];
         for (uint k = 0u; k < 32u; ++k) buf[32u+k]  = c.receipt_hash[k];
         thread uchar next[32];
         keccak256_thread(buf, 64UL, next);
         for (uint k = 0u; k < 32u; ++k) result->receipts_root[k] = next[k];
-        // execution_root: chain over (tx_index, status, gas_used, receipt).
         thread uchar erbuf[64];
         for (uint k = 0u; k < 32u; ++k) erbuf[k] = result->execution_root[k];
         for (uint k = 0u; k < 4u; ++k)  erbuf[32u + k]      = uchar((c.tx_index >> (k * 8u)) & 0xFFu);
@@ -914,6 +1103,28 @@ static inline uint drain_commit(
         thread uchar ernext[32];
         keccak256_thread(erbuf, 64UL, ernext);
         for (uint k = 0u; k < 32u; ++k) result->execution_root[k] = ernext[k];
+
+        // v0.40: walk DAG children of just-committed tx and decrement.
+        if (c.tx_index < dag_node_capacity) {
+            device DagNode* P = &dag_nodes[c.tx_index];
+            threadgroup_barrier(mem_flags::mem_device);
+            uint child_n = atomic_load_explicit(&P->child_count, memory_order_relaxed);
+            if (child_n > kMaxDagChildren) child_n = kMaxDagChildren;
+            for (uint k = 0u; k < child_n; ++k) {
+                uint child_tidx = P->children[k];
+                if (child_tidx >= dag_node_capacity) continue;
+                device DagNode* C = &dag_nodes[child_tidx];
+                uint old = atomic_fetch_sub_explicit(&C->unresolved_parents, 1u, memory_order_relaxed);
+                if (old == 1u) {
+                    VerifiedTx out = dag_envelope_to_verified(C);
+                    if (ring_try_push(exec_hdr, exec_items, out)) {
+                        atomic_store_explicit(&C->state, kDagNodeEmitted, memory_order_relaxed);
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_device);
+            atomic_store_explicit(&P->state, kDagNodeCommitted, memory_order_relaxed);
+        }
         ++processed;
     }
     return processed;
@@ -1083,19 +1294,24 @@ kernel void quasar_verify_votes_kernel(
 // ============================================================================
 
 kernel void quasar_wave_kernel(
-    device QuasarRoundDescriptor* desc           [[buffer(0)]],
-    device QuasarRoundResult*     result         [[buffer(1)]],
-    device RingHeader*            hdrs           [[buffer(2)]],
-    device uchar*                 items_arena    [[buffer(3)]],
-    device atomic_uint*           tx_index_seq   [[buffer(4)]],
-    device MvccSlot*              mvcc_table     [[buffer(5)]],
-    device DagNode*               dag_nodes      [[buffer(6)]],
-    device FiberSlot*             fibers         [[buffer(7)]],
-    constant uint&                mvcc_slot_count[[buffer(8)]],
-    device const uint*            vote_verified  [[buffer(9)]],
+    device QuasarRoundDescriptor* desc                  [[buffer(0)]],
+    device QuasarRoundResult*     result                [[buffer(1)]],
+    device RingHeader*            hdrs                  [[buffer(2)]],
+    device uchar*                 items_arena           [[buffer(3)]],
+    device atomic_uint*           tx_index_seq          [[buffer(4)]],
+    device MvccSlot*              mvcc_table            [[buffer(5)]],
+    device DagNode*               dag_nodes             [[buffer(6)]],
+    device FiberSlot*             fibers                [[buffer(7)]],
+    constant uint&                mvcc_slot_count       [[buffer(8)]],
+    device const uint*            vote_verified         [[buffer(9)]],
     constant uint&                vote_verified_capacity [[buffer(10)]],
-    uint   tid                                    [[thread_index_in_threadgroup]],
-    uint   gid                                    [[threadgroup_position_in_grid]])
+    device DagWriterSlot*         dag_writer_table      [[buffer(11)]],
+    constant uint&                dag_writer_slot_count [[buffer(12)]],
+    device const PredictedKey*    predicted_keys        [[buffer(13)]],
+    constant uint&                predicted_capacity    [[buffer(14)]],
+    constant uint&                dag_node_capacity     [[buffer(15)]],
+    uint   tid                                          [[thread_index_in_threadgroup]],
+    uint   gid                                          [[threadgroup_position_in_grid]])
 {
     if (tid != 0u) return;
     if (gid >= kNumServices) return;
@@ -1132,7 +1348,7 @@ kernel void quasar_wave_kernel(
     device VoteIngress*  vote_items      = (device VoteIngress*) (items_arena + vote_hdr->items_ofs);
     device QuorumCert*   qc_items        = (device QuorumCert*)  (items_arena + qc_hdr->items_ofs);
 
-    (void)dag_nodes; (void)fibers;  // v0.40 / v0.39 hook here
+    (void)fibers;  // v0.39 fiber VM hook here
 
     if (gid == 0u) {
         (void)drain_ingress(ingress_hdr, ingress_items, decode_hdr, decode_items, tx_index_seq, budget);
@@ -1144,7 +1360,10 @@ kernel void quasar_wave_kernel(
                            dagready_hdr, dagready_items, exec_hdr, exec_items,
                            desc, budget);
     } else if (gid == 3u) {
-        (void)drain_dagready(dagready_hdr, dagready_items, exec_hdr, exec_items, budget);
+        (void)drain_dagready(dagready_hdr, dagready_items, exec_hdr, exec_items,
+                             dag_nodes, dag_node_capacity,
+                             dag_writer_table, dag_writer_slot_count,
+                             predicted_keys, predicted_capacity, budget);
     } else if (gid == 4u) {
         (void)drain_exec(exec_hdr, exec_items, validate_hdr, validate_items,
                          mvcc_table, mvcc_slot_count, budget);
@@ -1155,7 +1374,10 @@ kernel void quasar_wave_kernel(
     } else if (gid == 6u) {
         (void)drain_repair(repair_hdr, repair_items, exec_hdr, exec_items, result, budget);
     } else if (gid == 7u) {
-        (void)drain_commit(commit_hdr, commit_items, result, budget);
+        (void)drain_commit(commit_hdr, commit_items,
+                           dag_nodes, dag_node_capacity,
+                           exec_hdr, exec_items,
+                           result, budget);
     } else if (gid == 9u) {
         (void)drain_state_resp(stateresp_hdr, stateresp_items, crypto_hdr, crypto_items, result, budget);
     } else if (gid == 10u) {

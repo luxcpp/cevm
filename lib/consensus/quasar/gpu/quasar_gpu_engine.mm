@@ -22,34 +22,25 @@ namespace quasar::gpu {
 namespace {
 
 // MUST match constants in quasar_wave.metal.
-constexpr uint32_t kDefaultRingCapacity = 4096u;
-constexpr uint32_t kMaxDagParents       = 4u;
-constexpr uint32_t kMaxDagChildren      = 16u;
-constexpr uint32_t kFiberStackDepth     = 64u;
-constexpr uint32_t kFiberMemoryBytes    = 1024u;
-constexpr uint32_t kDefaultMvccSlots    = 8192u;
-constexpr uint32_t kMaxFibers           = 4096u;
+constexpr uint32_t kDefaultRingCapacity   = 4096u;
+constexpr uint32_t kMaxDagParents         = 4u;
+constexpr uint32_t kMaxDagChildren        = 16u;
+constexpr uint32_t kMaxPredictedKeys      = 4u;
+constexpr uint32_t kFiberStackDepth       = 64u;
+constexpr uint32_t kFiberMemoryBytes      = 1024u;
+constexpr uint32_t kDefaultMvccSlots      = 8192u;
+constexpr uint32_t kDefaultDagWriterSlots = 8192u;
+constexpr uint32_t kMaxFibers             = 4096u;
+constexpr uint32_t kDagNodeCapacity       = kMaxFibers;
 
-// Per-ring item sizes — MUST match quasar_gpu_layout.hpp / quasar_wave.metal.
 constexpr uint32_t kItemSizes[] = {
-    sizeof(IngressTx),         // Ingress
-    sizeof(DecodedTx),         // Decode
-    sizeof(VerifiedTx),        // Crypto
-    sizeof(VerifiedTx),        // DagReady (same item shape — v0.35 ready set)
-    sizeof(ExecResult),        // Exec
-    sizeof(ExecResult),        // Validate
-    sizeof(ExecResult),        // Repair
-    sizeof(CommitItem),        // Commit
-    sizeof(StateRequest),      // StateRequest
-    sizeof(StatePage),         // StateResp
-    sizeof(VoteIngress),       // Vote
-    sizeof(QuorumCert),        // QuorumOut
+    sizeof(IngressTx), sizeof(DecodedTx), sizeof(VerifiedTx), sizeof(VerifiedTx),
+    sizeof(ExecResult), sizeof(ExecResult), sizeof(ExecResult), sizeof(CommitItem),
+    sizeof(StateRequest), sizeof(StatePage), sizeof(VoteIngress), sizeof(QuorumCert),
 };
 static_assert(sizeof(kItemSizes) / sizeof(kItemSizes[0]) == kNumServices,
               "kItemSizes must cover every ServiceId");
 
-// Mirrors FiberSlot in quasar_wave.metal so the host can size the fiber
-// arena. Fields are not directly used from C++ — only sizeof matters.
 struct alignas(16) FiberSlot {
     uint32_t tx_index;
     uint32_t pc;
@@ -75,11 +66,22 @@ struct alignas(16) DagNodeHost {
     uint32_t child_count;
     uint32_t parents[kMaxDagParents];
     uint32_t children[kMaxDagChildren];
+    uint64_t pending_gas_limit;
+    uint32_t pending_origin_lo;
+    uint32_t pending_origin_hi;
+    uint32_t pending_admission;
+    uint32_t state;
 };
 
-// =============================================================================
-// Source loader
-// =============================================================================
+struct PredictedKeyHost {
+    uint64_t key_lo;
+    uint64_t key_hi;
+    uint32_t is_write;
+    uint32_t valid;
+};
+static_assert(sizeof(PredictedKeyHost) == 24, "PredictedKeyHost layout drift");
+
+constexpr uint32_t kPredictedSlotsPerRound = kDagNodeCapacity * kMaxPredictedKeys;
 
 id<MTLLibrary> compile_quasar_source(id<MTLDevice> device)
 {
@@ -108,25 +110,30 @@ id<MTLLibrary> compile_quasar_source(id<MTLDevice> device)
     return nil;
 }
 
-// =============================================================================
-// Round — per-active-round state
-// =============================================================================
-
 struct Round {
     QuasarRoundHandle handle{};
     QuasarRoundDescriptor desc{};
 
-    id<MTLBuffer> desc_buf       = nil;
-    id<MTLBuffer> result_buf     = nil;
-    id<MTLBuffer> hdrs_buf       = nil;
-    id<MTLBuffer> items_buf      = nil;
-    id<MTLBuffer> tx_index_buf   = nil;
-    id<MTLBuffer> mvcc_buf       = nil;
-    id<MTLBuffer> dag_buf        = nil;
-    id<MTLBuffer> fibers_buf     = nil;
+    id<MTLBuffer> desc_buf            = nil;
+    id<MTLBuffer> result_buf          = nil;
+    id<MTLBuffer> hdrs_buf            = nil;
+    id<MTLBuffer> items_buf           = nil;
+    id<MTLBuffer> tx_index_buf        = nil;
+    id<MTLBuffer> mvcc_buf            = nil;
+    id<MTLBuffer> dag_buf             = nil;
+    id<MTLBuffer> fibers_buf          = nil;
     id<MTLBuffer> mvcc_count_buf      = nil;
+    // v0.38 — vote-verifier output bitmap.
     id<MTLBuffer> vote_verified_buf   = nil;
     id<MTLBuffer> vote_capacity_buf   = nil;
+    // v0.40 — DAG construction buffers.
+    id<MTLBuffer> dag_writer_buf      = nil;
+    id<MTLBuffer> dag_writer_count_buf = nil;
+    id<MTLBuffer> predicted_buf       = nil;
+    id<MTLBuffer> predicted_cap_buf   = nil;
+    id<MTLBuffer> dag_node_cap_buf    = nil;
+
+    uint32_t      next_predicted_idx  = 0u;
 };
 
 class QuasarGPUEngineImpl final : public QuasarGPUEngine {
@@ -166,22 +173,32 @@ public:
             arena_bytes += static_cast<uint64_t>(kDefaultRingCapacity) * kItemSizes[s];
         }
 
-        round_.desc_buf       = [device_ newBufferWithLength:sizeof(QuasarRoundDescriptor)        options:MTLResourceStorageModeShared];
-        round_.result_buf     = [device_ newBufferWithLength:sizeof(QuasarRoundResult)            options:MTLResourceStorageModeShared];
-        round_.hdrs_buf       = [device_ newBufferWithLength:sizeof(RingHeader) * kNumServices    options:MTLResourceStorageModeShared];
-        round_.items_buf      = [device_ newBufferWithLength:arena_bytes                          options:MTLResourceStorageModeShared];
-        round_.tx_index_buf   = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
-        round_.mvcc_buf       = [device_ newBufferWithLength:sizeof(MvccSlot) * kDefaultMvccSlots options:MTLResourceStorageModeShared];
-        round_.dag_buf        = [device_ newBufferWithLength:sizeof(DagNodeHost) * kMaxFibers     options:MTLResourceStorageModeShared];
-        round_.fibers_buf     = [device_ newBufferWithLength:sizeof(FiberSlot) * kMaxFibers       options:MTLResourceStorageModeShared];
-        round_.mvcc_count_buf = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
-        round_.vote_verified_buf = [device_ newBufferWithLength:sizeof(uint32_t) * kDefaultRingCapacity options:MTLResourceStorageModeShared];
-        round_.vote_capacity_buf = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
+        round_.desc_buf            = [device_ newBufferWithLength:sizeof(QuasarRoundDescriptor)        options:MTLResourceStorageModeShared];
+        round_.result_buf          = [device_ newBufferWithLength:sizeof(QuasarRoundResult)            options:MTLResourceStorageModeShared];
+        round_.hdrs_buf            = [device_ newBufferWithLength:sizeof(RingHeader) * kNumServices    options:MTLResourceStorageModeShared];
+        round_.items_buf           = [device_ newBufferWithLength:arena_bytes                          options:MTLResourceStorageModeShared];
+        round_.tx_index_buf        = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
+        round_.mvcc_buf            = [device_ newBufferWithLength:sizeof(MvccSlot) * kDefaultMvccSlots options:MTLResourceStorageModeShared];
+        round_.dag_buf             = [device_ newBufferWithLength:sizeof(DagNodeHost) * kMaxFibers     options:MTLResourceStorageModeShared];
+        round_.fibers_buf          = [device_ newBufferWithLength:sizeof(FiberSlot) * kMaxFibers       options:MTLResourceStorageModeShared];
+        round_.mvcc_count_buf      = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
+        // v0.38 — vote-verifier output bitmap (one uint per vote ring slot).
+        round_.vote_verified_buf   = [device_ newBufferWithLength:sizeof(uint32_t) * kDefaultRingCapacity options:MTLResourceStorageModeShared];
+        round_.vote_capacity_buf   = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
+        // v0.40 — DAG construction buffers.
+        round_.dag_writer_buf      = [device_ newBufferWithLength:32u * kDefaultDagWriterSlots         options:MTLResourceStorageModeShared];
+        round_.dag_writer_count_buf= [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
+        round_.predicted_buf       = [device_ newBufferWithLength:sizeof(PredictedKeyHost) * kPredictedSlotsPerRound options:MTLResourceStorageModeShared];
+        round_.predicted_cap_buf   = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
+        round_.dag_node_cap_buf    = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
 
         if (!round_.desc_buf || !round_.result_buf || !round_.hdrs_buf
             || !round_.items_buf || !round_.tx_index_buf || !round_.mvcc_buf
             || !round_.dag_buf  || !round_.fibers_buf || !round_.mvcc_count_buf
-            || !round_.vote_verified_buf || !round_.vote_capacity_buf)
+            || !round_.vote_verified_buf || !round_.vote_capacity_buf
+            || !round_.dag_writer_buf || !round_.dag_writer_count_buf
+            || !round_.predicted_buf || !round_.predicted_cap_buf
+            || !round_.dag_node_cap_buf)
             return QuasarRoundHandle{0};
 
         std::memcpy([round_.desc_buf contents], &round_.desc, sizeof(QuasarRoundDescriptor));
@@ -190,17 +207,20 @@ public:
         std::memset([round_.mvcc_buf contents], 0, sizeof(MvccSlot) * kDefaultMvccSlots);
         std::memset([round_.dag_buf contents], 0, sizeof(DagNodeHost) * kMaxFibers);
         std::memset([round_.fibers_buf contents], 0, sizeof(FiberSlot) * kMaxFibers);
+        std::memset([round_.dag_writer_buf contents], 0, 32u * kDefaultDagWriterSlots);
+        std::memset([round_.predicted_buf contents], 0, sizeof(PredictedKeyHost) * kPredictedSlotsPerRound);
         std::memset([round_.vote_verified_buf contents], 0, sizeof(uint32_t) * kDefaultRingCapacity);
         *static_cast<uint32_t*>([round_.tx_index_buf contents]) = 0;
         *static_cast<uint32_t*>([round_.mvcc_count_buf contents]) = kDefaultMvccSlots;
         *static_cast<uint32_t*>([round_.vote_capacity_buf contents]) = kDefaultRingCapacity;
+        *static_cast<uint32_t*>([round_.dag_writer_count_buf contents]) = kDefaultDagWriterSlots;
+        *static_cast<uint32_t*>([round_.predicted_cap_buf contents]) = kDagNodeCapacity;
+        *static_cast<uint32_t*>([round_.dag_node_cap_buf contents]) = kDagNodeCapacity;
+        round_.next_predicted_idx = 0u;
 
-        // Stamp the result.mode so the host doesn't have to read it back
-        // separately.
         auto* result = static_cast<QuasarRoundResult*>([round_.result_buf contents]);
         result->mode = desc.mode;
 
-        // Initialize RingHeaders.
         auto* hdrs = static_cast<RingHeader*>([round_.hdrs_buf contents]);
         for (uint32_t s = 0; s < kNumServices; ++s) {
             RingHeader h{};
@@ -228,6 +248,7 @@ public:
         RingHeader& ingress = hdrs[static_cast<uint32_t>(ServiceId::Ingress)];
         auto* items = reinterpret_cast<IngressTx*>(
             static_cast<uint8_t*>([round_.items_buf contents]) + ingress.items_ofs);
+        auto* predicted_arena = static_cast<PredictedKeyHost*>([round_.predicted_buf contents]);
 
         for (const auto& tx : txs) {
             uint32_t head = ingress.head;
@@ -241,14 +262,33 @@ public:
             in.nonce       = tx.nonce;
             uint32_t origin_lo = static_cast<uint32_t>(tx.origin & 0xFFFFFFFFu);
             uint32_t origin_hi = static_cast<uint32_t>(tx.origin >> 32);
-            // origin_hi flag bits: 31=needs_state, 30=needs_exec.
-            // The kernel masks the top two bits when reading exec_key.
             origin_hi &= 0x3FFFFFFFu;
             if (tx.needs_state) origin_hi |= 0x80000000u;
             if (tx.needs_exec)  origin_hi |= 0x40000000u;
             in.origin_lo = origin_lo;
             in.origin_hi = origin_hi;
             blob_arena_.insert(blob_arena_.end(), tx.bytes.begin(), tx.bytes.end());
+
+            // v0.40 — copy predicted access set into the per-tx slot keyed
+            // by tx_index. Host's next_predicted_idx mirrors GPU's
+            // tx_index_seq under the assumption that drain_ingress consumes
+            // Ingress in FIFO order (single-threaded, gid=0).
+            const uint32_t tidx = round_.next_predicted_idx;
+            if (tidx < kDagNodeCapacity) {
+                PredictedKeyHost* slot = &predicted_arena[tidx * kMaxPredictedKeys];
+                for (uint32_t k = 0; k < kMaxPredictedKeys; ++k) {
+                    slot[k] = PredictedKeyHost{};
+                }
+                const size_t n = std::min<size_t>(tx.predicted_access.size(), kMaxPredictedKeys);
+                for (size_t k = 0; k < n; ++k) {
+                    const auto& pa = tx.predicted_access[k];
+                    slot[k].key_lo   = pa.key_lo;
+                    slot[k].key_hi   = pa.key_hi;
+                    slot[k].is_write = pa.is_write ? 1u : 0u;
+                    slot[k].valid    = 1u;
+                }
+            }
+            round_.next_predicted_idx += 1u;
 
             items[tail & ingress.mask] = in;
             std::atomic_thread_fence(std::memory_order_release);
@@ -387,9 +427,13 @@ public:
         desc_dev->closing_flag    = round_.desc.closing_flag;
 
         @autoreleasepool {
-            // v0.38 - two encoders in one MTLCommandBuffer.
+            // v0.38 — single command buffer, two encoders. Encoder 1 runs
+            // the vote-batch verifier; encoder 2 runs the wave-tick
+            // scheduler. Implicit ordering inside one MTLCommandBuffer
+            // ensures the wave kernel sees the verifier's writes.
             id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
 
+            // Encoder 1: vote-batch verifier.
             id<MTLComputeCommandEncoder> venc = [cmd computeCommandEncoder];
             [venc setComputePipelineState:verify_pso_];
             [venc setBuffer:round_.desc_buf          offset:0 atIndex:0];
@@ -403,19 +447,25 @@ public:
               threadsPerThreadgroup:MTLSizeMake(vtpg, 1, 1)];
             [venc endEncoding];
 
+            // Encoder 2: wave-tick scheduler.
             id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
             [enc setComputePipelineState:pso_];
-            [enc setBuffer:round_.desc_buf          offset:0 atIndex:0];
-            [enc setBuffer:round_.result_buf        offset:0 atIndex:1];
-            [enc setBuffer:round_.hdrs_buf          offset:0 atIndex:2];
-            [enc setBuffer:round_.items_buf         offset:0 atIndex:3];
-            [enc setBuffer:round_.tx_index_buf      offset:0 atIndex:4];
-            [enc setBuffer:round_.mvcc_buf          offset:0 atIndex:5];
-            [enc setBuffer:round_.dag_buf           offset:0 atIndex:6];
-            [enc setBuffer:round_.fibers_buf        offset:0 atIndex:7];
-            [enc setBuffer:round_.mvcc_count_buf    offset:0 atIndex:8];
-            [enc setBuffer:round_.vote_verified_buf offset:0 atIndex:9];
-            [enc setBuffer:round_.vote_capacity_buf offset:0 atIndex:10];
+            [enc setBuffer:round_.desc_buf             offset:0 atIndex:0];
+            [enc setBuffer:round_.result_buf           offset:0 atIndex:1];
+            [enc setBuffer:round_.hdrs_buf             offset:0 atIndex:2];
+            [enc setBuffer:round_.items_buf            offset:0 atIndex:3];
+            [enc setBuffer:round_.tx_index_buf         offset:0 atIndex:4];
+            [enc setBuffer:round_.mvcc_buf             offset:0 atIndex:5];
+            [enc setBuffer:round_.dag_buf              offset:0 atIndex:6];
+            [enc setBuffer:round_.fibers_buf           offset:0 atIndex:7];
+            [enc setBuffer:round_.mvcc_count_buf       offset:0 atIndex:8];
+            [enc setBuffer:round_.vote_verified_buf    offset:0 atIndex:9];
+            [enc setBuffer:round_.vote_capacity_buf    offset:0 atIndex:10];
+            [enc setBuffer:round_.dag_writer_buf       offset:0 atIndex:11];
+            [enc setBuffer:round_.dag_writer_count_buf offset:0 atIndex:12];
+            [enc setBuffer:round_.predicted_buf        offset:0 atIndex:13];
+            [enc setBuffer:round_.predicted_cap_buf    offset:0 atIndex:14];
+            [enc setBuffer:round_.dag_node_cap_buf     offset:0 atIndex:15];
 
             [enc dispatchThreadgroups:MTLSizeMake(kNumServices, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -495,10 +545,7 @@ private:
 
 }  // namespace
 
-// Internal factory — public QuasarGPUEngine::create() lives in the
-// runtime dispatcher (quasar_gpu_runtime.cpp), which picks Metal on Apple
-// and CUDA when EVM_CUDA is on.
-std::unique_ptr<QuasarGPUEngine> create_quasar_gpu_engine_metal()
+std::unique_ptr<QuasarGPUEngine> QuasarGPUEngine::create()
 {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -518,6 +565,8 @@ std::unique_ptr<QuasarGPUEngine> create_quasar_gpu_engine_metal()
             [device newComputePipelineStateWithFunction:fn error:&err];
         if (!pso) return nullptr;
 
+        // v0.38 — vote-batch verifier pipeline (separate compute encoder
+        // in the same MTLCommandBuffer as the wave-tick kernel).
         id<MTLFunction> vfn = [lib newFunctionWithName:@"quasar_verify_votes_kernel"];
         if (!vfn) return nullptr;
         id<MTLComputePipelineState> verify_pso =

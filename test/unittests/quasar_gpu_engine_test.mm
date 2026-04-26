@@ -419,6 +419,144 @@ void test_quasar_quorum_round_trip()
     PASS("quasar_quorum_round_trip");
 }
 
+// =============================================================================
+// v0.40 — predicted-access-set DAG construction tests
+// =============================================================================
+//
+// drain_dagready in Nebula mode walks each tx's predicted access set, finds
+// the most recent prior writer per key (DagWriterSlot), registers parent→child
+// edges, and emits frontier vertices (unresolved_parents == 0) to Exec.
+// drain_commit decrements children on commit and re-emits when a child
+// reaches zero. These three tests exercise the substrate end-to-end.
+
+// Helper: make a tx with predicted_access populated.
+HostTxBlob make_dag_tx(uint64_t origin, uint32_t nonce,
+                       std::initializer_list<std::pair<uint64_t, bool>> keys)
+{
+    HostTxBlob t = make_tx(origin, nonce);
+    t.needs_exec = true;
+    for (const auto& [key, is_write] : keys) {
+        HostTxBlob::PredictedAccess pa{};
+        pa.key_lo  = key;
+        pa.key_hi  = 0u;
+        pa.is_write = is_write;
+        t.predicted_access.push_back(pa);
+    }
+    return t;
+}
+
+// Independent parallel txs: 100 txs with disjoint predicted keys. All should
+// commit cleanly; the DAG produces no edges so the entire batch is one big
+// antichain (Prism frontier).
+void test_dag_independent_parallel()
+{
+    auto e = QuasarGPUEngine::create();
+    auto desc = make_desc(40);
+    desc.mode = 1;        // Nebula — Crypto → DagReady → Exec
+    desc.wave_tick_budget = 256;
+    auto h = e->begin_round(desc);
+
+    constexpr size_t N = 100;
+    std::vector<HostTxBlob> txs;
+    for (size_t i = 0; i < N; ++i) {
+        // Each tx writes its own unique key (offset by 0x100000 to keep
+        // distinct from other tests' keys).
+        txs.push_back(make_dag_tx(0x200000ULL + i, uint32_t(i),
+                                  {{0x300000ULL + i, true}}));
+    }
+    e->push_txs(h, txs);
+    e->request_close(h);
+    auto r = e->run_until_done(h, 64);
+
+    EXPECT("dag_indep.finalized", r.status == 1u);
+    EXPECT("dag_indep.tx_count",  r.tx_count == N);
+    EXPECT("dag_indep.no_conflicts", r.conflict_count == 0u);
+    std::printf("  dag_indep: %zu txs across %u wave ticks, conflicts=%u repairs=%u\n",
+                N, r.wave_tick_count, r.conflict_count, r.repair_count);
+    e->end_round(h);
+    PASS("dag_independent_parallel");
+}
+
+// Chain-serializing txs: tx i+1 reads what tx i wrote. The DAG forces
+// strict ordering so Block-STM never observes conflicts.
+void test_dag_chain_serializes()
+{
+    auto e = QuasarGPUEngine::create();
+    auto desc = make_desc(41);
+    desc.mode = 1;
+    desc.wave_tick_budget = 256;
+    auto h = e->begin_round(desc);
+
+    constexpr size_t N = 32;
+    constexpr uint64_t kChainKey = 0x400000ULL;
+    std::vector<HostTxBlob> txs;
+    for (size_t i = 0; i < N; ++i) {
+        // tx 0 writes K; tx i (i>0) reads K from tx i-1 and writes K again.
+        // Edge structure: 0 → 1 → 2 → ... → N-1 (linear chain).
+        bool is_write = true;  // every tx writes the chain key
+        txs.push_back(make_dag_tx(0x500000ULL + i, uint32_t(i),
+                                  {{kChainKey, is_write}}));
+    }
+    e->push_txs(h, txs);
+    e->request_close(h);
+    auto r = e->run_until_done(h, 256);
+
+    EXPECT("dag_chain.finalized", r.status == 1u);
+    EXPECT("dag_chain.tx_count",  r.tx_count == N);
+    // DAG ordering means each tx executes after its parent commits → no
+    // version-mismatch conflicts at validate time.
+    EXPECT("dag_chain.no_conflicts", r.conflict_count == 0u);
+    EXPECT("dag_chain.no_repairs",   r.repair_count   == 0u);
+    std::printf("  dag_chain: %zu txs across %u wave ticks, conflicts=%u repairs=%u\n",
+                N, r.wave_tick_count, r.conflict_count, r.repair_count);
+    e->end_round(h);
+    PASS("dag_chain_serializes");
+}
+
+// Diamond DAG: A writes K1; B writes K1+K2 (depends on A); C writes K1+K3
+// (depends on A); D reads K2+K3 (depends on B and C). Verify all commit
+// and the order respects dependencies (drain_commit decrements children
+// correctly through a 4-vertex diamond).
+void test_dag_diamond()
+{
+    auto e = QuasarGPUEngine::create();
+    auto desc = make_desc(42);
+    desc.mode = 1;
+    desc.wave_tick_budget = 256;
+    auto h = e->begin_round(desc);
+
+    constexpr uint64_t K1 = 0x600001ULL;
+    constexpr uint64_t K2 = 0x600002ULL;
+    constexpr uint64_t K3 = 0x600003ULL;
+    std::vector<HostTxBlob> txs;
+    // A — tx_index 0, writes K1
+    txs.push_back(make_dag_tx(0x700000u, 0u, {{K1, true}}));
+    // B — tx_index 1, writes K1 + K2 (parent: A via K1)
+    txs.push_back(make_dag_tx(0x700001u, 1u, {{K1, true}, {K2, true}}));
+    // C — tx_index 2, writes K1 + K3 (parent: B via K1)
+    // Note: prev_writer of K1 at C's ingest is B, so C's parent is B not A.
+    // This is a slight deviation from a pure diamond — but that's exactly
+    // how a single-key serialization behaves under a write-write conflict.
+    txs.push_back(make_dag_tx(0x700002u, 2u, {{K1, true}, {K3, true}}));
+    // D — tx_index 3, reads K2 + K3 (parents: B via K2, C via K3)
+    txs.push_back(make_dag_tx(0x700003u, 3u, {{K2, false}, {K3, false}}));
+
+    e->push_txs(h, txs);
+    e->request_close(h);
+    auto r = e->run_until_done(h, 256);
+
+    EXPECT("dag_diamond.finalized", r.status == 1u);
+    EXPECT("dag_diamond.tx_count",  r.tx_count == 4u);
+    EXPECT("dag_diamond.gas_total", r.gas_used() == 4u * 21'000u);
+    // No Block-STM conflicts because the DAG forces serial execution
+    // through the K1 chain (A → B → C) and merges at D.
+    EXPECT("dag_diamond.no_conflicts", r.conflict_count == 0u);
+    std::printf("  dag_diamond: 4 txs across %u wave ticks, conflicts=%u repairs=%u\n",
+                r.wave_tick_count, r.conflict_count, r.repair_count);
+    e->end_round(h);
+    PASS("dag_diamond");
+}
+
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/)
@@ -437,6 +575,10 @@ int main(int /*argc*/, char** /*argv*/)
         test_block_stm_independent_txs();
         test_block_stm_conflict_repair();
         test_quasar_quorum_round_trip();
+        // v0.40 — predicted-access-set DAG construction.
+        test_dag_independent_parallel();
+        test_dag_chain_serializes();
+        test_dag_diamond();
         std::printf("[quasar_gpu_engine_test] passed=%d failed=%d\n",
                     g_passed, g_failed);
         return g_failed == 0 ? 0 : 1;

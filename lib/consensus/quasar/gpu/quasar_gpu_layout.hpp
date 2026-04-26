@@ -173,9 +173,29 @@ inline constexpr uint32_t kDefaultMvccSlots = 8192u;
 // =============================================================================
 // DAG node arena (Nebula mode)
 // =============================================================================
+//
+// v0.40 — predicted-access-set DAG construction.
+//
+// drain_dagready ingests each VerifiedTx, walks its predicted access set,
+// finds the most-recent prior writer per key (DagWriterSlot below), and
+// emits parent→child edges. unresolved_parents tracks how many parents
+// have not yet committed; once zero, the tx becomes part of the antichain
+// (Prism frontier) and is emitted to Exec.
 
-inline constexpr uint32_t kMaxDagParents  = 4u;
-inline constexpr uint32_t kMaxDagChildren = 16u;
+inline constexpr uint32_t kMaxDagParents    = 4u;
+inline constexpr uint32_t kMaxDagChildren   = 16u;
+inline constexpr uint32_t kMaxPredictedKeys = 4u;
+
+/// DagNode lifecycle states. drain_dagready re-checks state after
+/// publishing the parent→child edge; if Committed, it backs out its
+/// unresolved_parents claim. drain_commit sets state=Committed AFTER
+/// walking children.
+enum DagNodeState : uint32_t {
+    kDagNodeUnset      = 0u,
+    kDagNodeRegistered = 1u,
+    kDagNodeEmitted    = 2u,
+    kDagNodeCommitted  = 3u,
+};
 
 struct alignas(16) DagNode {
     uint32_t tx_index;
@@ -184,8 +204,39 @@ struct alignas(16) DagNode {
     uint32_t child_count;
     uint32_t parents[kMaxDagParents];
     uint32_t children[kMaxDagChildren];
+    // v0.40: cached envelope so drain_commit can re-emit a freed child
+    // straight to Exec without re-popping from DagReady.
+    uint64_t pending_gas_limit;
+    uint32_t pending_origin_lo;
+    uint32_t pending_origin_hi;
+    uint32_t pending_admission;
+    uint32_t state;                ///< DagNodeState
 };
-static_assert(sizeof(DagNode) == 16 + 4u * kMaxDagParents + 4u * kMaxDagChildren, "DagNode layout drift");
+// 16 (header) + 16 (parents[4]) + 64 (children[16]) + 24 (envelope+state)
+// = 120 bytes; alignas(16) bumps to 128.
+static_assert(sizeof(DagNode) == 128, "DagNode layout drift");
+
+/// DagWriterSlot — open-addressing table for most recent prior writers.
+struct alignas(16) DagWriterSlot {
+    uint64_t key_lo;
+    uint64_t key_hi;
+    uint32_t last_writer_tx;
+    uint32_t _pad0;
+};
+// 24 bytes meaningful; alignas(16) bumps to 32.
+static_assert(sizeof(DagWriterSlot) == 32, "DagWriterSlot layout drift");
+
+inline constexpr uint32_t kDefaultDagWriterSlots = 8192u;
+
+/// PredictedKey — host-supplied predicted read/write entry, indexed by
+/// tx_index in a per-round arena.
+struct PredictedKey {
+    uint64_t key_lo;
+    uint64_t key_hi;
+    uint32_t is_write;
+    uint32_t valid;
+};
+static_assert(sizeof(PredictedKey) == 24, "PredictedKey layout drift");
 
 // =============================================================================
 // Cold-state page-fault rings
