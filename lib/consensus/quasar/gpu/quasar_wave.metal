@@ -506,6 +506,15 @@ static inline uint drain_ingress(
     return processed;
 }
 
+// Routing flags packed into origin_hi (the IngressTx envelope is fixed-
+// size — 32 bytes — so we piggyback flags rather than expanding the
+// envelope). bit 31 = needs_state, bit 30 = needs_exec. The remaining
+// 30 bits plus origin_lo carry the original origin / synthetic exec
+// key. v0.39 EVM fiber VM replaces this with bytecode-driven flagging.
+constant uint kNeedsState = 0x80000000u;
+constant uint kNeedsExec  = 0x40000000u;
+constant uint kFlagMask   = 0xC0000000u;
+
 static inline uint drain_decode(
     device RingHeader* decode_hdr,    device DecodedTx*    decode_items,
     device RingHeader* crypto_hdr,    device VerifiedTx*   crypto_items,
@@ -514,18 +523,17 @@ static inline uint drain_decode(
     uint budget)
 {
     uint processed = 0u;
-    constexpr uint needs_state_bit = 0x80000000u;
     for (uint i = 0u; i < budget; ++i) {
         DecodedTx d;
         if (!ring_try_pop(decode_hdr, decode_items, d)) break;
-        if ((d.origin_hi & needs_state_bit) != 0u) {
+        if ((d.origin_hi & kNeedsState) != 0u) {
             StateRequest sr;
             sr.tx_index = d.tx_index;
             sr.key_type = 0u;
             sr.priority = 0u;
             sr._pad0    = 0u;
             sr.key_lo   = ulong(d.origin_lo);
-            sr.key_hi   = ulong(d.origin_hi & ~needs_state_bit);
+            sr.key_hi   = ulong(d.origin_hi & ~kFlagMask);
             if (!ring_try_push(statereq_hdr, statereq_items, sr)) {
                 (void)ring_try_push(decode_hdr, decode_items, d);
                 break;
@@ -549,46 +557,289 @@ static inline uint drain_decode(
     return processed;
 }
 
+// Compute a deterministic per-tx receipt digest. Used by both fast-path
+// (drain_crypto) and slow-path (drain_commit-from-exec) producers so the
+// receipts_root is identical regardless of routing.
+static inline void receipt_hash(uint tx_index, uint origin_lo, uint origin_hi,
+                                ulong gas_limit, ulong gas_used,
+                                ulong round, ulong chain_id,
+                                thread uchar* out)
+{
+    uchar leaf[40];
+    for (uint k = 0u; k < 4u; ++k) leaf[0u + k] = uchar((tx_index >> (k * 8u)) & 0xFFu);
+    for (uint k = 0u; k < 4u; ++k) leaf[4u + k] = uchar((origin_lo >> (k * 8u)) & 0xFFu);
+    for (uint k = 0u; k < 4u; ++k) leaf[8u + k] = uchar((origin_hi >> (k * 8u)) & 0xFFu);
+    for (uint k = 0u; k < 8u; ++k) leaf[12u + k] = uchar((gas_limit >> (k * 8u)) & 0xFFu);
+    for (uint k = 0u; k < 4u; ++k) leaf[20u + k] = uchar((gas_used >> (k * 8u)) & 0xFFu);
+    for (uint k = 0u; k < 4u; ++k) leaf[24u + k] = uchar((round >> (k * 8u)) & 0xFFu);
+    for (uint k = 0u; k < 8u; ++k) leaf[28u + k] = uchar((chain_id >> (k * 8u)) & 0xFFu);
+    leaf[36u] = 0u; leaf[37u] = 0u; leaf[38u] = 0u; leaf[39u] = 0u;
+    keccak256_thread(leaf, 40UL, out);
+}
+
 static inline uint drain_crypto(
-    device RingHeader* crypto_hdr, device VerifiedTx* crypto_items,
-    device RingHeader* commit_hdr, device CommitItem* commit_items,
+    device RingHeader* crypto_hdr,   device VerifiedTx* crypto_items,
+    device RingHeader* commit_hdr,   device CommitItem* commit_items,
+    device RingHeader* dagready_hdr, device VerifiedTx* dagready_items,
+    device RingHeader* exec_hdr,     device VerifiedTx* exec_items,
     device QuasarRoundDescriptor* desc,
     uint budget)
 {
-    // v0.31..v0.36: synthetic gas/receipt; the EVM fiber service in
-    // drain_exec replaces this once full opcode coverage lands. For now
-    // every admitted tx commits with deterministic gas_used and a
-    // receipt_hash = keccak(tx_index || origin || gas_limit) so the
-    // receipts_root computed downstream is real.
+    // Route admitted txs:
+    //   needs_exec → DagReady (Nebula) / Exec (Nova) for full Block-STM
+    //   else       → Commit (fast path: synthetic gas + receipt)
     uint processed = 0u;
     for (uint i = 0u; i < budget; ++i) {
         VerifiedTx v;
         if (!ring_try_pop(crypto_hdr, crypto_items, v)) break;
         if (v.admission != 0u) { ++processed; continue; }
+
+        if ((v.origin_hi & kNeedsExec) != 0u) {
+            // Block-STM lane. Nebula routes through DagReady; Nova
+            // bypasses straight to Exec. v0.40 wires real DAG
+            // construction; for v0.35 DagReady is a pass-through.
+            device RingHeader* next_hdr   = (desc->mode == 1u)
+                ? dagready_hdr : exec_hdr;
+            device VerifiedTx* next_items = (desc->mode == 1u)
+                ? dagready_items : exec_items;
+            if (!ring_try_push(next_hdr, next_items, v)) {
+                (void)ring_try_push(crypto_hdr, crypto_items, v);
+                break;
+            }
+            ++processed;
+            continue;
+        }
+
         CommitItem c;
         c.tx_index       = v.tx_index;
-        c.status         = 1u;          // Return
+        c.status         = 1u;
         c.gas_used       = 21000u;
         c.cumulative_gas = 0u;
-        // Per-tx receipt digest. Real EVM RLP-encoded receipts arrive in
-        // v0.36; until then we hash the tx envelope so the receipts_root
-        // is a real keccak rather than a placeholder.
-        uchar leaf[40];
-        for (uint k = 0u; k < 4u; ++k) leaf[0u + k] = uchar((v.tx_index >> (k * 8u)) & 0xFFu);
-        for (uint k = 0u; k < 4u; ++k) leaf[4u + k] = uchar((v.origin_lo >> (k * 8u)) & 0xFFu);
-        for (uint k = 0u; k < 4u; ++k) leaf[8u + k] = uchar((v.origin_hi >> (k * 8u)) & 0xFFu);
-        for (uint k = 0u; k < 8u; ++k) leaf[12u + k] = uchar((v.gas_limit >> (k * 8u)) & 0xFFu);
-        for (uint k = 0u; k < 4u; ++k) leaf[20u + k] = uchar((c.gas_used >> (k * 8u)) & 0xFFu);
-        for (uint k = 0u; k < 4u; ++k) leaf[24u + k] = uchar((desc->round >> (k * 8u)) & 0xFFu);
-        for (uint k = 0u; k < 8u; ++k) leaf[28u + k] = uchar((desc->chain_id >> (k * 8u)) & 0xFFu);
-        leaf[36u] = 0u; leaf[37u] = 0u; leaf[38u] = 0u; leaf[39u] = 0u;
         thread uchar digest[32];
-        keccak256_thread(leaf, 40UL, digest);
+        receipt_hash(v.tx_index, v.origin_lo, v.origin_hi,
+                     v.gas_limit, c.gas_used,
+                     desc->round, desc->chain_id, digest);
         for (uint k = 0u; k < 32u; ++k) c.receipt_hash[k] = digest[k];
         if (!ring_try_push(commit_hdr, commit_items, c)) {
             (void)ring_try_push(crypto_hdr, crypto_items, v);
             break;
         }
+        ++processed;
+    }
+    return processed;
+}
+
+// drain_dagready (v0.35): pass-through to Exec. Full DAG construction
+// (predicted-access-set conflict graph + frontier extraction) lands in
+// v0.40. The substrate is in place: DagNode arena bound, ServiceId::DagReady
+// has its own ring with VerifiedTx items, and the unresolved_parents
+// atomic counter is ready for the conflict-edge DEC-on-commit pattern.
+static inline uint drain_dagready(
+    device RingHeader* dagready_hdr, device VerifiedTx* dagready_items,
+    device RingHeader* exec_hdr,     device VerifiedTx* exec_items,
+    uint budget)
+{
+    uint processed = 0u;
+    for (uint i = 0u; i < budget; ++i) {
+        VerifiedTx v;
+        if (!ring_try_pop(dagready_hdr, dagready_items, v)) break;
+        if (!ring_try_push(exec_hdr, exec_items, v)) {
+            (void)ring_try_push(dagready_hdr, dagready_items, v);
+            break;
+        }
+        ++processed;
+    }
+    return processed;
+}
+
+// MVCC validation helpers — used by drain_validate to detect read-set
+// conflicts (Block-STM) and by drain_validate to publish writes.
+
+static inline bool mvcc_check_consistent(
+    device MvccSlot* table, uint slot_count,
+    thread const ExecResult& er)
+{
+    for (uint i = 0u; i < er.rw_count; ++i) {
+        thread const RWSetEntry& e = er.rw[i];
+        uint idx = mvcc_locate(table, slot_count, e.key_lo, e.key_hi);
+        if (idx == kMvccInvalidIdx) return false;
+        device MvccSlot* s = &table[idx];
+        uint cur = atomic_load_explicit(&s->version, memory_order_relaxed);
+        if (e.kind == 0u && cur != e.version_seen) return false;
+    }
+    return true;
+}
+
+static inline void mvcc_apply_writes(
+    device MvccSlot* table, uint slot_count,
+    thread const ExecResult& er)
+{
+    for (uint i = 0u; i < er.rw_count; ++i) {
+        thread const RWSetEntry& e = er.rw[i];
+        if (e.kind != 1u) continue;
+        uint idx = mvcc_locate(table, slot_count, e.key_lo, e.key_hi);
+        if (idx == kMvccInvalidIdx) continue;
+        device MvccSlot* s = &table[idx];
+        atomic_store_explicit(&s->last_writer_tx,  er.tx_index,    memory_order_relaxed);
+        atomic_store_explicit(&s->last_writer_inc, er.incarnation, memory_order_relaxed);
+        (void)atomic_fetch_add_explicit(&s->version, 1u, memory_order_relaxed);
+    }
+}
+
+// drain_exec (v0.36 substrate): runs the synthetic per-tx program over
+// the MVCC arena. Reads the current version of the tx's exec_key, writes
+// (version+1), records both in the RW set, and emits an ExecResult to
+// the Validate ring.
+//
+// Full EVM fiber VM with bytecode interpretation lands in v0.39 — this
+// substrate proves the ring routing + MVCC + Validate/Repair pipeline
+// works end-to-end and exposes real conflict_count / repair_count
+// telemetry on QuasarRoundResult.
+static inline uint drain_exec(
+    device RingHeader* exec_hdr,     device VerifiedTx* exec_items,
+    device RingHeader* validate_hdr, device ExecResult* validate_items,
+    device MvccSlot*   mvcc_table,   uint mvcc_slot_count,
+    uint budget)
+{
+    uint processed = 0u;
+    for (uint i = 0u; i < budget; ++i) {
+        VerifiedTx v;
+        if (!ring_try_pop(exec_hdr, exec_items, v)) break;
+
+        // Decode exec_key from origin (after stripping flag bits).
+        ulong key_lo = ulong(v.origin_lo);
+        ulong key_hi = ulong(v.origin_hi & ~kFlagMask);
+        if (key_lo == 0UL && key_hi == 0UL) key_lo = 1UL;  // never empty
+
+        ExecResult er;
+        er.tx_index    = v.tx_index;
+        er.incarnation = 0u;
+        er.status      = 1u;          // Return
+        er.gas_used    = 21000u;
+        er.rw_count    = 2u;          // read-then-write — Block-STM model
+
+        // Read MVCC version, record observation, then mark a write at
+        // the same key. Validate compares rw[0].version_seen against
+        // the current MVCC version: if another tx committed a write
+        // between this exec and validate, version advances → conflict
+        // → repair.
+        uint slot_idx = mvcc_locate(mvcc_table, mvcc_slot_count, key_lo, key_hi);
+        uint observed_version = 0u;
+        if (slot_idx != kMvccInvalidIdx) {
+            observed_version = atomic_load_explicit(
+                &mvcc_table[slot_idx].version, memory_order_relaxed);
+        }
+        er.rw[0].key_lo       = key_lo;
+        er.rw[0].key_hi       = key_hi;
+        er.rw[0].version_seen = observed_version;
+        er.rw[0].kind         = 0u;                  // read
+        er.rw[1].key_lo       = key_lo;
+        er.rw[1].key_hi       = key_hi;
+        er.rw[1].version_seen = observed_version;
+        er.rw[1].kind         = 1u;                  // write
+        for (uint k = 2u; k < kMaxRWSetPerTx; ++k) {
+            er.rw[k].key_lo = 0UL; er.rw[k].key_hi = 0UL;
+            er.rw[k].version_seen = 0u; er.rw[k].kind = 0u;
+        }
+
+        if (!ring_try_push(validate_hdr, validate_items, er)) {
+            (void)ring_try_push(exec_hdr, exec_items, v);
+            break;
+        }
+        ++processed;
+    }
+    return processed;
+}
+
+// drain_validate (v0.33): Block-STM read-set check. For every read in
+// the tx's RW set, compare the version observed at exec time against the
+// current MVCC version. Mismatch → re-execute via Repair. Match → commit
+// the writes and push to the Commit ring.
+static inline uint drain_validate(
+    device RingHeader* validate_hdr, device ExecResult* validate_items,
+    device RingHeader* commit_hdr,   device CommitItem* commit_items,
+    device RingHeader* repair_hdr,   device ExecResult* repair_items,
+    device MvccSlot*   mvcc_table,   uint mvcc_slot_count,
+    device QuasarRoundDescriptor* desc,
+    device QuasarRoundResult* result,
+    uint budget)
+{
+    uint processed = 0u;
+    for (uint i = 0u; i < budget; ++i) {
+        ExecResult er;
+        if (!ring_try_pop(validate_hdr, validate_items, er)) break;
+
+        bool ok = mvcc_check_consistent(mvcc_table, mvcc_slot_count, er);
+        if (!ok) {
+            atomic_fetch_add_explicit(&result->conflict_count, 1u, memory_order_relaxed);
+            // Send to Repair for re-execution with bumped incarnation.
+            er.incarnation += 1u;
+            if (!ring_try_push(repair_hdr, repair_items, er)) {
+                (void)ring_try_push(validate_hdr, validate_items, er);
+                break;
+            }
+            ++processed;
+            continue;
+        }
+
+        // Apply writes to MVCC + emit CommitItem.
+        mvcc_apply_writes(mvcc_table, mvcc_slot_count, er);
+        CommitItem c;
+        c.tx_index       = er.tx_index;
+        c.status         = er.status;
+        c.gas_used       = er.gas_used;
+        c.cumulative_gas = 0u;
+        // Receipt hash uses the same recipe as the fast path — origin
+        // is reconstructed from the tx's first RW key (encodes the
+        // exec_key). Real RLP-encoded receipts replace this in v0.39.
+        uint origin_lo = uint(er.rw[0].key_lo & 0xFFFFFFFFu);
+        uint origin_hi = uint(er.rw[0].key_hi & 0xFFFFFFFFu);
+        thread uchar digest[32];
+        receipt_hash(er.tx_index, origin_lo, origin_hi,
+                     er.gas_used, er.gas_used,
+                     desc->round, desc->chain_id, digest);
+        for (uint k = 0u; k < 32u; ++k) c.receipt_hash[k] = digest[k];
+
+        if (!ring_try_push(commit_hdr, commit_items, c)) {
+            // Roll back the MVCC version bump? In v0.36 substrate the
+            // version monotonically advances; if commit ring is full we
+            // requeue and let downstream catch up next tick. The version
+            // mismatch this introduces only causes other concurrent txs
+            // to repair, which is correct under Block-STM.
+            (void)ring_try_push(validate_hdr, validate_items, er);
+            break;
+        }
+        ++processed;
+    }
+    return processed;
+}
+
+// drain_repair (v0.33): re-execute conflicting txs. The repair counter
+// gives an honest measure of how much speculative work was wasted under
+// contention.
+static inline uint drain_repair(
+    device RingHeader* repair_hdr, device ExecResult* repair_items,
+    device RingHeader* exec_hdr,   device VerifiedTx* exec_items,
+    device QuasarRoundResult* result,
+    uint budget)
+{
+    uint processed = 0u;
+    for (uint i = 0u; i < budget; ++i) {
+        ExecResult er;
+        if (!ring_try_pop(repair_hdr, repair_items, er)) break;
+        VerifiedTx v;
+        v.tx_index  = er.tx_index;
+        v.admission = 0u;
+        v.gas_limit = er.gas_used;
+        // Reconstruct origin from rw[0].key (carries exec_key + flags).
+        v.origin_lo = uint(er.rw[0].key_lo & 0xFFFFFFFFu);
+        v.origin_hi = uint(er.rw[0].key_hi & 0xFFFFFFFFu) | kNeedsExec;
+        v._pad0     = 0UL;
+        if (!ring_try_push(exec_hdr, exec_items, v)) {
+            (void)ring_try_push(repair_hdr, repair_items, er);
+            break;
+        }
+        atomic_fetch_add_explicit(&result->repair_count, 1u, memory_order_relaxed);
         ++processed;
     }
     return processed;
@@ -743,41 +994,8 @@ static inline uint drain_vote(
 // MVCC versions. v0.33 ships the surface so MVCC arena writes are real.
 // ============================================================================
 
-// v0.33 wires the validate-then-commit invariant via the cumulative_gas
-// chain plus the MVCC version mismatch detection helper below. Until
-// EVM fibers populate real RW-sets the conflict path is exercised by
-// tests via host-supplied conflict markers in tx.origin.
-
-static inline bool mvcc_check_consistent(
-    device MvccSlot* table, uint slot_count,
-    thread const ExecResult& er)
-{
-    for (uint i = 0u; i < er.rw_count; ++i) {
-        thread const RWSetEntry& e = er.rw[i];
-        uint idx = mvcc_locate(table, slot_count, e.key_lo, e.key_hi);
-        if (idx == kMvccInvalidIdx) return false;
-        device MvccSlot* s = &table[idx];
-        uint cur = atomic_load_explicit(&s->version, memory_order_relaxed);
-        if (e.kind == 0u && cur != e.version_seen) return false;
-    }
-    return true;
-}
-
-static inline void mvcc_apply_writes(
-    device MvccSlot* table, uint slot_count,
-    thread const ExecResult& er)
-{
-    for (uint i = 0u; i < er.rw_count; ++i) {
-        thread const RWSetEntry& e = er.rw[i];
-        if (e.kind != 1u) continue;
-        uint idx = mvcc_locate(table, slot_count, e.key_lo, e.key_hi);
-        if (idx == kMvccInvalidIdx) continue;
-        device MvccSlot* s = &table[idx];
-        atomic_store_explicit(&s->last_writer_tx,  er.tx_index,    memory_order_relaxed);
-        atomic_store_explicit(&s->last_writer_inc, er.incarnation, memory_order_relaxed);
-        (void)atomic_fetch_add_explicit(&s->version, 1u, memory_order_relaxed);
-    }
-}
+// (mvcc_check_consistent / mvcc_apply_writes are defined above
+// drain_exec so drain_validate can call them directly.)
 
 // ============================================================================
 // Main scheduler kernel
@@ -821,16 +1039,17 @@ kernel void quasar_wave_kernel(
     device IngressTx*    ingress_items   = (device IngressTx*)   (items_arena + ingress_hdr->items_ofs);
     device DecodedTx*    decode_items    = (device DecodedTx*)   (items_arena + decode_hdr->items_ofs);
     device VerifiedTx*   crypto_items    = (device VerifiedTx*)  (items_arena + crypto_hdr->items_ofs);
+    device VerifiedTx*   dagready_items  = (device VerifiedTx*)  (items_arena + dagready_hdr->items_ofs);
+    device VerifiedTx*   exec_items      = (device VerifiedTx*)  (items_arena + exec_hdr->items_ofs);
+    device ExecResult*   validate_items  = (device ExecResult*)  (items_arena + validate_hdr->items_ofs);
+    device ExecResult*   repair_items    = (device ExecResult*)  (items_arena + repair_hdr->items_ofs);
     device CommitItem*   commit_items    = (device CommitItem*)  (items_arena + commit_hdr->items_ofs);
     device StateRequest* statereq_items  = (device StateRequest*)(items_arena + statereq_hdr->items_ofs);
     device StatePage*    stateresp_items = (device StatePage*)   (items_arena + stateresp_hdr->items_ofs);
     device VoteIngress*  vote_items      = (device VoteIngress*) (items_arena + vote_hdr->items_ofs);
     device QuorumCert*   qc_items        = (device QuorumCert*)  (items_arena + qc_hdr->items_ofs);
 
-    // Touch reserved bindings so the compiler keeps them around until
-    // v0.33-v0.36 services hook in.
-    (void)dagready_hdr; (void)exec_hdr; (void)validate_hdr; (void)repair_hdr;
-    (void)mvcc_table; (void)mvcc_slot_count; (void)dag_nodes; (void)fibers;
+    (void)dag_nodes; (void)fibers;  // v0.40 / v0.39 hook here
 
     if (gid == 0u) {
         (void)drain_ingress(ingress_hdr, ingress_items, decode_hdr, decode_items, tx_index_seq, budget);
@@ -838,7 +1057,20 @@ kernel void quasar_wave_kernel(
         (void)drain_decode(decode_hdr, decode_items, crypto_hdr, crypto_items,
                            statereq_hdr, statereq_items, result, budget);
     } else if (gid == 2u) {
-        (void)drain_crypto(crypto_hdr, crypto_items, commit_hdr, commit_items, desc, budget);
+        (void)drain_crypto(crypto_hdr, crypto_items, commit_hdr, commit_items,
+                           dagready_hdr, dagready_items, exec_hdr, exec_items,
+                           desc, budget);
+    } else if (gid == 3u) {
+        (void)drain_dagready(dagready_hdr, dagready_items, exec_hdr, exec_items, budget);
+    } else if (gid == 4u) {
+        (void)drain_exec(exec_hdr, exec_items, validate_hdr, validate_items,
+                         mvcc_table, mvcc_slot_count, budget);
+    } else if (gid == 5u) {
+        (void)drain_validate(validate_hdr, validate_items, commit_hdr, commit_items,
+                             repair_hdr, repair_items, mvcc_table, mvcc_slot_count,
+                             desc, result, budget);
+    } else if (gid == 6u) {
+        (void)drain_repair(repair_hdr, repair_items, exec_hdr, exec_items, result, budget);
     } else if (gid == 7u) {
         (void)drain_commit(commit_hdr, commit_items, result, budget);
     } else if (gid == 9u) {

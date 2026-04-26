@@ -232,7 +232,11 @@ public:
             in.nonce       = tx.nonce;
             uint32_t origin_lo = static_cast<uint32_t>(tx.origin & 0xFFFFFFFFu);
             uint32_t origin_hi = static_cast<uint32_t>(tx.origin >> 32);
+            // origin_hi flag bits: 31=needs_state, 30=needs_exec.
+            // The kernel masks the top two bits when reading exec_key.
+            origin_hi &= 0x3FFFFFFFu;
             if (tx.needs_state) origin_hi |= 0x80000000u;
+            if (tx.needs_exec)  origin_hi |= 0x40000000u;
             in.origin_lo = origin_lo;
             in.origin_hi = origin_hi;
             blob_arena_.insert(blob_arena_.end(), tx.bytes.begin(), tx.bytes.end());

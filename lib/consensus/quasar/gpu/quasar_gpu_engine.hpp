@@ -46,6 +46,13 @@ struct HostTxBlob {
     uint32_t nonce = 0;
     uint64_t origin = 0;
     bool needs_state = false;
+    bool needs_exec  = false;       ///< route through Exec/Validate/Commit
+                                    ///< full Block-STM pipeline rather
+                                    ///< than the fast Crypto→Commit lane
+    uint64_t exec_key_lo = 0;       ///< MVCC key the tx reads+writes
+    uint64_t exec_key_hi = 0;       ///< (v0.36 substrate; full EVM fiber
+                                    ///< replaces this with bytecode-driven
+                                    ///< RW set generation in v0.39)
 
     /// Optional: predicted read/write keys for DAG construction (Nebula).
     /// Empty vector → tx is conservatively scheduled as touching all

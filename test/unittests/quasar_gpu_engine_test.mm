@@ -287,6 +287,72 @@ void test_root_determinism()
     PASS("root_determinism");
 }
 
+// v0.35/v0.36: Block-STM full round-trip (Crypto → DagReady →
+// Exec → Validate → Commit). Independent txs commit in parallel without
+// conflicts; concurrent same-key txs trigger conflict_count + repair_count
+// telemetry, and all eventually commit.
+void test_block_stm_independent_txs()
+{
+    auto e = QuasarGPUEngine::create();
+    auto desc = make_desc(20);
+    desc.mode = 0;        // Nova; Crypto routes straight to Exec
+    auto h = e->begin_round(desc);
+
+    constexpr size_t N = 64;
+    std::vector<HostTxBlob> txs;
+    for (size_t i = 0; i < N; ++i) {
+        auto t = make_tx(i + 0x10000, uint32_t(i));
+        t.needs_exec = true;       // independent keys → no conflicts
+        txs.push_back(t);
+    }
+    e->push_txs(h, txs);
+    e->request_close(h);
+    auto r = e->run_until_done(h, 32);
+
+    EXPECT("bstm_indep.finalized", r.status == 1u);
+    EXPECT("bstm_indep.tx_count",  r.tx_count == N);
+    EXPECT("bstm_indep.no_conflicts", r.conflict_count == 0u);
+    EXPECT("bstm_indep.no_repairs",   r.repair_count   == 0u);
+    e->end_round(h);
+    PASS("block_stm_independent_txs");
+}
+
+void test_block_stm_conflict_repair()
+{
+    auto e = QuasarGPUEngine::create();
+    auto desc = make_desc(21);
+    desc.mode = 1;        // Nebula path: Crypto → DagReady → Exec → ...
+    auto h = e->begin_round(desc);
+
+    // All txs target the SAME exec_key — every tx after the first sees
+    // a stale version_seen at validate time → repair → re-exec.
+    constexpr size_t N = 16;
+    std::vector<HostTxBlob> txs;
+    for (size_t i = 0; i < N; ++i) {
+        auto t = make_tx(0xCAFEDEAD, uint32_t(i));
+        t.needs_exec = true;
+        txs.push_back(t);
+    }
+    e->push_txs(h, txs);
+    e->request_close(h);
+    auto r = e->run_until_done(h, 256);
+
+    EXPECT("bstm_conflict.finalized", r.status == 1u);
+    EXPECT("bstm_conflict.tx_count",  r.tx_count == N);
+    // Under contention there must be at least one conflict and one
+    // repair — the substrate proves Block-STM is real on GPU.
+    if (r.conflict_count == 0u || r.repair_count == 0u) {
+        std::printf("  bstm_conflict: expected conflicts/repairs > 0; "
+                    "got conflicts=%u repairs=%u\n",
+                    r.conflict_count, r.repair_count);
+        ++g_failed; return;
+    }
+    std::printf("  bstm_conflict: %zu txs, conflicts=%u repairs=%u\n",
+                N, r.conflict_count, r.repair_count);
+    e->end_round(h);
+    PASS("block_stm_conflict_repair");
+}
+
 // 8. Quasar quorum aggregation per lane.
 //
 // In the v0.37 substrate the verify-stub accepts a vote iff the first 32
@@ -367,6 +433,8 @@ int main(int /*argc*/, char** /*argv*/)
         test_end_to_end_stress();
         test_state_page_fault();
         test_root_determinism();
+        test_block_stm_independent_txs();
+        test_block_stm_conflict_repair();
         test_quasar_quorum_round_trip();
         std::printf("[quasar_gpu_engine_test] passed=%d failed=%d\n",
                     g_passed, g_failed);
