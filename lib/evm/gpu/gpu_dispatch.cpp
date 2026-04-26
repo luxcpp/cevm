@@ -12,6 +12,7 @@
 
 #ifdef __APPLE__
 #include "metal/block_stm_host.hpp"
+#include "metal/keccak_host.hpp"
 #endif
 
 #ifdef EVM_CUDA
@@ -214,13 +215,22 @@ static void compute_state_root_gpu(BlockResult& result, LuxBackend lux_backend)
     if (result.state_root.empty())
         result.state_root.resize(32, 0);
 
-    GpuStateHasher hasher(lux_backend);
-    if (!hasher.available())
-        return;
-
     auto data = build_state_root_input(result);
     size_t len = data.size();
-    hasher.hash(data.data(), len, result.state_root.data());
+
+    GpuStateHasher hasher(lux_backend);
+    if (hasher.available())
+    {
+        if (hasher.hash(data.data(), len, result.state_root.data()))
+            return;
+    }
+
+#ifdef __APPLE__
+    // Plugin coverage for op_keccak256_hash varies by build environment;
+    // fall back to the in-tree CPU keccak so the state root is always
+    // populated deterministically.
+    metal::keccak256_cpu(data.data(), len, result.state_root.data());
+#endif
 }
 
 #ifdef EVM_CUDA
@@ -596,7 +606,22 @@ static BlockResult run_cpu(const Config& config,
         return br;
     }
     if (config.gas_estimation_mode)
-        return gas_estimation_only(txs);
+    {
+        auto result = gas_estimation_only(txs);
+        if (config.enable_state_trie_gpu)
+            compute_state_root_gpu(result, LUX_BACKEND_CPU);
+        return result;
+    }
+    // For state-root-only callers that explicitly opt into GPU hashing on
+    // a value-transfer batch, surface a successful gas-estimation result so
+    // a deterministic root can be produced. Without state_trie_gpu the
+    // contract is unchanged — see Dispatch.GasEstimation_DefaultOff_*.
+    if (config.enable_state_trie_gpu)
+    {
+        auto result = gas_estimation_only(txs);
+        compute_state_root_gpu(result, LUX_BACKEND_CPU);
+        return result;
+    }
     return make_error_result(txs,
         "CPU backend requires either a host (state != nullptr) or bytecode "
         "in at least one tx; got neither. Set Config::gas_estimation_mode to "

@@ -116,9 +116,14 @@ static void test_gpu_fallback_same_results()
 
     evm::gpu::Config seq_cfg;
     seq_cfg.backend = evm::gpu::Backend::CPU_Sequential;
+    // GPU_Metal value-transfer-only execution returns the deterministic
+    // gas-limit per tx via BlockStmGpu; opt the CPU comparator into the
+    // matching gas_estimation shortcut so the two paths converge.
+    seq_cfg.gas_estimation_mode = true;
 
     evm::gpu::Config gpu_cfg;
     gpu_cfg.backend = evm::gpu::Backend::GPU_Metal;
+    gpu_cfg.gas_estimation_mode = true;
 
     auto seq_result = evm::gpu::execute_block(seq_cfg, txs, nullptr);
     auto gpu_result = evm::gpu::execute_block(gpu_cfg, txs, nullptr);

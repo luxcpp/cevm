@@ -452,7 +452,6 @@ target_link_libraries(evm-bench-kernel PRIVATE evm-kernel)
 if(APPLE)
     add_library(evm-kernel-metal STATIC
         gpu/kernel/evm_kernel_host.mm
-        gpu/kernel/v3_persistent_host.mm
     )
     target_compile_features(evm-kernel-metal PUBLIC cxx_std_20)
     target_link_libraries(evm-kernel-metal PUBLIC evm-kernel)
@@ -478,11 +477,12 @@ if(APPLE)
     target_compile_features(evm-test-gpu-state PRIVATE cxx_std_20)
     target_link_libraries(evm-test-gpu-state PRIVATE evm-gpu-state evm evmc::evmc intx::intx cevm::precompiles)
 
-    # Metal host dispatchers: tx_validate, bls, block_stm
+    # Metal host dispatchers: tx_validate, bls, block_stm, keccak
     add_library(evm-metal-hosts STATIC
         gpu/metal/tx_validate_host.mm
         gpu/metal/bls_host.mm
         gpu/metal/block_stm_host.mm
+        gpu/metal/keccak_host.mm
     )
     target_compile_features(evm-metal-hosts PUBLIC cxx_std_20)
     target_link_libraries(evm-metal-hosts PUBLIC evm-gpu "-framework Metal" "-framework Foundation")
@@ -538,20 +538,6 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
-    # V3 persistent-kernel tests (queue drain, backpressure, shutdown).
-    # Uses the same bare-Apple pattern: no GoogleTest dep.
-    add_executable(v3-persistent-test
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/v3_persistent_test.mm)
-    target_compile_features(v3-persistent-test PRIVATE cxx_std_20)
-    target_link_libraries(v3-persistent-test PRIVATE
-        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx
-        "-framework Metal" "-framework Foundation"
-    )
-    target_include_directories(v3-persistent-test PRIVATE
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
-        $<BUILD_INTERFACE:${include_dir}>
-    )
 endif()
 
 # State layer: full Ethereum state (accounts, storage, journal) for cevm

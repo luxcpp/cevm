@@ -42,6 +42,7 @@
 #if defined(__APPLE__)
 #include "metal/block_stm_host.hpp"
 #include "metal/bls_host.hpp"
+#include "metal/keccak_host.hpp"
 #endif
 
 #if defined(EVM_CUDA)
@@ -425,6 +426,18 @@ private:
                 gpu_, leaves.data(), leaf_digests.data(), lens.data(), n);
             ok = (err == LUX_OK);
         }
+#if defined(__APPLE__)
+        // CPU fallback when the GPU plugin lacks an op_keccak256_hash
+        // implementation. Plugin coverage varies by build; the cevm
+        // pipeline must still produce a deterministic root.
+        if (!ok) {
+            for (size_t i = 0; i < n; ++i) {
+                metal::keccak256_cpu(leaves.data() + i * 36, 36,
+                                     leaf_digests.data() + i * 32);
+            }
+            ok = true;
+        }
+#endif
         if (!ok) {
             r.state_root.assign(32, 0);
             return;
@@ -433,14 +446,23 @@ private:
         // Reduce: hash the concatenation of leaf digests.
         size_t reduce_len = leaf_digests.size();
         std::vector<uint8_t> root(32, 0);
+        bool reduce_ok = false;
         if (gpu_) {
             std::lock_guard<std::mutex> lock(gpu_mu_);
             LuxError err = lux_gpu_keccak256_batch(
                 gpu_, leaf_digests.data(), root.data(), &reduce_len, 1);
-            if (err != LUX_OK) {
-                r.state_root.assign(32, 0);
-                return;
-            }
+            reduce_ok = (err == LUX_OK);
+        }
+#if defined(__APPLE__)
+        if (!reduce_ok) {
+            metal::keccak256_cpu(leaf_digests.data(), leaf_digests.size(),
+                                 root.data());
+            reduce_ok = true;
+        }
+#endif
+        if (!reduce_ok) {
+            r.state_root.assign(32, 0);
+            return;
         }
         r.state_root = std::move(root);
     }
@@ -448,20 +470,29 @@ private:
     void compute_consensus_hash(
         const BlockContext& ctx,
         PipelineResult& r) {
-        if (ctx.header_bytes.empty() || !gpu_) {
+        if (ctx.header_bytes.empty()) {
             r.consensus_hash.assign(32, 0);
             return;
         }
         size_t len = ctx.header_bytes.size();
         std::vector<uint8_t> out(32, 0);
-        {
+        bool ok = false;
+        if (gpu_) {
             std::lock_guard<std::mutex> lock(gpu_mu_);
             LuxError err = lux_gpu_keccak256_batch(
                 gpu_, ctx.header_bytes.data(), out.data(), &len, 1);
-            if (err != LUX_OK) {
-                r.consensus_hash.assign(32, 0);
-                return;
-            }
+            ok = (err == LUX_OK);
+        }
+#if defined(__APPLE__)
+        if (!ok) {
+            metal::keccak256_cpu(ctx.header_bytes.data(),
+                                 ctx.header_bytes.size(), out.data());
+            ok = true;
+        }
+#endif
+        if (!ok) {
+            r.consensus_hash.assign(32, 0);
+            return;
         }
         r.consensus_hash = std::move(out);
     }
