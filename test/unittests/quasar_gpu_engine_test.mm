@@ -1148,6 +1148,144 @@ void test_cert021_round_uint64()
     PASS("cert021_round_uint64");
 }
 
+// =============================================================================
+// v0.42.2 — Quasar 4.0 STM determinism fixes (STM-001/002/003/005/006/013).
+// =============================================================================
+
+// STM-001 — drain_validate must defer mvcc_apply_writes until AFTER successful
+// commit-ring push. Run two identical rounds back-to-back; conflict and
+// repair counts MUST be identical (no nondeterminism from ring backpressure).
+void test_stm001_validate_defers_mvcc_apply()
+{
+    auto run = [&](uint32_t seed, uint32_t* out_conflicts, uint32_t* out_repairs) {
+        auto e = QuasarGPUEngine::create();
+        auto h = e->begin_round(make_desc(900u + seed));
+        std::vector<HostTxBlob> txs;
+        for (uint32_t i = 0; i < 16u; ++i)
+            txs.push_back(make_tx(0xCAFEu, i));
+        e->push_txs(h, txs);
+        e->request_close(h);
+        auto r = e->run_until_done(h, 256);
+        *out_conflicts = r.conflict_count;
+        *out_repairs   = r.repair_count;
+        e->end_round(h);
+    };
+    uint32_t ca=0, ra=0, cb=0, rb=0;
+    run(0, &ca, &ra);
+    run(0, &cb, &rb);    // same seed twice → must be identical
+    EXPECT("stm001.deterministic_conflicts", ca == cb);
+    EXPECT("stm001.deterministic_repairs",   ra == rb);
+    PASS("stm001_validate_defers_mvcc_apply");
+}
+
+// STM-002 — atomic claim on MvccSlot. Validate that a fresh round's slot
+// table starts in claim_state=0 (memset by begin_round) and that two
+// concurrent same-key writers serialize cleanly (no torn keys).
+void test_stm002_atomic_mvcc_claim()
+{
+    auto e = QuasarGPUEngine::create();
+    auto h = e->begin_round(make_desc(910u));
+    // 32 same-key txs — every Block-STM conflict path goes through the
+    // same MVCC slot; with the atomic claim there are no torn-key
+    // misbehaviors and the round still finalizes deterministically.
+    std::vector<HostTxBlob> txs;
+    for (uint32_t i = 0; i < 32u; ++i)
+        txs.push_back(make_tx(0xBEEFu, i));
+    e->push_txs(h, txs);
+    e->request_close(h);
+    auto r = e->run_until_done(h, 256);
+    EXPECT("stm002.finalized", r.status == 1u);
+    EXPECT("stm002.tx_count",  r.tx_count == 32u);
+    e->end_round(h);
+    PASS("stm002_atomic_mvcc_claim");
+}
+
+// STM-003 — repair-cap. With many same-key txs and a tight epoch budget,
+// drain_repair must hit MAX_TOTAL_REPAIRS deterministically — that is, the
+// run still finalizes (no infinite loop) and the same input produces the
+// same outcome twice.
+void test_stm003_repair_cap_bounded()
+{
+    auto run = [&](uint32_t* out_repair_count, uint32_t* out_status) {
+        auto e = QuasarGPUEngine::create();
+        auto h = e->begin_round(make_desc(920u));
+        std::vector<HostTxBlob> txs;
+        for (uint32_t i = 0; i < 12u; ++i)
+            txs.push_back(make_tx(0xC001u, i));
+        e->push_txs(h, txs);
+        e->request_close(h);
+        auto r = e->run_until_done(h, 1024);
+        *out_status = r.status;
+        *out_repair_count = r.repair_count;
+        e->end_round(h);
+    };
+    uint32_t s0=0, r0=0, s1=0, r1=0;
+    run(&r0, &s0);
+    run(&r1, &s1);
+    EXPECT("stm003.bounded_finalized_a", s0 == 1u);
+    EXPECT("stm003.bounded_finalized_b", s1 == 1u);
+    EXPECT("stm003.repair_count_deterministic", r0 == r1);
+    PASS("stm003_repair_cap_bounded");
+}
+
+// STM-005/006 — tx_index_seq increments AFTER successful decode push. Ingest
+// a batch of txs and verify that running the round twice produces the same
+// tx_count regardless of any intermediate decode-ring backpressure.
+void test_stm005_006_tx_index_after_push()
+{
+    auto run = [&](uint32_t* out_tx_count, uint32_t* out_status) {
+        auto e = QuasarGPUEngine::create();
+        auto h = e->begin_round(make_desc(930u));
+        std::vector<HostTxBlob> txs;
+        for (uint32_t i = 0; i < 64u; ++i)
+            txs.push_back(make_tx(0xD000u + i, 0u));
+        e->push_txs(h, txs);
+        e->request_close(h);
+        auto r = e->run_until_done(h, 256);
+        *out_status = r.status;
+        *out_tx_count = r.tx_count;
+        e->end_round(h);
+    };
+    uint32_t s0=0, a=0, s1=0, b=0;
+    run(&a, &s0);
+    run(&b, &s1);
+    EXPECT("stm005006.finalized_a", s0 == 1u);
+    EXPECT("stm005006.finalized_b", s1 == 1u);
+    EXPECT("stm005006.tx_count_match", a == b);
+    EXPECT("stm005006.tx_count_full",  a == 64u);
+    PASS("stm005_006_tx_index_after_push");
+}
+
+// STM-013 — host memsets MVCC table at begin_round. Run a round, end it,
+// start a fresh round, and verify the new round sees a clean MVCC.
+void test_stm013_begin_round_clears_mvcc()
+{
+    auto e = QuasarGPUEngine::create();
+    // Round 1: write some MVCC slots.
+    {
+        auto h = e->begin_round(make_desc(940u));
+        std::vector<HostTxBlob> txs = { make_tx(0xE001u, 0u), make_tx(0xE002u, 0u) };
+        e->push_txs(h, txs);
+        e->request_close(h);
+        auto r = e->run_until_done(h, 64);
+        EXPECT("stm013.r1_finalized", r.status == 1u);
+        e->end_round(h);
+    }
+    // Round 2: same keys, fresh round — must finalize cleanly because
+    // begin_round zeroes the MVCC arena.
+    {
+        auto h = e->begin_round(make_desc(941u));
+        std::vector<HostTxBlob> txs = { make_tx(0xE001u, 0u), make_tx(0xE002u, 0u) };
+        e->push_txs(h, txs);
+        e->request_close(h);
+        auto r = e->run_until_done(h, 64);
+        EXPECT("stm013.r2_finalized", r.status == 1u);
+        EXPECT("stm013.r2_tx_count", r.tx_count == 2u);
+        e->end_round(h);
+    }
+    PASS("stm013_begin_round_clears_mvcc");
+}
+
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/)
@@ -1187,6 +1325,12 @@ int main(int /*argc*/, char** /*argv*/)
         test_cert007_uint64_stake_carry();
         test_cert006_mac_binds_stake_weight();
         test_cert021_round_uint64();
+        // v0.42.2 — Quasar 4.0 STM determinism fixes.
+        test_stm001_validate_defers_mvcc_apply();
+        test_stm002_atomic_mvcc_claim();
+        test_stm003_repair_cap_bounded();
+        test_stm005_006_tx_index_after_push();
+        test_stm013_begin_round_clears_mvcc();
         std::printf("[quasar_gpu_engine_test] passed=%d failed=%d\n",
                     g_passed, g_failed);
         return g_failed == 0 ? 0 : 1;

@@ -153,13 +153,20 @@ struct alignas(16) CommitItem {
     uchar receipt_hash[32];
 };
 
+// STM-002 (v0.42.2): atomic claim flag eliminates the torn-key window.
+//   claim_state = 0  →  free
+//   claim_state = 1  →  claim in progress (key fields not yet stable)
+//   claim_state = 2  →  ready (key_lo/key_hi committed, safe to compare)
+// mvcc_locate uses atomic_compare_exchange on claim_state to win the
+// claim; the winner writes key bytes, fences, then publishes via a
+// store of state=2.
 struct alignas(16) MvccSlot {
     ulong key_lo;
     ulong key_hi;
     atomic_uint last_writer_tx;
     atomic_uint last_writer_inc;
     atomic_uint version;
-    uint        _pad0;
+    atomic_uint claim_state;            ///< STM-002 atomic claim
 };
 
 struct alignas(16) DagNode {
@@ -298,7 +305,7 @@ struct alignas(16) QuasarRoundResult {
     uint        mode;
     atomic_uint subject_mismatch_count;
     atomic_uint dedup_skipped_count;
-    uint        _pad1;
+    atomic_uint repair_capped_count;       ///< STM-003 telemetry
     uchar       block_hash[32];
     uchar       state_root[32];
     uchar       receipts_root[32];
@@ -555,6 +562,11 @@ static inline uint mvcc_index(ulong key_lo, ulong key_hi, uint mask)
 // space pointers in all toolchains, so we return the index instead.
 constant uint kMvccInvalidIdx = 0xFFFFFFFFu;
 
+// STM-002 (v0.42.2): atomic CAS-based slot claim eliminates torn-key
+// reads. claim_state transitions 0→1 (winner) or 0→stay-zero (loser
+// re-reads). Winner writes key bytes, then publishes claim_state=2 with
+// a device-memory fence. Other threads can match the slot only when
+// claim_state==2.
 static inline uint mvcc_locate(
     device MvccSlot* table, uint slot_count, ulong key_lo, ulong key_hi)
 {
@@ -562,15 +574,29 @@ static inline uint mvcc_locate(
     uint idx  = mvcc_index(key_lo, key_hi, mask);
     for (uint probe = 0u; probe < slot_count; ++probe) {
         device MvccSlot* s = &table[idx];
-        if (s->key_lo == 0UL && s->key_hi == 0UL) {
-            // Claim the slot. Race-safe because a writer using mvcc_apply_writes
-            // races on (last_writer_tx, version) atomics; the key fields are
-            // written first and stay stable thereafter.
-            s->key_lo = key_lo;
-            s->key_hi = key_hi;
-            return idx;
+        uint state = atomic_load_explicit(&s->claim_state, memory_order_relaxed);
+        if (state == 0u) {
+            // Try to claim: CAS 0 → 1. Winner installs the key; loser
+            // re-checks the slot against the (now claimed) keys.
+            uint expected = 0u;
+            bool won = atomic_compare_exchange_weak_explicit(
+                &s->claim_state, &expected, 1u,
+                memory_order_relaxed, memory_order_relaxed);
+            if (won) {
+                s->key_lo = key_lo;
+                s->key_hi = key_hi;
+                threadgroup_barrier(mem_flags::mem_device);
+                atomic_store_explicit(&s->claim_state, 2u, memory_order_relaxed);
+                return idx;
+            }
+            // Lost the CAS — fall through and re-read state.
+            state = atomic_load_explicit(&s->claim_state, memory_order_relaxed);
         }
-        if (s->key_lo == key_lo && s->key_hi == key_hi) {
+        // Spin until publication completes; bounded by physical thread count.
+        for (uint w = 0u; w < 64u && state == 1u; ++w) {
+            state = atomic_load_explicit(&s->claim_state, memory_order_relaxed);
+        }
+        if (state == 2u && s->key_lo == key_lo && s->key_hi == key_hi) {
             return idx;
         }
         idx = (idx + 1u) & mask;
@@ -592,8 +618,14 @@ static inline uint drain_ingress(
     for (uint i = 0u; i < budget; ++i) {
         IngressTx in;
         if (!ring_try_pop(ingress_hdr, ingress_items, in)) break;
+        // STM-005/006 (v0.42.2): peek tx_index_seq to fill the envelope,
+        // but do NOT increment until decode push succeeds. Backpressure
+        // re-queues the IngressTx and on next tick the same tx claims the
+        // same tx_index — predicted_keys[tx_index] indexing stays stable
+        // across requeues.
+        uint candidate_index = atomic_load_explicit(tx_index_seq, memory_order_relaxed);
         DecodedTx out;
-        out.tx_index    = atomic_fetch_add_explicit(tx_index_seq, 1u, memory_order_relaxed);
+        out.tx_index    = candidate_index;
         out.blob_offset = in.blob_offset;
         out.blob_size   = in.blob_size;
         out.gas_limit   = in.gas_limit;
@@ -602,9 +634,18 @@ static inline uint drain_ingress(
         out.origin_hi   = in.origin_hi;
         out.status      = 0u;
         if (!ring_try_push(decode_hdr, decode_items, out)) {
+            // Decode ring full — requeue WITHOUT incrementing tx_index_seq.
             (void)ring_try_push(ingress_hdr, ingress_items, in);
             break;
         }
+        // Push succeeded — only now consume the tx_index slot. CAS guards
+        // against another drain_ingress thread racing here (single-thread
+        // dispatch in v0.42.2 but defensive for forward-compat).
+        uint expected = candidate_index;
+        bool consumed = atomic_compare_exchange_weak_explicit(
+            tx_index_seq, &expected, candidate_index + 1u,
+            memory_order_relaxed, memory_order_relaxed);
+        (void)consumed;
         ++processed;
     }
     return processed;
@@ -2064,8 +2105,11 @@ static inline uint drain_validate(
             continue;
         }
 
-        // Apply writes to MVCC + emit CommitItem.
-        mvcc_apply_writes(mvcc_table, mvcc_slot_count, er);
+        // STM-001 (v0.42.2): defer mvcc_apply_writes until AFTER successful
+        // commit-ring push. Try the commit push first; on failure, requeue
+        // the original ExecResult to Validate WITHOUT mutating MVCC. This
+        // makes the commit order deterministic against host backpressure
+        // (the commit-ring-full case no longer leaks a version bump).
         CommitItem c;
         c.tx_index       = er.tx_index;
         c.status         = er.status;
@@ -2083,25 +2127,29 @@ static inline uint drain_validate(
         for (uint k = 0u; k < 32u; ++k) c.receipt_hash[k] = digest[k];
 
         if (!ring_try_push(commit_hdr, commit_items, c)) {
-            // Roll back the MVCC version bump? In v0.36 substrate the
-            // version monotonically advances; if commit ring is full we
-            // requeue and let downstream catch up next tick. The version
-            // mismatch this introduces only causes other concurrent txs
-            // to repair, which is correct under Block-STM.
+            // Commit ring full — requeue to Validate WITHOUT mutating MVCC.
             (void)ring_try_push(validate_hdr, validate_items, er);
             break;
         }
+        // Push succeeded; now safely apply writes to MVCC.
+        mvcc_apply_writes(mvcc_table, mvcc_slot_count, er);
         ++processed;
     }
     return processed;
 }
 
-// drain_repair (v0.33): re-execute conflicting txs. The repair counter
-// gives an honest measure of how much speculative work was wasted under
-// contention.
+// STM-003 (v0.42.2): MAX_TOTAL_REPAIRS hard cap. LP-010 §4.0 mandates a
+// deterministic abort once a tx's incarnation reaches MAX_TOTAL_REPAIRS;
+// the abort is a CommitItem with status=Error so all validators agree on
+// the same outcome. repair_capped_count telemetry tracks how often this
+// fires.
+#define QUASAR_MAX_TOTAL_REPAIRS 8u
+
 static inline uint drain_repair(
     device RingHeader* repair_hdr, device ExecResult* repair_items,
     device RingHeader* exec_hdr,   device VerifiedTx* exec_items,
+    device RingHeader* commit_hdr, device CommitItem* commit_items,
+    device QuasarRoundDescriptor* desc,
     device QuasarRoundResult* result,
     uint budget)
 {
@@ -2109,6 +2157,31 @@ static inline uint drain_repair(
     for (uint i = 0u; i < budget; ++i) {
         ExecResult er;
         if (!ring_try_pop(repair_hdr, repair_items, er)) break;
+        // STM-003 hard cap: once incarnation reaches MAX_TOTAL_REPAIRS,
+        // emit a deterministic Error commit item instead of looping back
+        // to Exec.
+        if (er.incarnation >= QUASAR_MAX_TOTAL_REPAIRS) {
+            CommitItem c;
+            c.tx_index       = er.tx_index;
+            c.status         = kExecStatusError;
+            c.gas_used       = 0u;
+            c.cumulative_gas = 0u;
+            uint origin_lo = uint(er.rw[0].key_lo & 0xFFFFFFFFu);
+            uint origin_hi = uint(er.rw[0].key_hi & 0xFFFFFFFFu);
+            thread uchar digest[32];
+            receipt_hash(er.tx_index, origin_lo, origin_hi,
+                         0u, 0u,
+                         desc->round, desc->chain_id, digest);
+            for (uint k = 0u; k < 32u; ++k) c.receipt_hash[k] = digest[k];
+            if (!ring_try_push(commit_hdr, commit_items, c)) {
+                (void)ring_try_push(repair_hdr, repair_items, er);
+                break;
+            }
+            atomic_fetch_add_explicit(&result->repair_capped_count, 1u,
+                                      memory_order_relaxed);
+            ++processed;
+            continue;
+        }
         VerifiedTx v;
         v.tx_index    = er.tx_index;
         v.admission   = 0u;
@@ -2553,7 +2626,8 @@ kernel void quasar_wave_kernel(
                              repair_hdr, repair_items, mvcc_table, mvcc_slot_count,
                              desc, result, budget);
     } else if (gid == 6u) {
-        (void)drain_repair(repair_hdr, repair_items, exec_hdr, exec_items, result, budget);
+        (void)drain_repair(repair_hdr, repair_items, exec_hdr, exec_items,
+                           commit_hdr, commit_items, desc, result, budget);
     } else if (gid == 7u) {
         (void)drain_commit(commit_hdr, commit_items,
                            dag_nodes, dag_node_capacity,

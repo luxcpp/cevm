@@ -163,12 +163,12 @@ static_assert(sizeof(CommitItem) == 64, "CommitItem layout drift");
 // to detect read-after-write conflicts.
 
 struct alignas(16) MvccSlot {
-    uint64_t key_lo;            ///< 0,0 means empty
+    uint64_t key_lo;            ///< 0,0 means empty (gated by claim_state)
     uint64_t key_hi;
     uint32_t last_writer_tx;    ///< 0xFFFFFFFF = no writer
     uint32_t last_writer_inc;   ///< incarnation of last writer
     uint32_t version;           ///< monotonic; bumped on every write
-    uint32_t _pad0;
+    uint32_t claim_state;       ///< STM-002: 0=free, 1=claiming, 2=ready
 };
 static_assert(sizeof(MvccSlot) == 32, "MvccSlot layout drift");
 
@@ -453,7 +453,7 @@ struct alignas(16) QuasarRoundResult {
     uint32_t mode;               ///< QuasarMode
     uint32_t subject_mismatch_count;  ///< CERT-022: rejected votes
     uint32_t dedup_skipped_count;     ///< CERT-004: replays skipped
-    uint32_t _pad1;
+    uint32_t repair_capped_count;     ///< STM-003: txs hitting MAX_TOTAL_REPAIRS
     uint8_t  block_hash[32];     ///< keccak — populated by HashService
     uint8_t  state_root[32];
     uint8_t  receipts_root[32];
