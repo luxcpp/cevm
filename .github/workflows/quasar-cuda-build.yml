@@ -1,0 +1,103 @@
+# Quasar GPU CUDA backend — H100 self-hosted runner.
+#
+# Builds the CUDA backend (lib/consensus/quasar/gpu/quasar_wave.cu +
+# quasar_gpu_engine_cuda.cpp), then runs the same determinism harness
+# (test/unittests/quasar_determinism_test.mm) that the Metal backend
+# runs in quasar-coverage.yml. The .mm source compiles as plain C++
+# on Linux because of the __APPLE__ guards around the
+# Foundation/Metal imports.
+#
+# Runner labels: self-hosted, gpu, cuda, h100.
+# CUDA architectures: 80 (A100), 90 (H100). 80 is the primary target
+# since the self-hosted runner is documented as H100 (sm_90) — keep
+# 80 in the multi-arch list so the same artefact runs on A100 hosts
+# during the staged rollout.
+name: Quasar CUDA build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'feat/v0.29-*'
+    paths:
+      - 'lib/consensus/quasar/gpu/**'
+      - 'lib/evm/CMakeLists.txt'
+      - 'CMakeLists.txt'
+      - 'test/unittests/quasar_*'
+      - '.github/workflows/quasar-cuda-build.yml'
+  pull_request:
+    paths:
+      - 'lib/consensus/quasar/gpu/**'
+      - 'lib/evm/CMakeLists.txt'
+      - 'test/unittests/quasar_*'
+      - '.github/workflows/quasar-cuda-build.yml'
+  workflow_dispatch:
+
+jobs:
+  cuda-build-and-test:
+    name: Build + run Quasar CUDA backend (H100, sm_90)
+    runs-on: [self-hosted, gpu, cuda, h100]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Show toolchain
+        run: |
+          nvcc --version
+          cmake --version
+          nvidia-smi || true
+
+      - name: Configure (CEVM_CUDA=ON, sm_80;sm_90)
+        run: |
+          cmake -S . -B build-cuda \
+            -DCEVM_CUDA=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="80;90" \
+            -DCEVM_TESTING=ON
+
+      - name: Build evm-cuda (Quasar .cu kernels + host glue)
+        run: cmake --build build-cuda --target evm-cuda -j
+
+      - name: Verify CUDA Quasar symbols
+        run: |
+          ar t build-cuda/lib/evm/libevm-cuda.a | sort | grep -i quasar || true
+          nm build-cuda/lib/evm/libevm-cuda.a 2>&1 \
+            | grep -E "quasar.*(create|begin_round|push_txs|run_until_done)" \
+            | head -20 || true
+
+      - name: Build quasar-determinism-test (CUDA-linked)
+        run: |
+          cmake --build build-cuda --target quasar-determinism-test -j
+
+      - name: Run determinism harness on real H100
+        run: |
+          ./build-cuda/lib/evm/quasar-determinism-test
+
+      - name: Upload CUDA build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quasar-cuda-build-log
+          path: |
+            build-cuda/CMakeFiles/CMakeOutput.log
+            build-cuda/CMakeFiles/CMakeError.log
+          retention-days: 14
+
+  # Maintainer note: if no self-hosted CUDA runner is currently
+  # registered, run the same sequence on a workstation:
+  #
+  #   cmake -S . -B build-cuda -DCEVM_CUDA=ON \
+  #         -DCMAKE_BUILD_TYPE=Release \
+  #         -DCMAKE_CUDA_ARCHITECTURES="80;90"
+  #   cmake --build build-cuda --target evm-cuda -j
+  #   cmake --build build-cuda --target quasar-determinism-test -j
+  #   ./build-cuda/lib/evm/quasar-determinism-test
+  #
+  # The determinism harness will instantiate two QuasarGPUEngine
+  # instances and assert byte-identical QuasarRoundResult across
+  # them — same contract enforced for Metal in quasar-coverage.yml.

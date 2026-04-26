@@ -593,6 +593,28 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
+    # Cross-backend determinism harness (Quasar 4.0 activation 2026-02-14).
+    # Runs three deterministic workloads (1024-tx fast lane, 16-same-key
+    # Block-STM, 100-tx Nebula DAG) twice on the same engine and once on
+    # two separate engines; asserts every byte of QuasarRoundResult is
+    # identical across runs. Same source file is reused by the CUDA
+    # workflow in .github/workflows/quasar-cuda-build.yml — the only
+    # difference at link time is whether QuasarGPUEngine::create() returns
+    # the Metal or CUDA backend.
+    add_executable(quasar-determinism-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_determinism_test.mm)
+    target_compile_features(quasar-determinism-test PRIVATE cxx_std_20)
+    target_link_libraries(quasar-determinism-test PRIVATE
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx cevm::precompiles
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(quasar-determinism-test PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
 endif()
 
 # State layer: full Ethereum state (accounts, storage, journal) for cevm

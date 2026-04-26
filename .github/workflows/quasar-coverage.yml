@@ -1,0 +1,128 @@
+# Quasar GPU coverage — Apple Metal backend.
+#
+# Builds quasar-gpu-engine-test + quasar-determinism-test with LLVM
+# source-based coverage instrumentation, runs them, merges profdata,
+# emits an HTML report, and uploads it as a workflow artifact.
+#
+# Hosted macOS runner (no GPU passthrough required for Metal — Apple
+# Silicon Mac runners ship Metal). Coverage covers the host-side
+# QuasarGPUEngine.mm + quasar_gpu_engine.hpp + quasar_gpu_layout.hpp;
+# .metal kernels are not LLVM-instrumentable.
+name: Quasar coverage (Metal)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'feat/v0.29-*'
+    paths:
+      - 'lib/consensus/quasar/gpu/**'
+      - 'test/unittests/quasar_*'
+      - 'lib/evm/CMakeLists.txt'
+      - 'CMakeLists.txt'
+      - '.github/workflows/quasar-coverage.yml'
+  pull_request:
+    paths:
+      - 'lib/consensus/quasar/gpu/**'
+      - 'test/unittests/quasar_*'
+      - 'lib/evm/CMakeLists.txt'
+      - '.github/workflows/quasar-coverage.yml'
+  workflow_dispatch:
+
+jobs:
+  coverage:
+    name: Build + run + report
+    runs-on: macos-14  # Apple Silicon, ships Metal + Xcode toolchain
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Show toolchain
+        run: |
+          xcrun -f clang
+          xcrun -f llvm-profdata
+          xcrun -f llvm-cov
+          cmake --version
+          system_profiler SPDisplaysDataType | head -40 || true
+
+      - name: Configure (LUXCPP_EVM_COVERAGE=ON)
+        run: |
+          cmake -S . -B build-cov \
+            -DLUXCPP_EVM_COVERAGE=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCEVM_TESTING=ON
+
+      - name: Build instrumented Quasar tests
+        run: |
+          cmake --build build-cov -j 8 --target \
+            quasar-gpu-engine-test \
+            quasar-determinism-test
+
+      - name: Run quasar-gpu-engine-test (13 cases)
+        run: |
+          mkdir -p build-cov/coverage
+          LLVM_PROFILE_FILE=build-cov/coverage/quasar-engine-%p.profraw \
+            ./build-cov/lib/evm/quasar-gpu-engine-test
+
+      - name: Run quasar-determinism-test (6 cases)
+        run: |
+          LLVM_PROFILE_FILE=build-cov/coverage/quasar-determinism-%p.profraw \
+            ./build-cov/lib/evm/quasar-determinism-test
+
+      - name: Merge profdata
+        run: |
+          xcrun llvm-profdata merge -sparse \
+            build-cov/coverage/quasar-engine-*.profraw \
+            build-cov/coverage/quasar-determinism-*.profraw \
+            -o build-cov/coverage/quasar.profdata
+
+      - name: Coverage report (text)
+        run: |
+          xcrun llvm-cov report \
+            -instr-profile=build-cov/coverage/quasar.profdata \
+            build-cov/lib/evm/quasar-gpu-engine-test \
+            -ignore-filename-regex='(\.hunter|deps|test/unittests|gpu/kernel|gpu/persistent_pool|gpu/metal|state/gpu_hashtable|baseline_|cpu_check|advanced_|delegation|tracing|vm\.cpp|instructions_|baseline_)' \
+            | tee build-cov/coverage/quasar-summary.txt
+
+      - name: Coverage report (HTML)
+        run: |
+          mkdir -p build-cov/coverage_report
+          xcrun llvm-cov show \
+            -instr-profile=build-cov/coverage/quasar.profdata \
+            build-cov/lib/evm/quasar-gpu-engine-test \
+            -format=html \
+            -output-dir=build-cov/coverage_report/ \
+            -ignore-filename-regex='(\.hunter|deps|test/unittests|gpu/kernel|gpu/persistent_pool|gpu/metal|state/gpu_hashtable|baseline_|cpu_check|advanced_|delegation|tracing|vm\.cpp|instructions_|baseline_)'
+
+      - name: Enforce 80% line coverage on quasar_gpu_engine.mm
+        run: |
+          line_pct=$(xcrun llvm-cov report \
+            -instr-profile=build-cov/coverage/quasar.profdata \
+            build-cov/lib/evm/quasar-gpu-engine-test \
+            lib/consensus/quasar/gpu/quasar_gpu_engine.mm \
+            | awk '/quasar_gpu_engine.mm/ { for (i=1; i<=NF; i++) if ($i ~ /%$/) { print $i; exit } }')
+          echo "Line coverage on quasar_gpu_engine.mm: $line_pct"
+          # Strip trailing % and compare against 80.00
+          pct=${line_pct%\%}
+          awk -v p="$pct" 'BEGIN { if (p+0 < 80.0) exit 1 }'
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: quasar-coverage-html
+          path: build-cov/coverage_report/
+          retention-days: 30
+
+      - name: Upload text summary + profdata
+        uses: actions/upload-artifact@v4
+        with:
+          name: quasar-coverage-data
+          path: |
+            build-cov/coverage/quasar.profdata
+            build-cov/coverage/quasar-summary.txt
+          retention-days: 30
