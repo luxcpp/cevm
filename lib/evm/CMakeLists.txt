@@ -229,12 +229,51 @@ target_include_directories(evm-precompiles PUBLIC
 if(LUXCPP_GPU_FOUND)
     target_link_libraries(evm-precompiles PUBLIC luxgpu_core_static)
 endif()
+
+# lux-accel: optional GPU DEX/crypto kernels via the C ABI in
+# lux/accel/c_api.h. When present, the dex_match_metal wrapper installs a
+# Metal-backed override for precompile 0x100. When absent, the precompile
+# stays on its CPU reference.
+find_package(lux-accel CONFIG QUIET
+    PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../../../install/lib/cmake/lux-accel"
+    NO_DEFAULT_PATH)
+if(lux-accel_FOUND)
+    set(LUXCPP_ACCEL_FOUND TRUE)
+    message(STATUS "lux-accel: found via cmake config")
+else()
+    # Manual fallback: probe the install tree directly.
+    set(_lux_accel_install "${CMAKE_CURRENT_SOURCE_DIR}/../../../install")
+    if(EXISTS "${_lux_accel_install}/include/lux/accel/c_api.h")
+        add_library(lux::luxaccel SHARED IMPORTED)
+        if(APPLE)
+            set_target_properties(lux::luxaccel PROPERTIES
+                IMPORTED_LOCATION "${_lux_accel_install}/lib/libluxaccel.dylib"
+                INTERFACE_INCLUDE_DIRECTORIES "${_lux_accel_install}/include")
+        else()
+            set_target_properties(lux::luxaccel PROPERTIES
+                IMPORTED_LOCATION "${_lux_accel_install}/lib/libluxaccel.so"
+                INTERFACE_INCLUDE_DIRECTORIES "${_lux_accel_install}/include")
+        endif()
+        set(LUXCPP_ACCEL_FOUND TRUE)
+        message(STATUS "lux-accel: found via manual probe at ${_lux_accel_install}")
+    else()
+        set(LUXCPP_ACCEL_FOUND FALSE)
+        message(STATUS "lux-accel: NOT found, DEX_MATCH (0x100) stays on CPU")
+    endif()
+endif()
+
 if(APPLE AND LUXCPP_GPU_FOUND)
     target_sources(evm-precompiles PRIVATE
         gpu/precompiles/ecrecover_metal.mm
         gpu/precompiles/bls12_381_metal.mm
         gpu/precompiles/point_eval_metal.mm
     )
+    if(LUXCPP_ACCEL_FOUND)
+        target_sources(evm-precompiles PRIVATE
+            gpu/precompiles/dex_match_metal.mm
+        )
+        target_link_libraries(evm-precompiles PUBLIC lux::luxaccel)
+    endif()
     target_link_libraries(evm-precompiles PUBLIC "-framework Metal" "-framework Foundation")
 endif()
 if(CEVM_CUDA AND LUXCPP_GPU_FOUND)

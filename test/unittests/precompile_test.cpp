@@ -655,3 +655,129 @@ TEST_F(PrecompileTest, BackendNamesStrings)
             << "addr=0x" << std::hex << int(a) << " backend=" << s;
     }
 }
+
+// =============================================================================
+// 0x100 DEX_MATCH (Lux custom)
+// =============================================================================
+
+namespace
+{
+// Build a 117-byte calldata for the DEX_MATCH precompile.
+// price/qty are passed as 64-bit values, big-endian into the low 8 bytes of
+// their respective 32-byte slot.
+std::vector<uint8_t> dex_calldata(uint8_t side, uint64_t price, uint64_t qty,
+                                   uint64_t book_id)
+{
+    std::vector<uint8_t> in(117, 0);
+    in[0] = side;
+    for (int i = 0; i < 8; ++i)
+        in[1 + 24 + i] = static_cast<uint8_t>(price >> ((7 - i) * 8));
+    for (int i = 0; i < 8; ++i)
+        in[1 + 32 + 24 + i] = static_cast<uint8_t>(qty >> ((7 - i) * 8));
+    // user (20 bytes) zero
+    for (int i = 0; i < 8; ++i)
+        in[1 + 32 + 32 + 20 + 24 + i] = static_cast<uint8_t>(book_id >> ((7 - i) * 8));
+    return in;
+}
+
+// Decode num_fills from the last 4 bytes of a 68-byte output.
+uint32_t num_fills(const std::vector<uint8_t>& out)
+{
+    return (uint32_t(out[64]) << 24) | (uint32_t(out[65]) << 16)
+         | (uint32_t(out[66]) << 8)  | uint32_t(out[67]);
+}
+
+// Decode filled_qty (uint64 in the low 8 bytes of slot 0 of a 68-byte output).
+uint64_t filled_qty(const std::vector<uint8_t>& out)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i)
+        v = (v << 8) | uint64_t(out[24 + i]);
+    return v;
+}
+
+uint64_t avg_price(const std::vector<uint8_t>& out)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i)
+        v = (v << 8) | uint64_t(out[32 + 24 + i]);
+    return v;
+}
+
+// Each test uses a unique book_id so the process-global book table doesn't
+// leak orders between cases.
+uint64_t s_next_book = 1;
+uint64_t fresh_book_id() { return s_next_book++; }
+}  // namespace
+
+TEST_F(PrecompileTest, DexMatchAvailable)
+{
+    EXPECT_TRUE(disp_->available(0x100));
+    const char* b = disp_->backend_name(0x100);
+    ASSERT_NE(b, nullptr);
+    const std::string s = b;
+    // Either CPU (when lux-accel isn't linked) or metal/cuda when it is.
+    EXPECT_TRUE(s == "cpu" || s == "metal" || s == "cuda") << "backend=" << s;
+}
+
+TEST_F(PrecompileTest, DexMatchEmptyBookRestsOrder)
+{
+    const auto book = fresh_book_id();
+    const auto in = dex_calldata(/*bid=*/0, /*price=*/100, /*qty=*/50, book);
+    const auto r = disp_->execute(0x100, in, 100000);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(r.gas_used, 1500u);              // base only, no fills
+    ASSERT_EQ(r.output.size(), 68u);
+    EXPECT_EQ(num_fills(r.output), 0u);
+    EXPECT_EQ(filled_qty(r.output), 0u);
+    EXPECT_EQ(avg_price(r.output), 0u);
+}
+
+TEST_F(PrecompileTest, DexMatchSingleFill)
+{
+    const auto book = fresh_book_id();
+
+    // Resting bid @ 100 x 50.
+    auto bid = dex_calldata(/*bid=*/0, /*price=*/100, /*qty=*/50, book);
+    auto rb = disp_->execute(0x100, bid, 100000);
+    ASSERT_TRUE(rb.ok);
+
+    // Incoming ask @ 100 x 50 → cross fully.
+    auto ask = dex_calldata(/*ask=*/1, /*price=*/100, /*qty=*/50, book);
+    auto ra = disp_->execute(0x100, ask, 100000);
+    ASSERT_TRUE(ra.ok);
+    ASSERT_EQ(ra.output.size(), 68u);
+    EXPECT_EQ(num_fills(ra.output), 1u);
+    EXPECT_EQ(filled_qty(ra.output), 50u);
+    EXPECT_EQ(avg_price(ra.output), 100u);
+    EXPECT_EQ(ra.gas_used, 1500u + 350u);
+}
+
+TEST_F(PrecompileTest, DexMatchPartialFill)
+{
+    const auto book = fresh_book_id();
+
+    // Two resting bids @ 100 x 30 and @ 99 x 30.
+    auto b1 = dex_calldata(0, 100, 30, book);
+    auto b2 = dex_calldata(0, 99,  30, book);
+    EXPECT_TRUE(disp_->execute(0x100, b1, 100000).ok);
+    EXPECT_TRUE(disp_->execute(0x100, b2, 100000).ok);
+
+    // Incoming ask @ 99 x 50 → fills 30 @ 100, then 20 @ 99.
+    auto ask = dex_calldata(1, 99, 50, book);
+    auto r = disp_->execute(0x100, ask, 100000);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(num_fills(r.output), 2u);
+    EXPECT_EQ(filled_qty(r.output), 50u);
+    // VWAP = (30*100 + 20*99) / 50 = (3000 + 1980) / 50 = 99 (integer division).
+    EXPECT_EQ(avg_price(r.output), 99u);
+}
+
+TEST_F(PrecompileTest, DexMatchOutOfGas)
+{
+    const auto book = fresh_book_id();
+    const auto in = dex_calldata(0, 100, 50, book);
+    const auto r = disp_->execute(0x100, in, 100);  // < 1500
+    EXPECT_TRUE(r.out_of_gas);
+    EXPECT_FALSE(r.ok);
+}

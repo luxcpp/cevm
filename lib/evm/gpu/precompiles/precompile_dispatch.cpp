@@ -107,6 +107,7 @@ extern "C" __attribute__((weak)) void evm_precompile_install_cuda(void* dispatch
 extern "C" __attribute__((weak)) void evm_precompile_install_bls12_381_metal(void* dispatcher);
 extern "C" __attribute__((weak)) void evm_precompile_install_bls12_381_cuda(void* dispatcher);
 extern "C" __attribute__((weak)) void evm_precompile_install_point_eval_metal(void* dispatcher);
+extern "C" __attribute__((weak)) void evm_precompile_install_dex_match_metal(void* dispatcher);
 }  // namespace
 
 std::unique_ptr<PrecompileDispatcher> PrecompileDispatcher::create()
@@ -120,6 +121,8 @@ std::unique_ptr<PrecompileDispatcher> PrecompileDispatcher::create()
         evm_precompile_install_bls12_381_metal(d.get());
     if (evm_precompile_install_point_eval_metal)
         evm_precompile_install_point_eval_metal(d.get());
+    if (evm_precompile_install_dex_match_metal)
+        evm_precompile_install_dex_match_metal(d.get());
 #endif
 #if defined(EVM_CUDA)
     if (evm_precompile_install_cuda)
