@@ -83,11 +83,12 @@ struct HostStatePage {
     std::vector<uint8_t> data;
 };
 
+// CERT-021/006/007 (v0.42): round + stake widened to uint64.
 struct HostVote {
     uint32_t validator_index = 0;
-    uint32_t round = 0;
-    uint32_t stake_weight = 0;
-    uint32_t sig_kind = 0;        ///< 0=BLS, 1=ML-DSA, 2=Ringtail
+    uint32_t sig_kind = 0;        ///< 0=BLS, 1=Ringtail, 2=ML-DSA
+    uint64_t round = 0;           ///< MAC-bound full uint64 (CERT-021)
+    uint64_t stake_weight = 0;    ///< MAC-bound (CERT-006); uint64 (CERT-007)
     uint8_t  block_hash[32]{};
     std::vector<uint8_t> signature;
 };
