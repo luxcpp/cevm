@@ -47,10 +47,18 @@ namespace evm::gpu::precompile
 {
 
 /// Lowest precompile address (ECRECOVER).
-inline constexpr uint8_t kFirstPrecompile = 0x01;
+inline constexpr uint16_t kFirstPrecompile = 0x01;
 
-/// Highest precompile address handled by this dispatcher (BLS12_MAP_FP2_G2).
-inline constexpr uint8_t kLastPrecompile = 0x11;
+/// Highest standard EVM precompile address (BLS12_MAP_FP2_G2).
+inline constexpr uint16_t kLastStandardPrecompile = 0x11;
+
+/// Highest precompile address handled by this dispatcher. The range
+/// 0x100..0x1ff is reserved for Lux custom precompiles (DEX_MATCH at 0x100,
+/// future settlement / liquidity / TWAP entries).
+inline constexpr uint16_t kLastPrecompile = 0x1ff;
+
+/// Lowest Lux custom precompile address (DEX_MATCH).
+inline constexpr uint16_t kFirstLuxPrecompile = 0x100;
 
 /// Result of a precompile invocation.
 ///
@@ -91,22 +99,22 @@ public:
 
     /// Execute a precompile.
     ///
-    /// @param address    Precompile address byte (1..0x11).
+    /// @param address    Precompile address (1..0x11 standard, 0x100..0x1ff Lux).
     /// @param input      Calldata.
     /// @param gas_limit  Gas available for the call.
     /// @return           Execution result.
-    virtual Result execute(uint8_t address,
+    virtual Result execute(uint16_t address,
                            std::span<const uint8_t> input,
                            uint64_t gas_limit) const = 0;
 
-    /// True if a precompile is registered (always true for 0x01..0x11).
-    virtual bool available(uint8_t address) const = 0;
+    /// True if a precompile is registered at this address.
+    virtual bool available(uint16_t address) const = 0;
 
     /// Backend bound to a given precompile.
-    virtual Backend backend(uint8_t address) const = 0;
+    virtual Backend backend(uint16_t address) const = 0;
 
     /// Human-readable backend name for diagnostics ("metal", "cuda", "cpu").
-    const char* backend_name(uint8_t address) const noexcept
+    const char* backend_name(uint16_t address) const noexcept
     {
         return precompile::backend_name(backend(address));
     }

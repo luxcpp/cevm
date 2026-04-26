@@ -18,7 +18,7 @@
 namespace evm::gpu::precompile
 {
 extern "C" void evm_precompile_set_impl(
-    void* dispatcher, uint8_t address, Result (*fn)(std::span<const uint8_t>, uint64_t),
+    void* dispatcher, uint16_t address, Result (*fn)(std::span<const uint8_t>, uint64_t),
     int backend_id) noexcept;
 
 // CPU fallback (defined in ecrecover_cpu.cpp).

@@ -85,4 +85,7 @@ Result bls12_pairing_cpu(std::span<const uint8_t>, uint64_t);
 Result bls12_map_fp_to_g1_cpu(std::span<const uint8_t>, uint64_t);
 Result bls12_map_fp2_to_g2_cpu(std::span<const uint8_t>, uint64_t);
 
+// Lux custom precompile (0x100). Defined in dex_match_cpu.cpp.
+Result dex_match_cpu(std::span<const uint8_t>, uint64_t);
+
 }  // namespace evm::gpu::precompile

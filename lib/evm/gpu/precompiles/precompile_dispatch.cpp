@@ -49,45 +49,52 @@ public:
         impls_[0x10] = &bls12_map_fp_to_g1_cpu;
         impls_[0x11] = &bls12_map_fp2_to_g2_cpu;
 
-        for (size_t i = kFirstPrecompile; i <= kLastPrecompile; ++i)
+        // Lux custom range (0x100..0x1ff). DEX_MATCH at 0x100.
+        impls_[0x100] = &dex_match_cpu;
+
+        for (size_t i = kFirstPrecompile; i <= kLastStandardPrecompile; ++i)
             backends_[i] = Backend::Cpu;
+        backends_[0x100] = Backend::Cpu;
     }
 
-    void set(uint8_t addr, Impl fn, Backend b) noexcept
+    void set(uint16_t addr, Impl fn, Backend b) noexcept
     {
-        if (addr >= kFirstPrecompile && addr <= kLastPrecompile && fn)
+        if (addr <= kLastPrecompile && fn)
         {
             impls_[addr] = fn;
             backends_[addr] = b;
         }
     }
 
-    Result execute(uint8_t address,
+    Result execute(uint16_t address,
                    std::span<const uint8_t> input,
                    uint64_t gas_limit) const override
     {
-        if (address < kFirstPrecompile || address > kLastPrecompile)
+        if (address > kLastPrecompile)
             return Result{};
         const auto fn = impls_[address];
         if (!fn) return Result{};
         return fn(input, gas_limit);
     }
 
-    bool available(uint8_t address) const override
+    bool available(uint16_t address) const override
     {
-        if (address < kFirstPrecompile || address > kLastPrecompile) return false;
+        if (address > kLastPrecompile) return false;
         return impls_[address] != nullptr;
     }
 
-    Backend backend(uint8_t address) const override
+    Backend backend(uint16_t address) const override
     {
-        if (address < kFirstPrecompile || address > kLastPrecompile) return Backend::None;
+        if (address > kLastPrecompile) return Backend::None;
         return backends_[address];
     }
 
 private:
-    std::array<Impl, 256>    impls_{};
-    std::array<Backend, 256> backends_{};
+    // 512 entries: 0x000..0x1ff covers the standard range plus the Lux
+    // custom range. Indexed directly by address; sparse but keeps lookup
+    // branch-free.
+    std::array<Impl, 512>    impls_{};
+    std::array<Backend, 512> backends_{};
 };
 
 }  // namespace
@@ -125,11 +132,12 @@ std::unique_ptr<PrecompileDispatcher> PrecompileDispatcher::create()
 }
 
 // Public installer hook used by GPU wrappers (ecrecover_metal.mm,
-// ecrecover_cuda.cpp). Lets a wrapper override a single precompile entry.
+// ecrecover_cuda.cpp, dex_match_metal.mm, ...). Lets a wrapper override a
+// single precompile entry.
 //
 // backend_id matches the Backend enum: 1=Cpu, 2=Metal, 3=Cuda.
 extern "C" void evm_precompile_set_impl(
-    void* dispatcher, uint8_t address, Impl fn, int backend_id) noexcept
+    void* dispatcher, uint16_t address, Impl fn, int backend_id) noexcept
 {
     if (!dispatcher) return;
     auto* d = static_cast<DispatcherImpl*>(dispatcher);
