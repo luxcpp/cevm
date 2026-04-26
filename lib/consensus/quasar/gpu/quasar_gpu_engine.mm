@@ -40,6 +40,14 @@ constexpr uint32_t kItemSizes[] = {
     sizeof(IngressTx), sizeof(DecodedTx), sizeof(VerifiedTx), sizeof(VerifiedTx),
     sizeof(ExecResult), sizeof(ExecResult), sizeof(ExecResult), sizeof(CommitItem),
     sizeof(StateRequest), sizeof(StatePage), sizeof(VoteIngress), sizeof(QuorumCert),
+    // v0.44 — five new chain-transition services. Each ring carries
+    // ChainTransitionItem-sized records (32-byte root). The substrate doesn't
+    // process them yet (host writes the descriptor field directly); the rings
+    // exist as work-queue addresses for the per-VM ingress path landing in
+    // v0.45+. Use the smallest stable record (IngressTx envelope) so the
+    // arena layout is conservative.
+    sizeof(IngressTx), sizeof(IngressTx), sizeof(IngressTx),
+    sizeof(IngressTx), sizeof(IngressTx),
 };
 static_assert(sizeof(kItemSizes) / sizeof(kItemSizes[0]) == kNumServices,
               "kItemSizes must cover every ServiceId");
@@ -229,16 +237,24 @@ public:
             || !round_.cert_master_secret_buf)
             return QuasarRoundHandle{0};
 
-        // CERT-003: compute certificate_subject host-side and write into desc.
-        // Both kernel and host MUST agree byte-for-byte; the verifier compares
-        // v.subject == desc->certificate_subject and rejects mismatch.
+        // CERT-003 / v0.44: compute certificate_subject host-side and write
+        // into desc. Both kernel and host MUST agree byte-for-byte; the
+        // verifier compares v.subject == desc->certificate_subject and
+        // rejects mismatch. v0.44 binds all 9 LP-134 chain roots in canonical
+        // P, C, X, Q, Z, A, B, M, F order so cross-chain replay protection
+        // covers the entire substrate.
         auto subj = quasar::gpu::sig::compute_certificate_subject(
             round_.desc.chain_id, round_.desc.epoch, round_.desc.round,
             round_.desc.mode,
-            round_.desc.pchain_validator_root,
-            round_.desc.qchain_ceremony_root,
-            round_.desc.zchain_vk_root,
-            round_.desc.parent_block_hash,
+            round_.desc.pchain_validator_root,    // P
+            round_.desc.parent_block_hash,        // C — this round's parent
+            round_.desc.xchain_execution_root,    // X
+            round_.desc.qchain_ceremony_root,     // Q
+            round_.desc.zchain_vk_root,           // Z
+            round_.desc.achain_state_root,        // A
+            round_.desc.bchain_state_root,        // B
+            round_.desc.mchain_state_root,        // M
+            round_.desc.fchain_state_root,        // F
             round_.desc.parent_state_root,
             round_.desc.parent_execution_root,
             round_.desc.gas_limit, round_.desc.base_fee);
@@ -271,6 +287,20 @@ public:
 
         auto* result = static_cast<QuasarRoundResult*>([round_.result_buf contents]);
         result->mode = desc.mode;
+        // v0.44 — echo the 9 canonical chain roots + cert subject so consumers
+        // can reconstruct the cert subject without re-parsing the descriptor.
+        // Order matches compute_certificate_subject (P, C, X, Q, Z, A, B, M, F).
+        std::memcpy(result->pchain_root_echo, round_.desc.pchain_validator_root, 32);
+        std::memcpy(result->cchain_root_echo, round_.desc.parent_block_hash,     32);
+        std::memcpy(result->xchain_root_echo, round_.desc.xchain_execution_root, 32);
+        std::memcpy(result->qchain_root_echo, round_.desc.qchain_ceremony_root,  32);
+        std::memcpy(result->zchain_root_echo, round_.desc.zchain_vk_root,        32);
+        std::memcpy(result->achain_root_echo, round_.desc.achain_state_root,     32);
+        std::memcpy(result->bchain_root_echo, round_.desc.bchain_state_root,     32);
+        std::memcpy(result->mchain_root_echo, round_.desc.mchain_state_root,     32);
+        std::memcpy(result->fchain_root_echo, round_.desc.fchain_state_root,     32);
+        std::memcpy(result->certificate_subject_echo,
+                    round_.desc.certificate_subject, 32);
 
         auto* hdrs = static_cast<RingHeader*>([round_.hdrs_buf contents]);
         for (uint32_t s = 0; s < kNumServices; ++s) {

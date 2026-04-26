@@ -127,19 +127,35 @@ inline std::vector<uint8_t> sign(uint32_t sig_kind,
     return sig;
 }
 
-// Compute desc->certificate_subject per CERT-003 spec. Both kernel and host
-// MUST agree byte-for-byte.
+// Compute desc->certificate_subject per CERT-003 / v0.44 spec. Both kernel
+// and host MUST agree byte-for-byte. The 9-chain canonical order is fixed:
+// P, C, X, Q, Z, A, B, M, F. C reuses parent_block_hash because the cevm
+// round IS the C-chain advance.
+//
+// Hash input (LE everywhere):
+//   chain_id(8) || epoch(8) || round(8) || mode(4)
+//     || P(32) || C(32) || X(32) || Q(32) || Z(32)
+//     || A(32) || B(32) || M(32) || F(32)
+//     || parent_state_root(32) || parent_execution_root(32)
+//     || gas_limit(8) || base_fee(8)
+//
+// Total:  8+8+8+4 + 32*11 + 8+8 = 396 bytes.
 inline std::array<uint8_t, 32> compute_certificate_subject(
     uint64_t chain_id, uint64_t epoch, uint64_t round, uint32_t mode,
-    const uint8_t pchain_validator_root[32],
-    const uint8_t qchain_ceremony_root[32],
-    const uint8_t zchain_vk_root[32],
-    const uint8_t parent_block_hash[32],
+    const uint8_t pchain_validator_root[32],   ///< P
+    const uint8_t cchain_block_root[32],       ///< C — parent_block_hash
+    const uint8_t xchain_execution_root[32],   ///< X
+    const uint8_t qchain_ceremony_root[32],    ///< Q
+    const uint8_t zchain_vk_root[32],          ///< Z
+    const uint8_t achain_state_root[32],       ///< A
+    const uint8_t bchain_state_root[32],       ///< B
+    const uint8_t mchain_state_root[32],       ///< M
+    const uint8_t fchain_state_root[32],       ///< F
     const uint8_t parent_state_root[32],
     const uint8_t parent_execution_root[32],
     uint64_t gas_limit, uint64_t base_fee)
 {
-    uint8_t buf[8 + 8 + 8 + 4 + 32 + 32 + 32 + 32 + 32 + 32 + 8 + 8];
+    uint8_t buf[8 + 8 + 8 + 4 + 32 * 11 + 8 + 8];
     size_t off = 0;
     auto put_le64 = [&](uint64_t v) {
         for (size_t k = 0; k < 8; ++k) buf[off + k] = uint8_t((v >> (k * 8u)) & 0xFFu);
@@ -157,10 +173,16 @@ inline std::array<uint8_t, 32> compute_certificate_subject(
     put_le64(epoch);
     put_le64(round);
     put_le32(mode);
+    // Canonical 9-chain order: P, C, X, Q, Z, A, B, M, F.
     put_32(pchain_validator_root);
+    put_32(cchain_block_root);
+    put_32(xchain_execution_root);
     put_32(qchain_ceremony_root);
     put_32(zchain_vk_root);
-    put_32(parent_block_hash);
+    put_32(achain_state_root);
+    put_32(bchain_state_root);
+    put_32(mchain_state_root);
+    put_32(fchain_state_root);
     put_32(parent_state_root);
     put_32(parent_execution_root);
     put_le64(gas_limit);

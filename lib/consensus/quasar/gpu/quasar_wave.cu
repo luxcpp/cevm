@@ -30,7 +30,7 @@ namespace quasar::gpu::cuda {
 // Layout constants (must match quasar_gpu_layout.hpp)
 // ============================================================================
 
-__device__ static constexpr uint32_t kNumServices       = 12u;
+__device__ static constexpr uint32_t kNumServices       = 17u;  // v0.44
 __device__ static constexpr uint32_t kMaxRWSetPerTx     = 8u;
 __device__ static constexpr uint32_t kMaxDagParents     = 4u;
 __device__ static constexpr uint32_t kMaxDagChildren    = 16u;
@@ -207,6 +207,9 @@ struct __align__(16) QuorumCert {
     uint8_t  agg_signature[96];
 };
 
+// v0.44: descriptor must match quasar_gpu_layout.hpp byte-for-byte. v0.42
+// added epoch / P-Q-Z roots / cert subject; v0.44 adds X/A/B/M/F roots so
+// the cert subject covers all 9 LP-134 chains.
 struct __align__(16) QuasarRoundDescriptor {
     uint64_t chain_id;
     uint64_t round;
@@ -221,6 +224,19 @@ struct __align__(16) QuasarRoundDescriptor {
     uint8_t  parent_block_hash[32];
     uint8_t  parent_state_root[32];
     uint8_t  parent_execution_root[32];
+    uint64_t epoch;
+    uint64_t total_stake;
+    uint32_t validator_count;
+    uint32_t _pad0;
+    uint8_t  pchain_validator_root[32];
+    uint8_t  qchain_ceremony_root[32];
+    uint8_t  zchain_vk_root[32];
+    uint8_t  certificate_subject[32];
+    uint8_t  xchain_execution_root[32];
+    uint8_t  achain_state_root[32];
+    uint8_t  bchain_state_root[32];
+    uint8_t  mchain_state_root[32];
+    uint8_t  fchain_state_root[32];
 };
 
 struct __align__(16) QuasarRoundResult {

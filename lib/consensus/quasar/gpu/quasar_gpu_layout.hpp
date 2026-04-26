@@ -39,19 +39,31 @@ namespace quasar::gpu {
 // items per epoch. Add new services at the end — never reorder or recycle.
 
 enum class ServiceId : uint32_t {
-    Ingress      = 0,   ///< raw tx blobs from host
-    Decode       = 1,   ///< decoded txs awaiting sender recovery
-    Crypto       = 2,   ///< sig-verified txs awaiting Block-STM scheduling
-    DagReady     = 3,   ///< MVCC ready set — txs whose parents committed
-    Exec         = 4,   ///< txs being executed (EVM fibers running)
-    Validate     = 5,   ///< executed txs awaiting Block-STM validation
-    Repair       = 6,   ///< validation-failed txs awaiting re-execution
-    Commit       = 7,   ///< validated txs ready to commit + hash
-    StateRequest = 8,   ///< GPU-emitted cold-state requests (out)
-    StateResp    = 9,   ///< host-emitted cold-state responses (in)
-    Vote         = 10,  ///< raw consensus votes from host
-    QuorumOut    = 11,  ///< GPU-emitted quorum certs (out)
-    Count        = 12
+    Ingress              = 0,   ///< raw tx blobs from host
+    Decode               = 1,   ///< decoded txs awaiting sender recovery
+    Crypto               = 2,   ///< sig-verified txs awaiting Block-STM scheduling
+    DagReady             = 3,   ///< MVCC ready set — txs whose parents committed
+    Exec                 = 4,   ///< txs being executed (EVM fibers running)
+    Validate             = 5,   ///< executed txs awaiting Block-STM validation
+    Repair               = 6,   ///< validation-failed txs awaiting re-execution
+    Commit               = 7,   ///< validated txs ready to commit + hash
+    StateRequest         = 8,   ///< GPU-emitted cold-state requests (out)
+    StateResp            = 9,   ///< host-emitted cold-state responses (in)
+    Vote                 = 10,  ///< raw consensus votes from host
+    QuorumOut            = 11,  ///< GPU-emitted quorum certs (out)
+    // v0.44 — wave-tick services that compose per-chain transition roots into
+    // the round descriptor. Host posts a ChainTransitionItem per chain; the
+    // GPU substrate copies it into the descriptor's <chain>_root field. Order
+    // is canonical (P, X, A, B, M); C/Q/Z/F either already exist
+    // (parent_block_hash, qchain_ceremony_root, zchain_vk_root) or carry their
+    // own field (fchain_state_root). Subject keccak in compute_certificate_subject
+    // covers all 9 in canonical P, C, X, Q, Z, A, B, M, F order.
+    PlatformVMTransition = 12,  ///< PlatformVM v0.53.x → pchain_validator_root
+    XVMTransition        = 13,  ///< XVM v0.55.x        → xchain_execution_root
+    AIVMTransition       = 14,  ///< AIVM v0.58.x       → achain_state_root
+    BridgeVMTransition   = 15,  ///< BridgeVM v0.59.x   → bchain_state_root
+    MPCVMTransition      = 16,  ///< MPCVM v0.60.x      → mchain_state_root
+    Count                = 17
 };
 
 inline constexpr uint32_t kNumServices = static_cast<uint32_t>(ServiceId::Count);
@@ -405,13 +417,29 @@ struct alignas(16) QuasarRoundDescriptor {
     uint8_t  pchain_validator_root[32];   ///< CERT-003: validator-set commitment
     uint8_t  qchain_ceremony_root[32];    ///< CERT-003: Ringtail ceremony
     uint8_t  zchain_vk_root[32];          ///< CERT-003: Z-Chain VK root
-    uint8_t  certificate_subject[32];     ///< CERT-003: host-precomputed
+    uint8_t  certificate_subject[32];     ///< CERT-003 / v0.44: host-precomputed
                                           ///< keccak(chain_id||epoch||round||
-                                          ///< mode||P||Q||Z||parent_*||
-                                          ///< gas_limit||base_fee). Verifier
-                                          ///< rejects v.subject != this.
+                                          ///< mode||P||C||X||Q||Z||A||B||M||F||
+                                          ///< parent_state||parent_execution||
+                                          ///< gas_limit||base_fee). Canonical
+                                          ///< 9-chain order: P, C, X, Q, Z,
+                                          ///< A, B, M, F. C uses
+                                          ///< parent_block_hash (this chain
+                                          ///< IS C); the rest are dedicated
+                                          ///< fields. Verifier rejects
+                                          ///< v.subject != this.
+    // v0.44 — five new per-chain transition roots. Each is the prior epoch's
+    // canonical commitment from the corresponding VM. Zero means "no
+    // contribution this round" (e.g. BridgeVM may lag by one epoch); the
+    // certificate_subject still binds the zero so a tampered descriptor
+    // produces a different cert.
+    uint8_t  xchain_execution_root[32];   ///< XVM v0.55.x       (X-Chain)
+    uint8_t  achain_state_root[32];       ///< AIVM v0.58.x      (A-Chain)
+    uint8_t  bchain_state_root[32];       ///< BridgeVM v0.59.x  (B-Chain)
+    uint8_t  mchain_state_root[32];       ///< MPCVM v0.60.x     (M-Chain)
+    uint8_t  fchain_state_root[32];       ///< FHEVM             (F-Chain)
 };
-static_assert(sizeof(QuasarRoundDescriptor) == 320,
+static_assert(sizeof(QuasarRoundDescriptor) == 480,
               "QuasarRoundDescriptor layout drift");
 
 // =============================================================================
@@ -462,6 +490,20 @@ struct alignas(16) QuasarRoundResult {
     uint8_t  mode_root[32];      ///< nova_root (Nova) or nebula_root
                                  ///< (Nebula DAG/Horizon prefix) — the
                                  ///< mode-specific commitment
+    // v0.44 — echo the 9 canonical chain roots used in certificate_subject.
+    // The cert binds these; the result returns them so downstream consumers
+    // (lux/consensus QuasarCert composer, audit trail) can reconstruct the
+    // exact subject without re-parsing the descriptor.
+    uint8_t  pchain_root_echo[32];
+    uint8_t  cchain_root_echo[32];   ///< == desc.parent_block_hash
+    uint8_t  xchain_root_echo[32];
+    uint8_t  qchain_root_echo[32];
+    uint8_t  zchain_root_echo[32];
+    uint8_t  achain_root_echo[32];
+    uint8_t  bchain_root_echo[32];
+    uint8_t  mchain_root_echo[32];
+    uint8_t  fchain_root_echo[32];
+    uint8_t  certificate_subject_echo[32];   ///< == desc.certificate_subject
     // CERT-004 — three lane bitmaps, each kValidatorBitmapBits bits wide.
     uint32_t validator_voted_bitmap[3][kValidatorBitmapWords];
 
@@ -478,8 +520,11 @@ struct alignas(16) QuasarRoundResult {
         return (uint64_t(quorum_stake_mldsa_hi) << 32) | uint64_t(quorum_stake_mldsa_lo);
     }
 };
+// v0.44 — layout: 64 atomic counters + 32 (mode/subject/dedup/repair counters
+// already counted) + 32*5 mode/state/receipts/execution/block roots + 32*10
+// nine canonical chain echoes + cert_subject_echo + 3-lane bitmap.
 static_assert(sizeof(QuasarRoundResult) ==
-              64 + 32 + 32 * 5 + 3 * kValidatorBitmapWords * 4,
+              64 + 32 + 32 * 5 + 32 * 10 + 3 * kValidatorBitmapWords * 4,
               "QuasarRoundResult layout drift");
 
 }  // namespace quasar::gpu

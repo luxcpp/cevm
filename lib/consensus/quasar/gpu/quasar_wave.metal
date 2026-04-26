@@ -40,7 +40,13 @@ using namespace metal;
 // Layout — must match quasar_gpu_layout.hpp byte-for-byte.
 // ============================================================================
 
-constant uint kNumServices       = 12u;
+// v0.44 — kNumServices grew to 17 with the addition of five per-chain
+// transition services (PlatformVMTransition .. MPCVMTransition). The new
+// rings are wave-tick addresses for future per-VM ingest; the substrate
+// passes through them with no work to do today (host writes the descriptor
+// roots directly), but they reserve the slot ordering so v0.45+ wiring is
+// purely additive.
+constant uint kNumServices       = 17u;
 constant uint kMaxRWSetPerTx     = 8u;
 constant uint kDefaultMvccSlots  = 8192u;
 constant uint kMaxDagParents     = 4u;
@@ -248,9 +254,12 @@ struct alignas(16) QuorumCert {
     uchar agg_signature[96];
 };
 
-// CERT-003 (v0.42): epoch + P/Q/Z roots + total_stake + validator_count +
-// host-precomputed certificate_subject. Verifier rejects vote with subject
-// != desc->certificate_subject (CERT-022).
+// CERT-003 (v0.42) + v0.44: epoch + P/Q/Z roots + total_stake + validator_count
+// + host-precomputed certificate_subject + 5 new per-chain transition roots
+// (X, A, B, M, F). Canonical 9-chain order in cert subject is P, C, X, Q, Z,
+// A, B, M, F where C reuses parent_block_hash. Verifier rejects vote with
+// subject != desc->certificate_subject (CERT-022). MUST match
+// quasar_gpu_layout.hpp byte-for-byte.
 struct alignas(16) QuasarRoundDescriptor {
     ulong chain_id;
     ulong round;
@@ -273,6 +282,12 @@ struct alignas(16) QuasarRoundDescriptor {
     uchar qchain_ceremony_root[32];
     uchar zchain_vk_root[32];
     uchar certificate_subject[32];
+    // v0.44 — five new per-chain transition roots.
+    uchar xchain_execution_root[32];
+    uchar achain_state_root[32];
+    uchar bchain_state_root[32];
+    uchar mchain_state_root[32];
+    uchar fchain_state_root[32];
 };
 
 // CERT-007/004/022 (v0.42): uint64-split stake counters, per-validator
@@ -311,6 +326,18 @@ struct alignas(16) QuasarRoundResult {
     uchar       receipts_root[32];
     uchar       execution_root[32];
     uchar       mode_root[32];
+    // v0.44 — 9-chain root echoes + cert subject echo. Canonical order
+    // matches compute_certificate_subject (P, C, X, Q, Z, A, B, M, F).
+    uchar       pchain_root_echo[32];
+    uchar       cchain_root_echo[32];
+    uchar       xchain_root_echo[32];
+    uchar       qchain_root_echo[32];
+    uchar       zchain_root_echo[32];
+    uchar       achain_root_echo[32];
+    uchar       bchain_root_echo[32];
+    uchar       mchain_root_echo[32];
+    uchar       fchain_root_echo[32];
+    uchar       certificate_subject_echo[32];
     atomic_uint validator_voted_bitmap[3][QUASAR_VALIDATOR_BITMAP_WORDS];
 };
 

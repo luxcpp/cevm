@@ -615,6 +615,26 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
+    # v0.44 — Quasar 9-chain integration. Validates the substrate wires
+    # every LP-134 chain's transition root into QuasarRoundDescriptor and
+    # the certificate_subject keccak in canonical P, C, X, Q, Z, A, B, M, F
+    # order. Five new ServiceId entries (PlatformVMTransition ..
+    # MPCVMTransition) reserve work-queue addresses for v0.45+ per-VM
+    # ingest. Same Metal-only pattern as quasar-gpu-engine-test.
+    add_executable(quasar-9chain-integration-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_9chain_integration_test.mm)
+    target_compile_features(quasar-9chain-integration-test PRIVATE cxx_std_20)
+    target_link_libraries(quasar-9chain-integration-test PRIVATE
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx cevm::precompiles
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(quasar-9chain-integration-test PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
     # v0.41 — real BLS12-381 aggregate verifier tests (Quasar 4.0
     # activation 2026-02-14). Replaces the v0.38 keccak-stub on the BLS
     # lane. Verifier is platform-independent (host blst), so the test is

@@ -385,14 +385,21 @@ void test_quasar_quorum_round_trip()
     auto r = e->run_until_done(h, 8);
     EXPECT("q.finalized", r.status == 1u);
 
-    // CERT-022: subject MUST equal desc->certificate_subject. Compute it
-    // host-side using the same recipe the engine wrote into the descriptor.
+    // CERT-022 / v0.44: subject MUST equal desc->certificate_subject.
+    // Compute it host-side using the same recipe the engine wrote into the
+    // descriptor — canonical 9-chain order P, C, X, Q, Z, A, B, M, F.
     auto subj_arr = quasar::gpu::sig::compute_certificate_subject(
         desc.chain_id, desc.epoch, desc.round, desc.mode,
-        desc.pchain_validator_root, desc.qchain_ceremony_root,
-        desc.zchain_vk_root,
-        desc.parent_block_hash, desc.parent_state_root,
-        desc.parent_execution_root,
+        desc.pchain_validator_root,    // P
+        desc.parent_block_hash,        // C
+        desc.xchain_execution_root,    // X
+        desc.qchain_ceremony_root,     // Q
+        desc.zchain_vk_root,           // Z
+        desc.achain_state_root,        // A
+        desc.bchain_state_root,        // B
+        desc.mchain_state_root,        // M
+        desc.fchain_state_root,        // F
+        desc.parent_state_root, desc.parent_execution_root,
         desc.gas_limit, desc.base_fee);
     uint8_t subject[32];
     std::memcpy(subject, subj_arr.data(), 32);
@@ -913,10 +920,20 @@ QuasarRoundDescriptor make_v42_desc(uint64_t round, uint64_t epoch = 1u)
 
 std::array<uint8_t, 32> v42_subject(const QuasarRoundDescriptor& d)
 {
+    // v0.44 — canonical 9-chain order P, C, X, Q, Z, A, B, M, F. C reuses
+    // parent_block_hash because the cevm round IS the C-chain advance.
     return quasar::gpu::sig::compute_certificate_subject(
         d.chain_id, d.epoch, d.round, d.mode,
-        d.pchain_validator_root, d.qchain_ceremony_root, d.zchain_vk_root,
-        d.parent_block_hash, d.parent_state_root, d.parent_execution_root,
+        d.pchain_validator_root,    // P
+        d.parent_block_hash,        // C
+        d.xchain_execution_root,    // X
+        d.qchain_ceremony_root,     // Q
+        d.zchain_vk_root,           // Z
+        d.achain_state_root,        // A
+        d.bchain_state_root,        // B
+        d.mchain_state_root,        // M
+        d.fchain_state_root,        // F
+        d.parent_state_root, d.parent_execution_root,
         d.gas_limit, d.base_fee);
 }
 
@@ -968,6 +985,12 @@ void test_cert003_subject_binds_descriptor()
     ok &= try_field("pchain_root",  [](QuasarRoundDescriptor& d){ d.pchain_validator_root[0] ^= 0xFF; });
     ok &= try_field("qchain_root",  [](QuasarRoundDescriptor& d){ d.qchain_ceremony_root[0]  ^= 0xFF; });
     ok &= try_field("zchain_root",  [](QuasarRoundDescriptor& d){ d.zchain_vk_root[0]        ^= 0xFF; });
+    // v0.44 — five new per-chain transition roots, all bound into subject.
+    ok &= try_field("xchain_root",  [](QuasarRoundDescriptor& d){ d.xchain_execution_root[0] ^= 0xFF; });
+    ok &= try_field("achain_root",  [](QuasarRoundDescriptor& d){ d.achain_state_root[0]     ^= 0xFF; });
+    ok &= try_field("bchain_root",  [](QuasarRoundDescriptor& d){ d.bchain_state_root[0]     ^= 0xFF; });
+    ok &= try_field("mchain_root",  [](QuasarRoundDescriptor& d){ d.mchain_state_root[0]     ^= 0xFF; });
+    ok &= try_field("fchain_root",  [](QuasarRoundDescriptor& d){ d.fchain_state_root[0]     ^= 0xFF; });
     ok &= try_field("parent_block", [](QuasarRoundDescriptor& d){ d.parent_block_hash[0]     ^= 0xFF; });
     ok &= try_field("gas_limit",    [](QuasarRoundDescriptor& d){ d.gas_limit = 60'000'000u; });
     ok &= try_field("base_fee",     [](QuasarRoundDescriptor& d){ d.base_fee  = 200u; });
