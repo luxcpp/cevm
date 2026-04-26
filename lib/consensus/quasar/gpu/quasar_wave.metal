@@ -217,11 +217,14 @@ struct alignas(16) StatePage {
     uchar data[64];
 };
 
+// CERT-021/006/007: round + stake widened to uint64; stake_weight is now
+// MAC-bound. Layout MUST match VoteIngress in quasar_gpu_layout.hpp.
 struct alignas(16) VoteIngress {
     uint  validator_index;
-    uint  round;
-    uint  stake_weight;
     uint  sig_kind;
+    ulong round;             ///< CERT-021
+    ulong stake_weight;      ///< CERT-006/007
+    ulong _pad0;
     uchar subject[32];
     uchar signature[96];
 };
@@ -238,6 +241,9 @@ struct alignas(16) QuorumCert {
     uchar agg_signature[96];
 };
 
+// CERT-003 (v0.42): epoch + P/Q/Z roots + total_stake + validator_count +
+// host-precomputed certificate_subject. Verifier rejects vote with subject
+// != desc->certificate_subject (CERT-022).
 struct alignas(16) QuasarRoundDescriptor {
     ulong chain_id;
     ulong round;
@@ -252,7 +258,23 @@ struct alignas(16) QuasarRoundDescriptor {
     uchar parent_block_hash[32];
     uchar parent_state_root[32];
     uchar parent_execution_root[32];
+    ulong epoch;                       ///< CERT-010
+    ulong total_stake;                 ///< CERT-020
+    uint  validator_count;             ///< CERT-023
+    uint  _pad0;
+    uchar pchain_validator_root[32];
+    uchar qchain_ceremony_root[32];
+    uchar zchain_vk_root[32];
+    uchar certificate_subject[32];
 };
+
+// CERT-007/004/022 (v0.42): uint64-split stake counters, per-validator
+// dedup bitmaps (BLS / Ringtail / MLDSA). MUST match QuasarRoundResult in
+// quasar_gpu_layout.hpp byte-for-byte.
+#define QUASAR_VALIDATOR_BITMAP_BITS  256
+#define QUASAR_VALIDATOR_BITMAP_WORDS 8
+constant uint kValidatorBitmapBits  = QUASAR_VALIDATOR_BITMAP_BITS;
+constant uint kValidatorBitmapWords = QUASAR_VALIDATOR_BITMAP_WORDS;
 
 struct alignas(16) QuasarRoundResult {
     atomic_uint status;
@@ -267,15 +289,22 @@ struct alignas(16) QuasarRoundResult {
     atomic_uint quorum_status_bls;
     atomic_uint quorum_status_mldsa;
     atomic_uint quorum_status_rt;
-    atomic_uint quorum_stake_bls;
-    atomic_uint quorum_stake_mldsa;
-    atomic_uint quorum_stake_rt;
+    atomic_uint quorum_stake_bls_lo;
+    atomic_uint quorum_stake_bls_hi;
+    atomic_uint quorum_stake_mldsa_lo;
+    atomic_uint quorum_stake_mldsa_hi;
+    atomic_uint quorum_stake_rt_lo;
+    atomic_uint quorum_stake_rt_hi;
     uint        mode;
+    atomic_uint subject_mismatch_count;
+    atomic_uint dedup_skipped_count;
+    uint        _pad1;
     uchar       block_hash[32];
     uchar       state_root[32];
     uchar       receipts_root[32];
     uchar       execution_root[32];
     uchar       mode_root[32];
+    atomic_uint validator_voted_bitmap[3][QUASAR_VALIDATOR_BITMAP_WORDS];
 };
 
 // Per-tx fiber slot — kept resident across wave ticks until the tx
@@ -2197,11 +2226,15 @@ static inline uint drain_commit(
 }
 
 // drain_vote — host-supplied votes. Per-lane stake aggregation.
-// Real BLS / ML-DSA / Ringtail batch verifiers slot in by replacing
-// `verify_signature_stub` with a call into the existing luxcpp/metal
-// kernels. For v0.37 the substrate proves the round-trip:
-// host posts vote → kernel checks subject matches block_hash that the
-// commit stage produced → stake gets accumulated → 2f+1 → QC.
+//
+// v0.42 (CERT-001..CERT-023):
+//   - CERT-022: subject must equal desc->certificate_subject — reject mismatch.
+//   - CERT-023: validator_index must be < desc->validator_count
+//     and < kValidatorBitmapBits.
+//   - CERT-004: per-validator dedup bitmap (per lane). atomic_or test-and-set.
+//   - CERT-007: uint64-split stake accumulator with carry from lo to hi
+//     (matches the gas_used pattern; MSL has no native 64-bit atomics).
+//   - CERT-020: threshold = (desc->total_stake * 2) / 3, NOT base_fee.
 static inline uint drain_vote(
     device RingHeader* vote_hdr,    device VoteIngress* vote_items,
     device const uint* vote_verified,
@@ -2218,28 +2251,79 @@ static inline uint drain_vote(
         if (!ring_try_pop(vote_hdr, vote_items, v)) break;
         uint vidx = head_pre & (vote_verified_capacity - 1u);
         if (vote_verified[vidx] == 0u) { ++processed; continue; }
-        // Per-lane stake aggregation. Each sig_kind owns one stake counter
-        // on QuasarRoundResult; the substrate emits a QC when stake >=
-        // ceil(2 * gas_limit_unit / 3) (host-supplied total stake unit).
-        device atomic_uint* stake_acc = nullptr;
-        device atomic_uint* status_acc = nullptr;
-        if (v.sig_kind == 0u) { stake_acc = &result->quorum_stake_bls;   status_acc = &result->quorum_status_bls; }
-        else if (v.sig_kind == 1u) { stake_acc = &result->quorum_stake_rt;    status_acc = &result->quorum_status_rt; }
-        else { stake_acc = &result->quorum_stake_mldsa; status_acc = &result->quorum_status_mldsa; }
-        uint prev_stake = atomic_fetch_add_explicit(stake_acc, v.stake_weight, memory_order_relaxed);
-        uint new_stake = prev_stake + v.stake_weight;
-        // Quorum threshold: 2/3 of desc->base_fee (we co-opt this slot as
-        // total_stake_unit in v0.37 since the descriptor doesn't have a
-        // stake field yet). Hosts pass total stake via base_fee for now.
-        uint threshold = uint((desc->base_fee * 2UL) / 3UL);
-        if (prev_stake < threshold && new_stake >= threshold) {
-            // Emit a per-lane QC.
+
+        // CERT-022 — subject must match descriptor's certificate_subject.
+        uchar diff = 0u;
+        for (uint k = 0u; k < 32u; ++k) {
+            diff |= uchar(v.subject[k] ^ desc->certificate_subject[k]);
+        }
+        if (diff != 0u) {
+            atomic_fetch_add_explicit(&result->subject_mismatch_count, 1u,
+                                      memory_order_relaxed);
+            ++processed;
+            continue;
+        }
+
+        // CERT-023 — bound validator_index against descriptor + bitmap width.
+        uint vi = v.validator_index;
+        if (vi >= desc->validator_count || vi >= kValidatorBitmapBits) {
+            ++processed;
+            continue;
+        }
+
+        // CERT-005/018 — bound sig_kind to the 3 active lanes; default reject.
+        uint lane = v.sig_kind;
+        if (lane > 2u) { ++processed; continue; }
+
+        // CERT-004 — per-validator dedup. atomic_fetch_or test-and-set on
+        // a flat [3*WORDS] bitmap (linear lane*WORDS + word_idx).
+        uint word_idx = lane * uint(QUASAR_VALIDATOR_BITMAP_WORDS) + (vi >> 5u);
+        uint bit_pos  = vi & 31u;
+        uint bit_mask = 1u << bit_pos;
+        device atomic_uint* bm_base = &result->validator_voted_bitmap[0][0];
+        uint prev_bits = atomic_fetch_or_explicit(bm_base + word_idx, bit_mask,
+                                                  memory_order_relaxed);
+        if ((prev_bits & bit_mask) != 0u) {
+            atomic_fetch_add_explicit(&result->dedup_skipped_count, 1u,
+                                      memory_order_relaxed);
+            ++processed;
+            continue;
+        }
+
+        // CERT-007 — uint64-split stake accumulator with carry.
+        device atomic_uint* stake_lo = &result->quorum_stake_bls_lo;
+        device atomic_uint* stake_hi = &result->quorum_stake_bls_hi;
+        device atomic_uint* status_acc = &result->quorum_status_bls;
+        if (lane == 1u) {
+            stake_lo = &result->quorum_stake_rt_lo;
+            stake_hi = &result->quorum_stake_rt_hi;
+            status_acc = &result->quorum_status_rt;
+        } else if (lane == 2u) {
+            stake_lo = &result->quorum_stake_mldsa_lo;
+            stake_hi = &result->quorum_stake_mldsa_hi;
+            status_acc = &result->quorum_status_mldsa;
+        }
+        uint sw_lo = uint(v.stake_weight & 0xFFFFFFFFul);
+        uint sw_hi = uint((v.stake_weight >> 32u) & 0xFFFFFFFFul);
+        uint prev_lo = atomic_fetch_add_explicit(stake_lo, sw_lo,
+                                                 memory_order_relaxed);
+        uint new_lo = prev_lo + sw_lo;
+        if (new_lo < prev_lo) {
+            atomic_fetch_add_explicit(stake_hi, 1u, memory_order_relaxed);
+        }
+        if (sw_hi != 0u) {
+            atomic_fetch_add_explicit(stake_hi, sw_hi, memory_order_relaxed);
+        }
+        ulong threshold_u = (desc->total_stake * 2ul) / 3ul;
+        uint threshold = (threshold_u >= ulong(0xFFFFFFFFu)) ?
+                         0xFFFFFFFFu : uint(threshold_u);
+        if (prev_lo < threshold && new_lo >= threshold) {
             QuorumCert qc;
             qc.round         = uint(desc->round);
             qc.status        = 1u;
-            qc.signers_count = 1u;        ///< host re-counts on receipt
-            qc.total_stake   = new_stake;
-            qc.sig_kind      = v.sig_kind;
+            qc.signers_count = 1u;
+            qc.total_stake   = new_lo;
+            qc.sig_kind      = lane;
             qc._pad0         = 0u;
             qc._pad1         = 0UL;
             for (uint k = 0u; k < 32u; ++k) qc.subject[k] = v.subject[k];
@@ -2275,10 +2359,11 @@ constant uchar kQuasarMLDSADomain[16] = {
     'Q','U','A','S','A','R','-','M','D','S','-','v','0','3','8',0
 };
 
-constant uchar kQuasarMasterSecret[32] = {
-    0x51,0x55,0x41,0x53,0x41,0x52,0x2D,0x76,0x30,0x33,0x38,0x2D,0x6D,0x61,0x73,0x74,
-    0x65,0x72,0x2D,0x73,0x65,0x63,0x72,0x65,0x74,0x2D,0x73,0x68,0x61,0x72,0x65,0x64,
-};
+// CERT-001 (v0.42): the master secret is no longer in source. Hosts populate
+// `cert_master_secret` (buffer(5) of quasar_verify_votes_kernel) from the
+// QUASAR_MASTER_SECRET environment variable (placeholder until KMS lands at
+// v0.43). The kernel reads from that buffer; nothing about the master secret
+// is hard-coded. (CERT-018: also gates lane membership.)
 
 static inline void quasar_pick_domain(uint sig_kind, thread uchar* out16)
 {
@@ -2294,34 +2379,51 @@ static inline void quasar_pick_domain(uint sig_kind, thread uchar* out16)
 static inline void quasar_derive_secret(uint sig_kind,
                                         ulong chain_id,
                                         uint validator_index,
+                                        device const uchar* master_secret,
                                         thread uchar* secret_out)
 {
     thread uchar buf[16 + 8 + 4 + 32];
     quasar_pick_domain(sig_kind, buf);
     for (uint k = 0u; k < 8u; ++k) buf[16u + k] = uchar((chain_id >> (k * 8u)) & 0xFFu);
     for (uint k = 0u; k < 4u; ++k) buf[24u + k] = uchar((validator_index >> (k * 8u)) & 0xFFu);
-    for (uint k = 0u; k < 32u; ++k) buf[28u + k] = kQuasarMasterSecret[k];
+    for (uint k = 0u; k < 32u; ++k) buf[28u + k] = master_secret[k];
     keccak256_thread(buf, ulong(60), secret_out);
 }
 
+// CERT-006/021 (v0.42): MAC binds full uint64 round + uint64 stake_weight +
+// validator_index. Build subject_with_vote = keccak(subject || stake_weight ||
+// validator_index || round_full_uint64), then sign that.
 static inline void quasar_expected_sig(thread const uchar* secret,
                                        thread const uchar* subject,
-                                       uint round,
+                                       ulong round,
+                                       ulong stake_weight,
+                                       uint validator_index,
                                        thread uchar* expected_out)
 {
-    thread uchar buf[32 + 32 + 4];
-    for (uint k = 0u; k < 32u; ++k) buf[k]      = secret[k];
-    for (uint k = 0u; k < 32u; ++k) buf[32u + k] = subject[k];
-    for (uint k = 0u; k < 4u;  ++k) buf[64u + k] = uchar((round >> (k * 8u)) & 0xFFu);
-    keccak256_thread(buf, ulong(68), expected_out);
+    // Step 1: subject_with_vote = keccak(subject || stake_weight_le8
+    //                                    || validator_le4 || round_le8).
+    thread uchar buf1[32 + 8 + 4 + 8];
+    for (uint k = 0u; k < 32u; ++k) buf1[k] = subject[k];
+    for (uint k = 0u; k < 8u; ++k) buf1[32u + k] = uchar((stake_weight >> (k * 8u)) & 0xFFul);
+    for (uint k = 0u; k < 4u; ++k) buf1[40u + k] = uchar((validator_index >> (k * 8u)) & 0xFFu);
+    for (uint k = 0u; k < 8u; ++k) buf1[44u + k] = uchar((round >> (k * 8u)) & 0xFFul);
+    thread uchar subject_with_vote[32];
+    keccak256_thread(buf1, ulong(52), subject_with_vote);
+
+    // Step 2: expected = keccak(secret || subject_with_vote).
+    thread uchar buf2[32 + 32];
+    for (uint k = 0u; k < 32u; ++k) buf2[k]      = secret[k];
+    for (uint k = 0u; k < 32u; ++k) buf2[32u + k] = subject_with_vote[k];
+    keccak256_thread(buf2, ulong(64), expected_out);
 }
 
 kernel void quasar_verify_votes_kernel(
-    device QuasarRoundDescriptor* desc        [[buffer(0)]],
-    device RingHeader*            hdrs        [[buffer(1)]],
-    device uchar*                 items_arena [[buffer(2)]],
-    device uint*                  verified    [[buffer(3)]],
-    constant uint&                capacity    [[buffer(4)]],
+    device QuasarRoundDescriptor* desc                [[buffer(0)]],
+    device RingHeader*            hdrs                [[buffer(1)]],
+    device uchar*                 items_arena         [[buffer(2)]],
+    device uint*                  verified            [[buffer(3)]],
+    constant uint&                capacity            [[buffer(4)]],
+    device const uchar*           cert_master_secret  [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= capacity) return;
@@ -2340,14 +2442,20 @@ kernel void quasar_verify_votes_kernel(
     uint slot_idx = (head + tid) & mask;
 
     VoteIngress v = items[slot_idx];
+
+    // CERT-018/005 — only 3 lanes valid.
+    if (v.sig_kind > 2u) { verified[slot_idx] = 0u; return; }
+
     thread uchar subj[32];
     for (uint k = 0u; k < 32u; ++k) subj[k] = v.subject[k];
 
     thread uchar secret[32];
-    quasar_derive_secret(v.sig_kind, desc->chain_id, v.validator_index, secret);
+    quasar_derive_secret(v.sig_kind, desc->chain_id, v.validator_index,
+                         cert_master_secret, secret);
 
     thread uchar expected[32];
-    quasar_expected_sig(secret, subj, v.round, expected);
+    quasar_expected_sig(secret, subj, v.round, v.stake_weight,
+                        v.validator_index, expected);
 
     uchar diff = 0u;
     for (uint k = 0u; k < 32u; ++k) diff |= uchar(v.signature[k] ^ expected[k]);

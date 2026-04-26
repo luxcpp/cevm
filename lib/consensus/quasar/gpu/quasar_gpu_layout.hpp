@@ -335,19 +335,23 @@ enum class QuasarSigKind : uint8_t {
     MLDSA     = 2,   ///< ML-DSA-65 identity sig (Z-Chain rolls into Groth16)
 };
 
+// CERT-021/006/007 (v0.42): round + stake widened to uint64; stake_weight
+// is now bound into the MAC (via subject_with_vote — see drain_vote /
+// quasar_verify_votes_kernel).
 struct alignas(16) VoteIngress {
     uint32_t validator_index;
-    uint32_t round;
-    uint32_t stake_weight;       ///< quantized stake — host normalizes
     uint32_t sig_kind;           ///< QuasarSigKind
-    uint8_t  subject[32];        ///< H(round, mode, block_hash, state_root,
-                                 ///<   receipts_root, execution_root)
+    uint64_t round;              ///< CERT-021: full uint64 round
+    uint64_t stake_weight;       ///< CERT-006/007: uint64, MAC-bound
+    uint64_t _pad0;
+    uint8_t  subject[32];        ///< MUST equal desc->certificate_subject
+                                 ///< after CERT-003 — verifier rejects mismatch
     uint8_t  signature[96];      ///< BLS-G1 width covers BLS aggregates;
                                  ///< Ringtail / ML-DSA shares go out-of-band
                                  ///< via a host-managed signature arena
                                  ///< (this slot holds the digest only)
 };
-static_assert(sizeof(VoteIngress) == 16 + 32 + 96, "VoteIngress layout drift");
+static_assert(sizeof(VoteIngress) == 32 + 32 + 96, "VoteIngress layout drift");
 
 // Per-lane Quasar certificate aggregator. Three independent QuorumCerts
 // land on QuorumOut — one per signing layer. The host composes them into
@@ -391,8 +395,24 @@ struct alignas(16) QuasarRoundDescriptor {
     uint8_t  parent_block_hash[32];
     uint8_t  parent_state_root[32];
     uint8_t  parent_execution_root[32];
+    // CERT-003 / CERT-010 / CERT-020 (v0.42): bind validator-set, ceremony,
+    // VK roots, epoch, total_stake, validator_count.
+    uint64_t epoch;                       ///< CERT-010: validator-set epoch
+    uint64_t total_stake;                 ///< CERT-020: total stake
+                                          ///< (replaces base_fee re-use)
+    uint32_t validator_count;             ///< CERT-023: bound on validator_index
+    uint32_t _pad0;
+    uint8_t  pchain_validator_root[32];   ///< CERT-003: validator-set commitment
+    uint8_t  qchain_ceremony_root[32];    ///< CERT-003: Ringtail ceremony
+    uint8_t  zchain_vk_root[32];          ///< CERT-003: Z-Chain VK root
+    uint8_t  certificate_subject[32];     ///< CERT-003: host-precomputed
+                                          ///< keccak(chain_id||epoch||round||
+                                          ///< mode||P||Q||Z||parent_*||
+                                          ///< gas_limit||base_fee). Verifier
+                                          ///< rejects v.subject != this.
 };
-static_assert(sizeof(QuasarRoundDescriptor) == 64 + 96, "QuasarRoundDescriptor layout drift");
+static_assert(sizeof(QuasarRoundDescriptor) == 320,
+              "QuasarRoundDescriptor layout drift");
 
 // =============================================================================
 // Round result (GPU -> host)
@@ -402,6 +422,14 @@ static_assert(sizeof(QuasarRoundDescriptor) == 64 + 96, "QuasarRoundDescriptor l
 // commitments QuasarCert is computed over (luxfi/consensus
 // protocol/quasar/types.go: QuasarCert is signed over a digest of
 // these four roots plus mode and round).
+// CERT-004 (v0.42): per-validator dedup bitmap on QuasarRoundResult.
+// Bound by VALIDATOR_BITMAP_BITS — covers up to that many validator indices
+// per lane; CERT-023 enforces validator_index < desc->validator_count, which
+// itself must be <= VALIDATOR_BITMAP_BITS. Three lanes (BLS / Ringtail /
+// MLDSA) get independent bitmaps so a validator may sign each lane once.
+inline constexpr uint32_t kValidatorBitmapBits = 256u;        ///< 256 validators
+inline constexpr uint32_t kValidatorBitmapWords = kValidatorBitmapBits / 32u;
+
 struct alignas(16) QuasarRoundResult {
     uint32_t status;             ///< 0=in-progress, 1=finalized, 2=needs_state, 3=failed
     uint32_t tx_count;
@@ -415,10 +443,17 @@ struct alignas(16) QuasarRoundResult {
     uint32_t quorum_status_bls;  ///< 0=incomplete, 1=quorum, 2=conflict
     uint32_t quorum_status_mldsa;
     uint32_t quorum_status_rt;
-    uint32_t quorum_stake_bls;
-    uint32_t quorum_stake_mldsa;
-    uint32_t quorum_stake_rt;
+    // CERT-007 (v0.42): uint64 stake split lo/hi (matches gas_used).
+    uint32_t quorum_stake_bls_lo;
+    uint32_t quorum_stake_bls_hi;
+    uint32_t quorum_stake_mldsa_lo;
+    uint32_t quorum_stake_mldsa_hi;
+    uint32_t quorum_stake_rt_lo;
+    uint32_t quorum_stake_rt_hi;
     uint32_t mode;               ///< QuasarMode
+    uint32_t subject_mismatch_count;  ///< CERT-022: rejected votes
+    uint32_t dedup_skipped_count;     ///< CERT-004: replays skipped
+    uint32_t _pad1;
     uint8_t  block_hash[32];     ///< keccak — populated by HashService
     uint8_t  state_root[32];
     uint8_t  receipts_root[32];
@@ -427,11 +462,24 @@ struct alignas(16) QuasarRoundResult {
     uint8_t  mode_root[32];      ///< nova_root (Nova) or nebula_root
                                  ///< (Nebula DAG/Horizon prefix) — the
                                  ///< mode-specific commitment
+    // CERT-004 — three lane bitmaps, each kValidatorBitmapBits bits wide.
+    uint32_t validator_voted_bitmap[3][kValidatorBitmapWords];
 
     uint64_t gas_used() const {
         return (uint64_t(gas_used_hi) << 32) | uint64_t(gas_used_lo);
     }
+    uint64_t quorum_stake_bls() const {
+        return (uint64_t(quorum_stake_bls_hi) << 32) | uint64_t(quorum_stake_bls_lo);
+    }
+    uint64_t quorum_stake_rt() const {
+        return (uint64_t(quorum_stake_rt_hi) << 32) | uint64_t(quorum_stake_rt_lo);
+    }
+    uint64_t quorum_stake_mldsa() const {
+        return (uint64_t(quorum_stake_mldsa_hi) << 32) | uint64_t(quorum_stake_mldsa_lo);
+    }
 };
-static_assert(sizeof(QuasarRoundResult) == 64 + 32 * 5, "QuasarRoundResult layout drift");
+static_assert(sizeof(QuasarRoundResult) ==
+              64 + 32 + 32 * 5 + 3 * kValidatorBitmapWords * 4,
+              "QuasarRoundResult layout drift");
 
 }  // namespace quasar::gpu

@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 
 #include "quasar_gpu_engine.hpp"
+#include "quasar_sig.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -148,6 +149,8 @@ struct Round {
     id<MTLBuffer> code_size_buf       = nil;
     id<MTLBuffer> fiber_cap_buf       = nil;
     uint32_t      next_code_offset    = 0u;
+    // v0.42 — CERT-001: master secret out of source. Host populates from env.
+    id<MTLBuffer> cert_master_secret_buf = nil;
 
     uint32_t      next_predicted_idx  = 0u;
 };
@@ -211,6 +214,9 @@ public:
         round_.code_buf            = [device_ newBufferWithLength:kCodeArenaBytes                      options:MTLResourceStorageModeShared];
         round_.code_size_buf       = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
         round_.fiber_cap_buf       = [device_ newBufferWithLength:sizeof(uint32_t)                     options:MTLResourceStorageModeShared];
+        // v0.42 — CERT-001: 32-byte master secret derived from env.
+        round_.cert_master_secret_buf =
+            [device_ newBufferWithLength:32 options:MTLResourceStorageModeShared];
 
         if (!round_.desc_buf || !round_.result_buf || !round_.hdrs_buf
             || !round_.items_buf || !round_.tx_index_buf || !round_.mvcc_buf
@@ -219,8 +225,28 @@ public:
             || !round_.dag_writer_buf || !round_.dag_writer_count_buf
             || !round_.predicted_buf || !round_.predicted_cap_buf
             || !round_.dag_node_cap_buf
-            || !round_.code_buf || !round_.code_size_buf || !round_.fiber_cap_buf)
+            || !round_.code_buf || !round_.code_size_buf || !round_.fiber_cap_buf
+            || !round_.cert_master_secret_buf)
             return QuasarRoundHandle{0};
+
+        // CERT-003: compute certificate_subject host-side and write into desc.
+        // Both kernel and host MUST agree byte-for-byte; the verifier compares
+        // v.subject == desc->certificate_subject and rejects mismatch.
+        auto subj = quasar::gpu::sig::compute_certificate_subject(
+            round_.desc.chain_id, round_.desc.epoch, round_.desc.round,
+            round_.desc.mode,
+            round_.desc.pchain_validator_root,
+            round_.desc.qchain_ceremony_root,
+            round_.desc.zchain_vk_root,
+            round_.desc.parent_block_hash,
+            round_.desc.parent_state_root,
+            round_.desc.parent_execution_root,
+            round_.desc.gas_limit, round_.desc.base_fee);
+        std::memcpy(round_.desc.certificate_subject, subj.data(), 32);
+
+        // CERT-001: load master secret from env (placeholder; KMS in v0.43).
+        auto ms = quasar::gpu::sig::load_master_secret();
+        std::memcpy([round_.cert_master_secret_buf contents], ms.data(), 32);
 
         std::memcpy([round_.desc_buf contents], &round_.desc, sizeof(QuasarRoundDescriptor));
         std::memset([round_.result_buf contents], 0, sizeof(QuasarRoundResult));
@@ -355,9 +381,9 @@ public:
 
             VoteIngress out{};
             out.validator_index = v.validator_index;
-            out.round           = v.round;
-            out.stake_weight    = v.stake_weight;
             out.sig_kind        = v.sig_kind;
+            out.round           = v.round;          ///< CERT-021: uint64
+            out.stake_weight    = v.stake_weight;   ///< CERT-006/007: uint64
             std::memcpy(out.subject, v.block_hash, 32);
             const size_t copy = std::min<size_t>(v.signature.size(), sizeof(out.signature));
             if (copy) std::memcpy(out.signature, v.signature.data(), copy);
@@ -477,11 +503,13 @@ public:
             // Encoder 1: vote-batch verifier.
             id<MTLComputeCommandEncoder> venc = [cmd computeCommandEncoder];
             [venc setComputePipelineState:verify_pso_];
-            [venc setBuffer:round_.desc_buf          offset:0 atIndex:0];
-            [venc setBuffer:round_.hdrs_buf          offset:0 atIndex:1];
-            [venc setBuffer:round_.items_buf         offset:0 atIndex:2];
-            [venc setBuffer:round_.vote_verified_buf offset:0 atIndex:3];
-            [venc setBuffer:round_.vote_capacity_buf offset:0 atIndex:4];
+            [venc setBuffer:round_.desc_buf            offset:0 atIndex:0];
+            [venc setBuffer:round_.hdrs_buf            offset:0 atIndex:1];
+            [venc setBuffer:round_.items_buf           offset:0 atIndex:2];
+            [venc setBuffer:round_.vote_verified_buf   offset:0 atIndex:3];
+            [venc setBuffer:round_.vote_capacity_buf   offset:0 atIndex:4];
+            // CERT-001 (v0.42) — master secret out of source.
+            [venc setBuffer:round_.cert_master_secret_buf offset:0 atIndex:5];
             const NSUInteger vtpg = std::min<NSUInteger>(
                 verify_pso_.maxTotalThreadsPerThreadgroup, 256);
             [venc dispatchThreads:MTLSizeMake(kDefaultRingCapacity, 1, 1)
@@ -608,7 +636,11 @@ std::unique_ptr<QuasarGPUEngine> QuasarGPUEngine::create()
         NSError* err = nil;
         id<MTLComputePipelineState> pso =
             [device newComputePipelineStateWithFunction:fn error:&err];
-        if (!pso) return nullptr;
+        if (!pso) {
+            std::fprintf(stderr, "quasar.create: wave_kernel PSO failed: %s\n",
+                         err ? [[err localizedDescription] UTF8String] : "(null)");
+            return nullptr;
+        }
 
         // v0.38 — vote-batch verifier pipeline (separate compute encoder
         // in the same MTLCommandBuffer as the wave-tick kernel).
@@ -616,7 +648,11 @@ std::unique_ptr<QuasarGPUEngine> QuasarGPUEngine::create()
         if (!vfn) return nullptr;
         id<MTLComputePipelineState> verify_pso =
             [device newComputePipelineStateWithFunction:vfn error:&err];
-        if (!verify_pso) return nullptr;
+        if (!verify_pso) {
+            std::fprintf(stderr, "quasar.create: verify PSO failed: %s\n",
+                         err ? [[err localizedDescription] UTF8String] : "(null)");
+            return nullptr;
+        }
 
         return std::make_unique<QuasarGPUEngineImpl>(device, queue, pso, verify_pso, [device name]);
     }

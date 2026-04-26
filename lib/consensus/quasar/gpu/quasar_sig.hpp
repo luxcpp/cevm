@@ -2,19 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// @file quasar_sig.hpp
-/// Host-side mirror of the Quasar v0.38 GPU vote signature scheme.
+/// Host-side mirror of the Quasar v0.42 GPU vote signature scheme.
 ///
 /// The exact same recipe lives inline in quasar_wave.metal — see
 /// `quasar_derive_secret` and `quasar_expected_sig` there. Both halves
 /// MUST stay byte-for-byte identical or the GPU verifier will reject
 /// host-signed votes.
 ///
-/// Layout:
-///   secret_i    = keccak256(domain_tag[16] || chain_id_le8
-///                           || validator_le4 || master_secret_le32)
-///   sig[0..32]  = keccak256(secret_i || subject[32] || round_le4)
-///   sig[32..96] = zero (reserved for future BLS aggregate / Ringtail
-///                       share material)
+/// v0.42 layout (CERT-001 / CERT-006 / CERT-021):
+///   secret_i          = keccak256(domain_tag[16] || chain_id_le8
+///                                  || validator_le4 || master_secret[32])
+///   subject_with_vote = keccak256(subject[32] || stake_weight_le8
+///                                  || validator_le4 || round_le8)
+///   sig[0..32]        = keccak256(secret_i || subject_with_vote)
+///   sig[32..96]       = zero (reserved for BLS aggregate / Ringtail share)
+///
+/// CERT-001: master_secret is read from the QUASAR_MASTER_SECRET env var
+/// (placeholder until KMS lands). NEVER hard-coded in source.
 ///
 /// Domain tags are lane-specific so a BLS-signed vote cannot satisfy
 /// the ML-DSA verifier and vice versa.
@@ -25,7 +29,9 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace quasar::gpu::sig {
@@ -41,12 +47,6 @@ inline constexpr std::array<uint8_t, 16> kMLDSADomain = {
     'Q','U','A','S','A','R','-','M','D','S','-','v','0','3','8',0
 };
 
-// Master secret — must match kQuasarMasterSecret in quasar_wave.metal.
-inline constexpr std::array<uint8_t, 32> kMasterSecret = {
-    0x51,0x55,0x41,0x53,0x41,0x52,0x2D,0x76,0x30,0x33,0x38,0x2D,0x6D,0x61,0x73,0x74,
-    0x65,0x72,0x2D,0x73,0x65,0x63,0x72,0x65,0x74,0x2D,0x73,0x68,0x61,0x72,0x65,0x64,
-};
-
 inline const uint8_t* pick_domain(uint32_t sig_kind)
 {
     switch (sig_kind) {
@@ -56,42 +56,119 @@ inline const uint8_t* pick_domain(uint32_t sig_kind)
     }
 }
 
+// CERT-001 — master secret loaded from env QUASAR_MASTER_SECRET. Returns
+// keccak256(env-string-bytes || "QUASAR-MS-v042-salt") so even a short or
+// empty env value produces a uniform 32-byte secret. Caller MUST cache.
+inline std::array<uint8_t, 32> load_master_secret()
+{
+    static constexpr char kSalt[] = "QUASAR-MS-v042-salt";
+    const char* env = std::getenv("QUASAR_MASTER_SECRET");
+    std::string s = env ? env : "";
+    std::vector<uint8_t> buf;
+    buf.reserve(s.size() + sizeof(kSalt));
+    for (char c : s) buf.push_back(static_cast<uint8_t>(c));
+    for (size_t k = 0; k + 1 < sizeof(kSalt); ++k) buf.push_back(static_cast<uint8_t>(kSalt[k]));
+    auto h = ethash::keccak256(buf.data(), buf.size());
+    std::array<uint8_t, 32> out{};
+    std::memcpy(out.data(), h.bytes, 32);
+    return out;
+}
+
 // Derive secret_i = keccak256(domain || chain_id || validator || master).
 inline std::array<uint8_t, 32> derive_secret(uint32_t sig_kind,
                                              uint64_t chain_id,
                                              uint32_t validator_index)
 {
+    auto master = load_master_secret();
     uint8_t buf[16 + 8 + 4 + 32];
     std::memcpy(buf, pick_domain(sig_kind), 16);
     for (size_t k = 0; k < 8; ++k)
         buf[16 + k] = uint8_t((chain_id >> (k * 8u)) & 0xFFu);
     for (size_t k = 0; k < 4; ++k)
         buf[24 + k] = uint8_t((validator_index >> (k * 8u)) & 0xFFu);
-    std::memcpy(buf + 28, kMasterSecret.data(), 32);
+    std::memcpy(buf + 28, master.data(), 32);
     auto h = ethash::keccak256(buf, sizeof(buf));
     std::array<uint8_t, 32> out{};
     std::memcpy(out.data(), h.bytes, 32);
     return out;
 }
 
-// Sign: sig[0..32] = keccak256(secret || subject[32] || round_le4).
-// Returns a 96-byte signature (last 64 bytes are zero — reserved).
+// CERT-006/021 — Sign with full uint64 round + uint64 stake_weight bound.
+// Returns a 96-byte signature (last 64 bytes are zero — reserved for the
+// real BLS / Ringtail / Groth16 verifiers landing in v0.43..v0.45).
 inline std::vector<uint8_t> sign(uint32_t sig_kind,
                                  uint64_t chain_id,
                                  uint32_t validator_index,
-                                 uint32_t round,
+                                 uint64_t round,
+                                 uint64_t stake_weight,
                                  const uint8_t subject[32])
 {
     std::array<uint8_t, 32> secret = derive_secret(sig_kind, chain_id, validator_index);
-    uint8_t buf[32 + 32 + 4];
-    std::memcpy(buf, secret.data(), 32);
-    std::memcpy(buf + 32, subject, 32);
+
+    // Step 1: subject_with_vote = keccak(subject || stake_le8 || vi_le4 || round_le8).
+    uint8_t buf1[32 + 8 + 4 + 8];
+    std::memcpy(buf1, subject, 32);
+    for (size_t k = 0; k < 8; ++k)
+        buf1[32 + k] = uint8_t((stake_weight >> (k * 8u)) & 0xFFu);
     for (size_t k = 0; k < 4; ++k)
-        buf[64 + k] = uint8_t((round >> (k * 8u)) & 0xFFu);
-    auto h = ethash::keccak256(buf, sizeof(buf));
+        buf1[40 + k] = uint8_t((validator_index >> (k * 8u)) & 0xFFu);
+    for (size_t k = 0; k < 8; ++k)
+        buf1[44 + k] = uint8_t((round >> (k * 8u)) & 0xFFu);
+    auto h1 = ethash::keccak256(buf1, sizeof(buf1));
+
+    // Step 2: keccak(secret || subject_with_vote).
+    uint8_t buf2[32 + 32];
+    std::memcpy(buf2, secret.data(), 32);
+    std::memcpy(buf2 + 32, h1.bytes, 32);
+    auto h2 = ethash::keccak256(buf2, sizeof(buf2));
+
     std::vector<uint8_t> sig(96, 0);
-    std::memcpy(sig.data(), h.bytes, 32);
+    std::memcpy(sig.data(), h2.bytes, 32);
     return sig;
+}
+
+// Compute desc->certificate_subject per CERT-003 spec. Both kernel and host
+// MUST agree byte-for-byte.
+inline std::array<uint8_t, 32> compute_certificate_subject(
+    uint64_t chain_id, uint64_t epoch, uint64_t round, uint32_t mode,
+    const uint8_t pchain_validator_root[32],
+    const uint8_t qchain_ceremony_root[32],
+    const uint8_t zchain_vk_root[32],
+    const uint8_t parent_block_hash[32],
+    const uint8_t parent_state_root[32],
+    const uint8_t parent_execution_root[32],
+    uint64_t gas_limit, uint64_t base_fee)
+{
+    uint8_t buf[8 + 8 + 8 + 4 + 32 + 32 + 32 + 32 + 32 + 32 + 8 + 8];
+    size_t off = 0;
+    auto put_le64 = [&](uint64_t v) {
+        for (size_t k = 0; k < 8; ++k) buf[off + k] = uint8_t((v >> (k * 8u)) & 0xFFu);
+        off += 8;
+    };
+    auto put_le32 = [&](uint32_t v) {
+        for (size_t k = 0; k < 4; ++k) buf[off + k] = uint8_t((v >> (k * 8u)) & 0xFFu);
+        off += 4;
+    };
+    auto put_32 = [&](const uint8_t* p) {
+        std::memcpy(buf + off, p, 32);
+        off += 32;
+    };
+    put_le64(chain_id);
+    put_le64(epoch);
+    put_le64(round);
+    put_le32(mode);
+    put_32(pchain_validator_root);
+    put_32(qchain_ceremony_root);
+    put_32(zchain_vk_root);
+    put_32(parent_block_hash);
+    put_32(parent_state_root);
+    put_32(parent_execution_root);
+    put_le64(gas_limit);
+    put_le64(base_fee);
+    auto h = ethash::keccak256(buf, off);
+    std::array<uint8_t, 32> out{};
+    std::memcpy(out.data(), h.bytes, 32);
+    return out;
 }
 
 }  // namespace quasar::gpu::sig

@@ -69,9 +69,20 @@ QuasarRoundDescriptor make_desc(uint64_t round, uint32_t mode = 0)
     d.timestamp_ns = 0u;
     d.deadline_ns = 0u;
     d.gas_limit = 30'000'000u;
-    d.base_fee = 100u;       // total stake for v0.37 quorum tests
+    d.base_fee = 100u;
     d.wave_tick_budget = 256u;
     d.mode = mode;
+    // v0.42 — CERT-003/010/020/023: epoch + roots + total_stake +
+    // validator_count required for cert-lane tests; harmless for
+    // execution-only tests (no votes pushed).
+    d.epoch = 1u;
+    d.total_stake = 100u;
+    d.validator_count = 16u;
+    for (int i = 0; i < 32; ++i) {
+        d.pchain_validator_root[i] = uint8_t(0x44 + i);
+        d.qchain_ceremony_root[i]  = uint8_t(0x55 + i);
+        d.zchain_vk_root[i]        = uint8_t(0x66 + i);
+    }
     return d;
 }
 
@@ -354,13 +365,18 @@ void test_block_stm_conflict_repair()
     PASS("block_stm_conflict_repair");
 }
 
-// 8. Quasar quorum aggregation per lane - v0.38 real verifier.
+// 8. Quasar quorum aggregation per lane - v0.42 (CERT-001..023 fixed).
+// CERT-003: votes bind to desc->certificate_subject (host-precomputed).
+// CERT-006: signature binds stake_weight + validator_index.
+// CERT-007: stake counters are uint64.
+// CERT-021: round is uint64.
 void test_quasar_quorum_round_trip()
 {
     auto e = QuasarGPUEngine::create();
     auto desc = make_desc(8);
     desc.chain_id = 1u;
-    desc.base_fee = 90u;
+    desc.total_stake = 90u;        // quorum threshold = 60
+    desc.validator_count = 16u;
     auto h = e->begin_round(desc);
 
     std::vector<HostTxBlob> txs = { make_tx(0xBABEu, 0u) };
@@ -369,18 +385,28 @@ void test_quasar_quorum_round_trip()
     auto r = e->run_until_done(h, 8);
     EXPECT("q.finalized", r.status == 1u);
 
+    // CERT-022: subject MUST equal desc->certificate_subject. Compute it
+    // host-side using the same recipe the engine wrote into the descriptor.
+    auto subj_arr = quasar::gpu::sig::compute_certificate_subject(
+        desc.chain_id, desc.epoch, desc.round, desc.mode,
+        desc.pchain_validator_root, desc.qchain_ceremony_root,
+        desc.zchain_vk_root,
+        desc.parent_block_hash, desc.parent_state_root,
+        desc.parent_execution_root,
+        desc.gas_limit, desc.base_fee);
     uint8_t subject[32];
-    std::memcpy(subject, r.block_hash, 32);
-    const uint32_t round = 8u;
+    std::memcpy(subject, subj_arr.data(), 32);
+    const uint64_t round = 8ull;
 
-    auto mk = [&](uint32_t vi, uint32_t weight, uint32_t kind) {
+    auto mk = [&](uint32_t vi, uint64_t weight, uint32_t kind) {
         HostVote v{};
         v.validator_index = vi;
         v.round           = round;
         v.stake_weight    = weight;
         v.sig_kind        = kind;
         std::memcpy(v.block_hash, subject, 32);
-        v.signature = quasar::gpu::sig::sign(kind, desc.chain_id, vi, round, subject);
+        v.signature = quasar::gpu::sig::sign(kind, desc.chain_id, vi, round,
+                                             weight, subject);
         return v;
     };
 
@@ -392,8 +418,8 @@ void test_quasar_quorum_round_trip()
     bad_bls.signature[0] ^= 0xFFu;
     votes.push_back(bad_bls);
 
-    votes.push_back(mk(0, 10, 2));
-    HostVote replay = mk(4, 80, 0);
+    votes.push_back(mk(0, 10, 2));   // single mldsa vote (no quorum)
+    HostVote replay = mk(4, 80, 0);  // sign as BLS, retag as MLDSA — rejects
     replay.sig_kind = 2;
     votes.push_back(replay);
 
@@ -404,16 +430,17 @@ void test_quasar_quorum_round_trip()
     auto r2 = e->run_epoch(h);
     auto certs = e->poll_quorum_certs(h);
 
-    std::printf("  q.stake bls=%u rt=%u mldsa=%u certs=%zu\n",
-                r2.quorum_stake_bls, r2.quorum_stake_rt,
-                r2.quorum_stake_mldsa, certs.size());
+    std::printf("  q.stake bls=%llu rt=%llu mldsa=%llu certs=%zu\n",
+                (unsigned long long)r2.quorum_stake_bls(),
+                (unsigned long long)r2.quorum_stake_rt(),
+                (unsigned long long)r2.quorum_stake_mldsa(), certs.size());
 
     EXPECT("q.bls_quorum",   r2.quorum_status_bls   == 1u);
-    EXPECT("q.bls_stake_excludes_tamper", r2.quorum_stake_bls    == 90u);
+    EXPECT("q.bls_stake_excludes_tamper", r2.quorum_stake_bls() == 90ull);
     EXPECT("q.rt_quorum",    r2.quorum_status_rt    == 1u);
-    EXPECT("q.rt_stake",     r2.quorum_stake_rt     == 60u);
+    EXPECT("q.rt_stake",     r2.quorum_stake_rt()   == 60ull);
     EXPECT("q.mldsa_no_q",   r2.quorum_status_mldsa == 0u);
-    EXPECT("q.mldsa_stake_excludes_replay", r2.quorum_stake_mldsa == 10u);
+    EXPECT("q.mldsa_stake_excludes_replay", r2.quorum_stake_mldsa() == 10ull);
     EXPECT("q.certs_count",  certs.size() == 2u);
     e->end_round(h);
     PASS("quasar_quorum_round_trip");
@@ -858,6 +885,269 @@ void test_evm_invalid_opcode()
     PASS("evm_invalid_opcode");
 }
 
+// =============================================================================
+// v0.42 — Quasar 4.0 cert-lane structural fixes (CERT-001/003/004/006/007/021)
+// =============================================================================
+
+QuasarRoundDescriptor make_v42_desc(uint64_t round, uint64_t epoch = 1u)
+{
+    QuasarRoundDescriptor d{};
+    d.chain_id        = 7777u;
+    d.round           = round;
+    d.epoch           = epoch;
+    d.gas_limit       = 30'000'000u;
+    d.base_fee        = 100u;
+    d.total_stake     = 90u;
+    d.wave_tick_budget = 256u;
+    d.validator_count = 16u;
+    for (int i = 0; i < 32; ++i) {
+        d.parent_block_hash[i]      = uint8_t(0x11 + i);
+        d.parent_state_root[i]      = uint8_t(0x22 + i);
+        d.parent_execution_root[i]  = uint8_t(0x33 + i);
+        d.pchain_validator_root[i]  = uint8_t(0x44 + i);
+        d.qchain_ceremony_root[i]   = uint8_t(0x55 + i);
+        d.zchain_vk_root[i]         = uint8_t(0x66 + i);
+    }
+    return d;
+}
+
+std::array<uint8_t, 32> v42_subject(const QuasarRoundDescriptor& d)
+{
+    return quasar::gpu::sig::compute_certificate_subject(
+        d.chain_id, d.epoch, d.round, d.mode,
+        d.pchain_validator_root, d.qchain_ceremony_root, d.zchain_vk_root,
+        d.parent_block_hash, d.parent_state_root, d.parent_execution_root,
+        d.gas_limit, d.base_fee);
+}
+
+// CERT-001 — load_master_secret reads QUASAR_MASTER_SECRET env. Distinct
+// env values produce distinct secrets; no constant in source matches the
+// previous v0.38 ASCII master.
+void test_cert001_master_secret_env()
+{
+    setenv("QUASAR_MASTER_SECRET", "alpha-key-v042", 1);
+    auto a = quasar::gpu::sig::load_master_secret();
+    setenv("QUASAR_MASTER_SECRET", "beta-key-v042", 1);
+    auto b = quasar::gpu::sig::load_master_secret();
+    EXPECT("cert001.distinct_per_env",
+           std::memcmp(a.data(), b.data(), 32) != 0);
+    // Old v0.38 ASCII master ('QUASAR-v038-master-secret-shared') must not
+    // match the env-derived secret.
+    static const uint8_t v038[32] = {
+        0x51,0x55,0x41,0x53,0x41,0x52,0x2D,0x76,0x30,0x33,0x38,0x2D,0x6D,0x61,0x73,0x74,
+        0x65,0x72,0x2D,0x73,0x65,0x63,0x72,0x65,0x74,0x2D,0x73,0x68,0x61,0x72,0x65,0x64,
+    };
+    EXPECT("cert001.not_v038_constant",
+           std::memcmp(a.data(), v038, 32) != 0);
+    PASS("cert001_master_secret_env");
+}
+
+// CERT-003 — descriptor binding. compute_certificate_subject is sensitive to
+// every load-bearing field. Mutating any of them produces a different subject.
+void test_cert003_subject_binds_descriptor()
+{
+    auto base = make_v42_desc(100u, 7u);
+    auto h0   = v42_subject(base);
+    EXPECT("cert003.base_nonzero", !is_zero32(h0.data()));
+
+    auto try_field = [&](const char* name, auto mutate) -> bool {
+        auto d = base;
+        mutate(d);
+        auto h = v42_subject(d);
+        if (std::memcmp(h0.data(), h.data(), 32) == 0) {
+            std::printf("  FAIL[cert003.binds]: field=%s subject unchanged\n", name);
+            std::fflush(stdout); return false;
+        }
+        return true;
+    };
+    bool ok = true;
+    ok &= try_field("chain_id",     [](QuasarRoundDescriptor& d){ d.chain_id = 8888u; });
+    ok &= try_field("epoch",        [](QuasarRoundDescriptor& d){ d.epoch    = 8u; });
+    ok &= try_field("round",        [](QuasarRoundDescriptor& d){ d.round    = 101u; });
+    ok &= try_field("mode",         [](QuasarRoundDescriptor& d){ d.mode     = 1u; });
+    ok &= try_field("pchain_root",  [](QuasarRoundDescriptor& d){ d.pchain_validator_root[0] ^= 0xFF; });
+    ok &= try_field("qchain_root",  [](QuasarRoundDescriptor& d){ d.qchain_ceremony_root[0]  ^= 0xFF; });
+    ok &= try_field("zchain_root",  [](QuasarRoundDescriptor& d){ d.zchain_vk_root[0]        ^= 0xFF; });
+    ok &= try_field("parent_block", [](QuasarRoundDescriptor& d){ d.parent_block_hash[0]     ^= 0xFF; });
+    ok &= try_field("gas_limit",    [](QuasarRoundDescriptor& d){ d.gas_limit = 60'000'000u; });
+    ok &= try_field("base_fee",     [](QuasarRoundDescriptor& d){ d.base_fee  = 200u; });
+    EXPECT("cert003.all_fields_bound", ok);
+    PASS("cert003_subject_binds_descriptor");
+}
+
+// CERT-022 — vote with subject != desc->certificate_subject is rejected and
+// counted in subject_mismatch_count.
+void test_cert022_subject_mismatch_rejects()
+{
+    auto e = QuasarGPUEngine::create();
+    auto desc = make_v42_desc(150u, 1u);
+    desc.total_stake = 90u;
+    desc.validator_count = 16u;
+    auto h = e->begin_round(desc);
+
+    auto subj_arr = v42_subject(desc);
+    uint8_t subject[32];
+    std::memcpy(subject, subj_arr.data(), 32);
+
+    // First a valid vote.
+    HostVote good{};
+    good.validator_index = 0;
+    good.sig_kind = 0;
+    good.round = 150ull;
+    good.stake_weight = 30ull;
+    std::memcpy(good.block_hash, subject, 32);
+    good.signature = quasar::gpu::sig::sign(0, desc.chain_id, 0, 150ull, 30ull, subject);
+    // Then one with a tampered subject.
+    HostVote bad = good;
+    bad.validator_index = 1;
+    bad.block_hash[0] ^= 0xFF;
+    bad.signature = quasar::gpu::sig::sign(0, desc.chain_id, 1, 150ull, 30ull, bad.block_hash);
+
+    std::vector<HostVote> votes = { good, bad };
+    e->push_votes(h, votes);
+    auto r = e->run_epoch(h);
+    EXPECT("cert022.good_credited",   r.quorum_stake_bls() == 30ull);
+    EXPECT("cert022.mismatch_counted", r.subject_mismatch_count >= 1u);
+    e->end_round(h);
+    PASS("cert022_subject_mismatch_rejects");
+}
+
+// CERT-004 — replay of the same validator's vote does not double-credit
+// stake; dedup_skipped_count increments.
+void test_cert004_dedup_rejects_replay()
+{
+    auto e = QuasarGPUEngine::create();
+    auto desc = make_v42_desc(160u, 1u);
+    desc.total_stake = 1000u;   // high threshold so quorum doesn't fire
+    desc.validator_count = 16u;
+    auto h = e->begin_round(desc);
+
+    auto subj_arr = v42_subject(desc);
+    uint8_t subject[32];
+    std::memcpy(subject, subj_arr.data(), 32);
+
+    auto mk = [&](uint32_t vi) {
+        HostVote v{};
+        v.validator_index = vi;
+        v.sig_kind = 0;
+        v.round = 160ull;
+        v.stake_weight = 50ull;
+        std::memcpy(v.block_hash, subject, 32);
+        v.signature = quasar::gpu::sig::sign(0, desc.chain_id, vi, 160ull, 50ull, subject);
+        return v;
+    };
+
+    // Same validator (idx 0) three times. Without dedup → 150 stake.
+    // With dedup → only first credits → 50 stake.
+    std::vector<HostVote> votes = { mk(0), mk(0), mk(0) };
+    e->push_votes(h, votes);
+    auto r = e->run_epoch(h);
+    EXPECT("cert004.first_credited", r.quorum_stake_bls() == 50ull);
+    EXPECT("cert004.replays_skipped", r.dedup_skipped_count >= 2u);
+    e->end_round(h);
+    PASS("cert004_dedup_rejects_replay");
+}
+
+// CERT-007 — uint64-split stake counter accumulates beyond 2^32 with carry.
+void test_cert007_uint64_stake_carry()
+{
+    auto e = QuasarGPUEngine::create();
+    auto desc = make_v42_desc(170u, 1u);
+    // Total stake very large to avoid quorum trigger; values cross uint32.
+    desc.total_stake = 10ull * 1000ull * 1000ull * 1000ull;  // 10G > 2^32
+    desc.validator_count = 16u;
+    auto h = e->begin_round(desc);
+
+    auto subj_arr = v42_subject(desc);
+    uint8_t subject[32];
+    std::memcpy(subject, subj_arr.data(), 32);
+
+    auto mk = [&](uint32_t vi, uint64_t weight) {
+        HostVote v{};
+        v.validator_index = vi;
+        v.sig_kind = 0;
+        v.round = 170ull;
+        v.stake_weight = weight;
+        std::memcpy(v.block_hash, subject, 32);
+        v.signature = quasar::gpu::sig::sign(0, desc.chain_id, vi, 170ull, weight, subject);
+        return v;
+    };
+
+    // Two 3-billion-weight votes — sum is 6 * 10^9 > 2^32 (~4.29 * 10^9).
+    const uint64_t W = 3ull * 1000ull * 1000ull * 1000ull;
+    std::vector<HostVote> votes = { mk(0, W), mk(1, W) };
+    e->push_votes(h, votes);
+    auto r = e->run_epoch(h);
+    EXPECT("cert007.lo_carries_to_hi", r.quorum_stake_bls() == 2u * W);
+    e->end_round(h);
+    PASS("cert007_uint64_stake_carry");
+}
+
+// CERT-006 — stake_weight bound into MAC. Tampering stake_weight on the vote
+// envelope after signing makes the verifier reject (unverified → not
+// credited).
+void test_cert006_mac_binds_stake_weight()
+{
+    auto e = QuasarGPUEngine::create();
+    auto desc = make_v42_desc(180u, 1u);
+    desc.total_stake = 90u;
+    desc.validator_count = 16u;
+    auto h = e->begin_round(desc);
+
+    auto subj_arr = v42_subject(desc);
+    uint8_t subject[32];
+    std::memcpy(subject, subj_arr.data(), 32);
+
+    HostVote v{};
+    v.validator_index = 0;
+    v.sig_kind = 0;
+    v.round = 180ull;
+    v.stake_weight = 30ull;     // sign with this weight
+    std::memcpy(v.block_hash, subject, 32);
+    v.signature = quasar::gpu::sig::sign(0, desc.chain_id, 0, 180ull, 30ull, subject);
+
+    // Tamper: amplify stake_weight to 90 (would trigger quorum) without re-sign.
+    HostVote tampered = v;
+    tampered.stake_weight = 90ull;
+
+    std::vector<HostVote> votes = { tampered };
+    e->push_votes(h, votes);
+    auto r = e->run_epoch(h);
+    EXPECT("cert006.tampered_not_credited", r.quorum_stake_bls() == 0ull);
+    e->end_round(h);
+    PASS("cert006_mac_binds_stake_weight");
+}
+
+// CERT-021 — round is uint64. A vote with round = 2^33 verifies and credits.
+void test_cert021_round_uint64()
+{
+    auto e = QuasarGPUEngine::create();
+    const uint64_t big_round = (1ull << 33);
+    auto desc = make_v42_desc(big_round, 1u);
+    desc.total_stake = 90u;
+    desc.validator_count = 16u;
+    auto h = e->begin_round(desc);
+
+    auto subj_arr = v42_subject(desc);
+    uint8_t subject[32];
+    std::memcpy(subject, subj_arr.data(), 32);
+
+    HostVote v{};
+    v.validator_index = 0;
+    v.sig_kind = 0;
+    v.round = big_round;
+    v.stake_weight = 30ull;
+    std::memcpy(v.block_hash, subject, 32);
+    v.signature = quasar::gpu::sig::sign(0, desc.chain_id, 0, big_round, 30ull, subject);
+
+    std::vector<HostVote> votes = { v };
+    e->push_votes(h, votes);
+    auto r = e->run_epoch(h);
+    EXPECT("cert021.uint64_round_credited", r.quorum_stake_bls() == 30ull);
+    e->end_round(h);
+    PASS("cert021_round_uint64");
+}
+
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/)
@@ -889,6 +1179,14 @@ int main(int /*argc*/, char** /*argv*/)
         test_evm_sstore_records_rw_write();
         test_evm_revert();
         test_evm_invalid_opcode();
+        // v0.42 — Quasar 4.0 cert-lane structural fixes.
+        test_cert001_master_secret_env();
+        test_cert003_subject_binds_descriptor();
+        test_cert022_subject_mismatch_rejects();
+        test_cert004_dedup_rejects_replay();
+        test_cert007_uint64_stake_carry();
+        test_cert006_mac_binds_stake_weight();
+        test_cert021_round_uint64();
         std::printf("[quasar_gpu_engine_test] passed=%d failed=%d\n",
                     g_passed, g_failed);
         return g_failed == 0 ? 0 : 1;
