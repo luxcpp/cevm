@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "quasar_bls_verifier.hpp"
+#include "quasar_groth16_verifier.hpp"
+#include "quasar_ringtail_verifier.hpp"
 
 #include <blst.h>
 
@@ -52,7 +54,20 @@ bool verify_lane(
         case 0:  // QuasarSigKind::BLS12_381
             return verify_bls_aggregate(subject, signature, pk_aggregate);
         case 1:  // QuasarSigKind::Ringtail — v0.43
-        case 2:  // QuasarSigKind::MLDSA   — v0.42
+            // Ringtail shares are variable-size and need a (ptr, len)
+            // envelope; the 96-byte `signature` slot here can't carry
+            // them. Routes through verify_ringtail_share at the engine
+            // level where the host can pass the artifact arena.
+            // Mainnet-safe: reject on this fixed-shape path.
+            (void)pk_aggregate;
+            return false;
+        case 2:  // QuasarSigKind::MLDSA / Z-Chain Groth16 — v0.43
+            // Same shape constraint: a Groth16 proof is 192 bytes (vs
+            // 96-byte signature slot). The 3-arg verify_groth16 returns
+            // false until v0.44 wires the VK arena, so accept-only
+            // syntactic-decode never alone reaches mainnet quorum.
+            (void)pk_aggregate;
+            return false;
         default:
             return false;
     }

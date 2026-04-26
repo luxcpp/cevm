@@ -621,11 +621,14 @@ if(APPLE)
     # a plain C++ executable — no Metal / CUDA dependency. Lives next to
     # the GPU substrate (lib/consensus/quasar/gpu/) so it ships on the
     # same release cadence.
+    # v0.43 — add Groth16 + Ringtail verifiers in the same lane.
     add_executable(quasar-bls-verifier-test
         ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_bls_verifier_test.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_groth16_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp)
     target_compile_features(quasar-bls-verifier-test PRIVATE cxx_std_20)
-    target_link_libraries(quasar-bls-verifier-test PRIVATE blst::blst)
+    target_link_libraries(quasar-bls-verifier-test PRIVATE blst::blst cevm::precompiles)
     target_include_directories(quasar-bls-verifier-test PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
