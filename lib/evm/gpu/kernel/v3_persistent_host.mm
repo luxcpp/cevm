@@ -266,17 +266,13 @@ public:
                            id<MTLCommandQueue> exec_queue,
                            id<MTLCommandQueue> validate_queue,
                            id<MTLCommandQueue> commit_queue,
-                           id<MTLComputePipelineState> exec_pso,
-                           id<MTLComputePipelineState> validate_pso,
-                           id<MTLComputePipelineState> commit_pso,
+                           id<MTLComputePipelineState> pipeline_pso,
                            NSString* device_name)
         : device_(device)
         , exec_queue_(exec_queue)
         , validate_queue_(validate_queue)
         , commit_queue_(commit_queue)
-        , exec_pso_(exec_pso)
-        , validate_pso_(validate_pso)
-        , commit_pso_(commit_pso)
+        , pipeline_pso_(pipeline_pso)
         , device_name_str_([device_name UTF8String])
     {
         allocate_queues();
@@ -296,7 +292,14 @@ public:
     Counters counters() const override
     {
         const auto* c = static_cast<const V3Control*>([ctl_buf_ contents]);
-        return Counters{ c->exec_done, c->validate_done, c->commit_done };
+        Counters out;
+        out.executed       = c->exec_done;
+        out.validated      = c->validate_done;
+        out.committed      = c->commit_done;
+        out.exec_alive     = c->exec_alive;
+        out.validate_alive = c->validate_alive;
+        out.commit_alive   = c->commit_alive;
+        return out;
     }
 
     std::unique_ptr<WaveFuture> enqueue_wave(
@@ -418,11 +421,10 @@ public:
         auto* c = static_cast<V3Control*>([ctl_buf_ contents]);
         __atomic_store_n(&c->shutdown_flag, 1u, __ATOMIC_RELEASE);
 
-        // Wait for the persistent command buffers to complete. Each kernel
-        // exits its spin loop once shutdown_flag==1 and its queue is empty.
-        if (cmd_exec_)     [cmd_exec_     waitUntilCompleted];
-        if (cmd_validate_) [cmd_validate_ waitUntilCompleted];
-        if (cmd_commit_)   [cmd_commit_   waitUntilCompleted];
+        // Wait for the unified pipeline command buffer to complete. All
+        // three workgroups exit their spin loops once shutdown_flag==1
+        // and their respective queues are empty.
+        if (cmd_exec_) [cmd_exec_ waitUntilCompleted];
     }
 
 private:
@@ -450,62 +452,39 @@ private:
         std::memset(c, 0, sizeof(V3Control));
     }
 
-    /// Launch each kernel as its own command buffer with a fixed number of
-    /// workgroups. The kernels spin until shutdown_flag is set and the
-    /// queue is empty.
+    /// Launch the unified pipeline kernel as a 3-workgroup grid.
+    ///
+    /// Apple Silicon's compute scheduler does not co-execute persistent
+    /// kernels submitted as separate dispatches — the first hot-spinner
+    /// starves the rest. The reliable pattern is one kernel grid with
+    /// three workgroups; gid picks the role (exec/validate/commit). Metal
+    /// schedules all workgroups onto compute units the same way it does
+    /// any normal multi-workgroup kernel.
     void launch_persistent()
     {
-        // For v0.29 we use a single workgroup per kernel (one consumer per
-        // queue). Multi-consumer scaling is a v0.30 task — it requires the
-        // CAS pop path to handle higher contention, which the kernel
-        // already supports but isn't stress-tested.
-        //
-        // 1 thread per workgroup (tid==0 lane only). 1 workgroup. The
-        // "thread" still uses a workgroup so future additions can fan out.
-
-        auto launch = [&](id<MTLCommandQueue> q,
-                          id<MTLComputePipelineState> pso,
-                          NSArray<id<MTLBuffer>>* buffers,
-                          id<MTLCommandBuffer>* out_cmd) {
-            id<MTLCommandBuffer> cmd = [q commandBuffer];
-            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-            [enc setComputePipelineState:pso];
-            for (NSUInteger i = 0; i < buffers.count; ++i)
-                [enc setBuffer:buffers[i] offset:0 atIndex:i];
-            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-            [enc endEncoding];
-            [cmd commit];
-            *out_cmd = cmd;
-        };
-
-        // exec_worker buffers: exec_q_hdr, exec_q_items, validate_q_hdr,
-        //   validate_q_items, ctl, inputs, results
-        // We need an inputs/results buffer present at launch — they are
-        // grown on first enqueue. Bind a 1-byte placeholder until then.
         ensure_arena_placeholder();
 
-        NSArray<id<MTLBuffer>>* exec_buffers = @[
+        NSArray<id<MTLBuffer>>* pipeline_buffers = @[
             exec_q_hdr_,      exec_q_items_,
             validate_q_hdr_,  validate_q_items_,
-            ctl_buf_,
-            arena_.inputs,    arena_.results,
-        ];
-        NSArray<id<MTLBuffer>>* validate_buffers = @[
-            validate_q_hdr_,  validate_q_items_,
             commit_q_hdr_,    commit_q_items_,
             ctl_buf_,
             arena_.inputs,    arena_.results,
-        ];
-        NSArray<id<MTLBuffer>>* commit_buffers = @[
-            commit_q_hdr_,    commit_q_items_,
-            ctl_buf_,
             arena_.committed,
         ];
 
-        launch(exec_queue_,     exec_pso_,     exec_buffers,     &cmd_exec_);
-        launch(validate_queue_, validate_pso_, validate_buffers, &cmd_validate_);
-        launch(commit_queue_,   commit_pso_,   commit_buffers,   &cmd_commit_);
+        id<MTLCommandBuffer> cmd = [exec_queue_ commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:pipeline_pso_];
+        for (NSUInteger i = 0; i < pipeline_buffers.count; ++i)
+            [enc setBuffer:pipeline_buffers[i] offset:0 atIndex:i];
+        [enc dispatchThreadgroups:MTLSizeMake(3, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        cmd_exec_ = cmd;
+        cmd_validate_ = nil;
+        cmd_commit_ = nil;
     }
 
     void ensure_arena_placeholder()
@@ -538,9 +517,7 @@ private:
     id<MTLCommandQueue> exec_queue_;
     id<MTLCommandQueue> validate_queue_;
     id<MTLCommandQueue> commit_queue_;
-    id<MTLComputePipelineState> exec_pso_;
-    id<MTLComputePipelineState> validate_pso_;
-    id<MTLComputePipelineState> commit_pso_;
+    id<MTLComputePipelineState> pipeline_pso_;
     std::string device_name_str_;
 
     id<MTLBuffer> exec_q_hdr_;
@@ -585,21 +562,16 @@ std::unique_ptr<V3PersistentRunner> V3PersistentRunner::create()
         if (!lib) return nullptr;
 
         NSError* err = nil;
-        id<MTLFunction> f_exec     = [lib newFunctionWithName:@"v3_exec_worker"];
-        id<MTLFunction> f_validate = [lib newFunctionWithName:@"v3_validate_worker"];
-        id<MTLFunction> f_commit   = [lib newFunctionWithName:@"v3_commit_worker"];
-        if (!f_exec || !f_validate || !f_commit) return nullptr;
+        id<MTLFunction> f_pipeline = [lib newFunctionWithName:@"v3_pipeline_worker"];
+        if (!f_pipeline) return nullptr;
 
-        id<MTLComputePipelineState> pso_exec     = [device newComputePipelineStateWithFunction:f_exec     error:&err];
-        if (!pso_exec) return nullptr;
-        id<MTLComputePipelineState> pso_validate = [device newComputePipelineStateWithFunction:f_validate error:&err];
-        if (!pso_validate) return nullptr;
-        id<MTLComputePipelineState> pso_commit   = [device newComputePipelineStateWithFunction:f_commit   error:&err];
-        if (!pso_commit) return nullptr;
+        id<MTLComputePipelineState> pso_pipeline =
+            [device newComputePipelineStateWithFunction:f_pipeline error:&err];
+        if (!pso_pipeline) return nullptr;
 
         return std::make_unique<V3PersistentRunnerImpl>(
             device, exec_q, validate_q, commit_q,
-            pso_exec, pso_validate, pso_commit, [device name]);
+            pso_pipeline, [device name]);
     }
 }
 

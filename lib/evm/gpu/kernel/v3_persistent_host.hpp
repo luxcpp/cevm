@@ -99,6 +99,9 @@ public:
         uint64_t executed;
         uint64_t validated;
         uint64_t committed;
+        uint32_t exec_alive;
+        uint32_t validate_alive;
+        uint32_t commit_alive;
     };
     virtual Counters counters() const = 0;
 
