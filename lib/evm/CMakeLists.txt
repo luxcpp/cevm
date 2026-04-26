@@ -453,7 +453,10 @@ if(APPLE)
     add_library(evm-kernel-metal STATIC
         gpu/kernel/evm_kernel_host.mm
         gpu/kernel/v3_persistent_host.mm
-        gpu/slot/slot_engine.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_gpu_engine.mm
+    )
+    target_include_directories(evm-kernel-metal PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../>
     )
     target_compile_features(evm-kernel-metal PUBLIC cxx_std_20)
     target_link_libraries(evm-kernel-metal PUBLIC evm-kernel)
@@ -556,20 +559,21 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
-    # GPU Slot Engine tests (v0.31): bounded-epoch scheduler, device-
-    # resident rings, services-not-phases. Empty slot, single-tx flow,
-    # multi-tx counter monotonicity, bounded backpressure across epochs,
-    # end-to-end 1024-tx stress.
-    add_executable(slot-engine-test
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/slot_engine_test.mm)
-    target_compile_features(slot-engine-test PRIVATE cxx_std_20)
-    target_link_libraries(slot-engine-test PRIVATE
+    # QuasarGPU Engine tests (v0.31..v0.37): wave-tick scheduler,
+    # device-resident rings, real keccak roots, async cold-state, Quasar
+    # quorum aggregation. CEVM execution adapter for Quasar consensus
+    # rounds (luxfi/consensus protocol/quasar).
+    add_executable(quasar-gpu-engine-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_gpu_engine_test.mm)
+    target_compile_features(quasar-gpu-engine-test PRIVATE cxx_std_20)
+    target_link_libraries(quasar-gpu-engine-test PRIVATE
         evm-kernel-metal evm-kernel evm evmc::evmc intx::intx
         "-framework Metal" "-framework Foundation"
     )
-    target_include_directories(slot-engine-test PRIVATE
+    target_include_directories(quasar-gpu-engine-test PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
         $<BUILD_INTERFACE:${include_dir}>
     )
 
