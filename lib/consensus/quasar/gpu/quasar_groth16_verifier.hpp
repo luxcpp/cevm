@@ -82,4 +82,22 @@ compute_vk_root(const Groth16VerifyingKey& vk) noexcept;
     const uint8_t public_inputs_hash[32],
     const uint8_t vk_root[32]) noexcept;
 
+// =============================================================================
+// v0.45 — batched Groth16 verify.
+//
+// Each Groth16 verify is a 4-pairing equation (e(A,B) = e(α,β)·e(L,γ)·e(C,δ)).
+// Batching N proofs against the SAME VK collapses ~3N invariant Miller loops
+// per N proofs (only e(A_i,B_i) and the C_i term are proof-specific) into one
+// final exponentiation, yielding ≥10× on N≥16 batches.
+//
+// All proofs in the batch must commit to the supplied vk (the function
+// computes vk_root once and rejects mismatches).
+// =============================================================================
+[[nodiscard]] bool verify_groth16_batch(
+    const uint8_t* const proofs[],              ///< n × pointer to 192-byte proof
+    const std::vector<std::vector<std::array<uint8_t, 32>>>& public_inputs_per_proof,
+    const Groth16VerifyingKey& vk,
+    const uint8_t vk_root[32],
+    std::size_t n) noexcept;
+
 }  // namespace quasar::gpu

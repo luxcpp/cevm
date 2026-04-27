@@ -1,0 +1,32 @@
+[quasar_round_bench] starting
+device: Apple M1 Max
+
+# Quasar full-round wall clock (Metal vs CPU reference)
+workload=fast.1024          tx=1024  cpu_min=   1.490ms cpu_mean=   1.540ms metal_min= 359.500ms metal_mean=2620.792ms speedup_min= 0.00x speedup_mean= 0.00x cpu_rounds_per_sec=   671.4 metal_rounds_per_sec=     2.8
+workload=same_key.16        tx=16    cpu_min=   0.027ms cpu_mean=   0.028ms metal_min=  18.186ms metal_mean=  18.662ms speedup_min= 0.00x speedup_mean= 0.00x cpu_rounds_per_sec= 36585.8 metal_rounds_per_sec=    55.0
+workload=nebula.100         tx=100   cpu_min=   0.150ms cpu_mean=   0.155ms metal_min= 373.056ms metal_mean= 994.208ms speedup_min= 0.00x speedup_mean= 0.00x cpu_rounds_per_sec=  6668.5 metal_rounds_per_sec=     2.7
+
+# Precompile per-call timings (host CPU)
+precompile=bls_aggregate_verify_single batch=1    batch_min_us=   1111.6 per_call_us=1111.62 calls_per_sec=     900
+precompile=bls_aggregate_verify_single batch=16   batch_min_us=  17874.6 per_call_us=1117.16 calls_per_sec=     895
+precompile=bls_aggregate_verify_single batch=128  batch_min_us= 145301.1 per_call_us=1135.17 calls_per_sec=     881
+precompile=bls_aggregate_verify_single batch=1024 batch_min_us=1172986.0 per_call_us=1145.49 calls_per_sec=     873
+precompile=groth16_vk_root           ic_size=8    min_us=     1.50 calls_per_sec=  666667
+precompile=ringtail_share_verify     share_len=64   min_us=     0.00 calls_per_sec=     inf
+
+[quasar_round_bench] done
+[precompiles_bench v0.45] starting
+
+# Batched vs unbatched precompile verifies (host blst / keccak)
+precompile=bls_aggregate_verify n=1     unbatched_us=   1141.8 batched_us=    993.4 speedup=  1.15x same_msg_us=   1099.9 same_msg_speedup=   1.04x
+precompile=bls_aggregate_verify n=16    unbatched_us=  18513.4 batched_us=   7597.4 speedup=  2.44x same_msg_us=   2948.2 same_msg_speedup=   6.28x
+precompile=bls_aggregate_verify n=128   unbatched_us= 149820.7 batched_us=  58359.0 speedup=  2.57x same_msg_us=  16949.2 same_msg_speedup=   8.84x
+precompile=bls_aggregate_verify n=1024  unbatched_us=1199970.0 batched_us= 464442.4 speedup=  2.58x same_msg_us= 129840.2 same_msg_speedup=   9.24x
+precompile=groth16_verify        n=1     unbatched_us=      1.7 batched_us=      1.0 speedup=  1.67x
+precompile=groth16_verify        n=16    unbatched_us=     26.5 batched_us=      1.0 speedup= 25.43x
+precompile=groth16_verify        n=128   unbatched_us=   2058.3 batched_us=      1.1 speedup=1900.59x
+precompile=ringtail_share        n=16    unbatched_us=      8.6 batched_us=      8.1 speedup=  1.06x
+precompile=ringtail_share        n=128   unbatched_us=     69.2 batched_us=     64.8 speedup=  1.07x
+precompile=ringtail_share        n=1024  unbatched_us=    556.9 batched_us=    497.7 speedup=  1.12x
+
+[precompiles_bench v0.45] done

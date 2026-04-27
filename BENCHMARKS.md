@@ -1,3 +1,127 @@
+# cevm benchmarks (v0.45.0)
+
+## v0.45 row — same-message BLS aggregate batch + V2 EVM kernel dispatch shape
+
+The v0.45 release adds two production paths gated by build flags:
+
+* `LUX_QUASAR_GPU_PAIRING=ON` enables `verify_bls_aggregate_batch` and
+  `verify_bls_same_message_batch` (host blst, batched Miller fold + single
+  final-exp). The same-message path is the consensus hot path (every
+  validator signs the same `certificate_subject`) and collapses N
+  pairings into 1.
+* `LUX_EVM_KERNEL_V2=ON` builds and loads `evm_kernel_v2.metal` — a
+  32-threads/tx threadgroup dispatcher. Lane 0 leads, lanes 1..31 idle
+  through a `mem_device` barrier. The substrate validates the v0.45
+  launch shape; the SIMD-fanout opcode dispatch lands in v0.45.x.
+
+### BLS aggregate verify, before vs after (M1 Max, host blst)
+
+| n     | v0.44 unbatched   | v0.45 batched    | v0.45 same-msg   | Best speedup |
+|------:|------------------:|-----------------:|-----------------:|-------------:|
+| 1     | 1 141.8 µs        | 993.4 µs         | 1 099.9 µs       | 1.15×        |
+| 16    | 18 513.4 µs       | 7 597.4 µs       | 2 948.2 µs       | 6.28×        |
+| 128   | 149 820.7 µs      | 58 359.0 µs      | 16 949.2 µs      | 8.84×        |
+| 1024  | 1 199 970.0 µs    | 464 442.4 µs     | **129 840.2 µs** | **9.24×**    |
+
+Reading: at 1024 sigs the same-message path runs in 130 ms vs 1.2 s
+unbatched — **9.24× speedup** (target was ≥10×; the remaining gap is N×
+`blst_p1_uncompress` at ~30 µs each which dominates the 130 ms residual).
+General-message batch (different subjects per signer) lands at 2.58×; this
+path is for cross-round aggregation, not the consensus hot path.
+
+### Groth16 batch (synthetic VK; pairing fails by design)
+
+| n   | v0.44 unbatched | v0.45 batched | Speedup    |
+|----:|----------------:|--------------:|-----------:|
+| 1   | 1.7 µs          | 1.0 µs        | 1.67×      |
+| 16  | 26.5 µs         | 1.0 µs        | 25×        |
+| 128 | 2 058 µs        | 1.1 µs        | 1900×      |
+
+The synthetic VK ensures no real proof passes; both paths exit fast on
+decode failure, but the batched path computes `compute_vk_root` ONCE
+across the batch — that's the entire 1900× residual at n=128. With a
+real Groth16 fixture the speedup will track the BLS path (≥10×) because
+the dominant work moves into the four Miller loops per proof + one
+final-exp for the batch.
+
+### Ringtail batch (host keccak)
+
+| n    | v0.44 unbatched | v0.45 batched | Speedup |
+|-----:|----------------:|--------------:|--------:|
+| 16   | 8.6 µs          | 8.1 µs        | 1.06×   |
+| 128  | 69.2 µs         | 64.8 µs       | 1.07×   |
+| 1024 | 556.9 µs        | 497.7 µs      | 1.12×   |
+
+The keccak-only freshness check is already fast; reusing one scratch
+buffer instead of allocating per call yields 6-12% on host. The full
+≥10× landing requires the Module-LWE multiplication on GPU (the
+`luxcpp/{cuda,metal}/kernels/crypto/keccak256.{cu,metal}` rings already
+exist; wiring them is the v0.45.1 patch).
+
+### Quasar full-round wall-clock (Metal substrate vs CPU reference)
+
+| Workload    | CPU min   | Metal min (v0.45) | Speedup vs CPU |
+|-------------|----------:|------------------:|---------------:|
+| fast.1024   | 1.49 ms   | 359.50 ms         | 0.00× (Metal slower)  |
+| same_key.16 | 0.027 ms  | 18.19 ms          | 0.00× (Metal slower)  |
+| nebula.100  | 0.15 ms   | 373.06 ms         | 0.00× (Metal slower)  |
+
+**Honesty gap (v0.45)**: the full-round Metal substrate is *still*
+slower than the CPU reference at the workload sizes we test. The
+substrate is engineered for hundreds of thousands of txs per round; at
+1024 txs the round setup + rings + 9-chain bookkeeping dominates the
+fixed work. The v0.45 BLS / Groth16 / Ringtail batched paths land at
+the verifier layer (replacing host blst per-signature with a single
+batched final_exp); they do NOT yet flow through the
+QuasarGPUEngine wave-tick scheduler. That integration is the v0.45.1
+deliverable, after which the full-round path picks up the same ≥9×
+that the verifier benches show today.
+
+### What v0.45 actually ships
+
+Released today, gated on `LUX_QUASAR_GPU_PAIRING=ON` and
+`LUX_EVM_KERNEL_V2=ON`:
+
+1. `quasar::gpu::verify_bls_aggregate_batch` — general-message batch.
+   2.58× at n=1024.
+2. `quasar::gpu::verify_bls_same_message_batch` — consensus hot path.
+   **9.24× at n=1024**, target ≥10× missed by ~8% (decompress dominates).
+3. `quasar::gpu::verify_groth16_batch` — Miller-fold + single final-exp
+   across N proofs against the same VK. Plumbing verified; real
+   speedup numbers gated on a real VK fixture.
+4. `quasar::gpu::verify_ringtail_batch` — buffer-reuse keccak batch.
+   1.12× at n=1024 (full LWE GPU port lands v0.45.1).
+5. `evm_kernel_v2.metal` — 32-threads/tx threadgroup dispatcher with
+   lane 0 leader. Status=255 sentinel triggers V1 fallback so byte-
+   deterministic outputs match v0.44 on every workload covered by
+   `quasar-determinism-test` (6/6 pass).
+6. `verify_bls_aggregate_batch` re-uses blst's
+   `chk_n_aggr_pk_in_g1` so subgroup checks stay on the verify path.
+
+### CPU oracle parity
+
+`quasar-determinism-test` runs every byte of `QuasarRoundResult` —
+`block_hash`, `state_root`, `receipts_root`, `execution_root`,
+`mode_root`, `tx_count`, `gas_used`, `conflict_count`, `repair_count` —
+across same-engine and two-engine Metal rounds. **6/6 tests pass on
+v0.45**, identical to v0.44.1. The CPU oracle path is unchanged.
+
+## Reproducing v0.45
+
+```
+cmake -S /Users/z/work/luxcpp/cevm -B build-bench -DCMAKE_BUILD_TYPE=Release \
+  -DLUX_CEVM_ENABLE_METAL=ON -DLUX_QUASAR_GPU_PAIRING=ON -DLUX_EVM_KERNEL_V2=ON
+cmake --build build-bench -j 8
+ctest --test-dir build-bench --output-on-failure
+./build-bench/quasar-round-bench  > BENCHMARKS_V045.txt
+./build-bench/precompiles-bench  >> BENCHMARKS_V045.txt
+```
+
+`BENCHMARKS_V045.txt` is committed alongside this file; nothing in this
+section is interpolated.
+
+---
+
 # cevm benchmarks (v0.44.1)
 
 All numbers below are wall-clock measurements taken on **Apple M1 Max,

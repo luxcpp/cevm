@@ -264,9 +264,25 @@ public:
     std::vector<TxResult> execute_v2(std::span<const HostTransaction> txs) override
     {
         BlockContext ctx{};
-        id<MTLComputePipelineState> p = pipeline_v2_ ? pipeline_v2_ : pipeline_v1_;
-        auto fut = enqueue(txs, ctx, p);
-        return fut->await();
+        // V2 fast-path: dispatch with 32-thread threadgroups so lane 0 leads
+        // and lanes 1..31 idle through a device-mem barrier. The kernel
+        // marks every tx with status=255 (NEEDS_V1_RETRY); we then run the
+        // batch through V1 to produce the actual byte-deterministic results.
+        // This preserves the v0.44 CPU-oracle byte-equality contract (same
+        // V1 path) while exercising the v0.45 SIMD dispatch shape.
+        if (!pipeline_v2_) {
+            auto fut = enqueue(txs, ctx, pipeline_v1_);
+            return fut->await();
+        }
+        auto fut_v2 = enqueue(txs, ctx, pipeline_v2_, /*v2_simd=*/true);
+        auto v2_results = fut_v2->await();
+        bool any_retry = false;
+        for (const auto& r : v2_results) {
+            if (static_cast<uint32_t>(r.status) == 255u) { any_retry = true; break; }
+        }
+        if (!any_retry) return v2_results;
+        auto fut_v1 = enqueue(txs, ctx, pipeline_v1_);
+        return fut_v1->await();
     }
 
     std::unique_ptr<TxResultFuture> execute_async(
@@ -444,9 +460,13 @@ private:
     /// exec_mutex_ is taken inside this function and moved into the
     /// returned future — released only when the future is destroyed (which
     /// the future delays until the GPU completion handler has fired).
+    /// `v2_simd` selects the V2 32-threads/tx dispatch shape (32-lane
+    /// threadgroups, one per tx); default false uses the V1 1-thread/tx
+    /// shape.
     std::unique_ptr<TxResultFuture> enqueue(std::span<const HostTransaction> txs,
                                             const BlockContext& ctx,
-                                            id<MTLComputePipelineState> pipeline)
+                                            id<MTLComputePipelineState> pipeline,
+                                            bool v2_simd = false)
     {
         if (txs.empty())
         {
@@ -634,11 +654,21 @@ private:
         [enc setBuffer:buf_log_cnt   offset:0 atIndex:11];
         [enc setBuffer:buf_ctx       offset:0 atIndex:12];
 
-        NSUInteger tpg = pipeline.maxTotalThreadsPerThreadgroup;
-        if (tpg > num_txs) tpg = num_txs;
-
-        MTLSize grid = MTLSizeMake(num_txs, 1, 1);
-        MTLSize group = MTLSizeMake(tpg, 1, 1);
+        // V1: grid = num_txs threads, threadgroup sized to pipeline's max.
+        // V2: grid = num_txs * 32 threads, threadgroup = 32 (one tx per
+        //     SIMD lane group; lane 0 leads, lanes 1..31 idle on barrier).
+        MTLSize grid;
+        MTLSize group;
+        if (v2_simd) {
+            const NSUInteger lanes = 32;
+            grid  = MTLSizeMake(num_txs * lanes, 1, 1);
+            group = MTLSizeMake(lanes, 1, 1);
+        } else {
+            NSUInteger tpg = pipeline.maxTotalThreadsPerThreadgroup;
+            if (tpg > num_txs) tpg = num_txs;
+            grid  = MTLSizeMake(num_txs, 1, 1);
+            group = MTLSizeMake(tpg, 1, 1);
+        }
         [enc dispatchThreads:grid threadsPerThreadgroup:group];
 
         [enc endEncoding];

@@ -71,4 +71,50 @@ bool verify_ringtail_share(
     return true;
 }
 
+bool verify_ringtail_batch(
+    const uint8_t subject[32],
+    const uint8_t qchain_ceremony_root[32],
+    const RingtailShareInput* shares,
+    std::size_t n) noexcept
+{
+    if (n == 0) return true;
+    if (subject == nullptr || qchain_ceremony_root == nullptr || shares == nullptr)
+        return false;
+
+    // One reusable scratch buffer keeps allocator off the hot path. Sized
+    // to the largest legal share + envelope; grows on demand.
+    std::vector<uint8_t> buf;
+    buf.reserve(32 + 32 + 4 + 4 + 4 + 1024 + 32);
+
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& s = shares[i];
+        if (s.share == nullptr) return false;
+        if (s.share_len < kMinShareLen || s.share_len > kMaxShareLen) return false;
+
+        const uint8_t* challenge   = s.share + 0u;
+        const uint8_t* witness_hash = s.share + 32u;
+        uint32_t z_len = 0u;
+        for (size_t k = 0; k < 4; ++k)
+            z_len |= uint32_t(s.share[64u + k]) << (k * 8u);
+        if (z_len > s.share_len - kMinShareLen) return false;
+        const uint8_t* z = s.share + 68u;
+
+        buf.clear();
+        buf.insert(buf.end(), subject, subject + 32);
+        buf.insert(buf.end(), qchain_ceremony_root, qchain_ceremony_root + 32);
+        for (size_t k = 0; k < 4; ++k)
+            buf.push_back(static_cast<uint8_t>((s.participant_index >> (k * 8u)) & 0xFFu));
+        for (size_t k = 0; k < 4; ++k)
+            buf.push_back(static_cast<uint8_t>((s.round_index >> (k * 8u)) & 0xFFu));
+        for (size_t k = 0; k < 4; ++k)
+            buf.push_back(static_cast<uint8_t>((z_len >> (k * 8u)) & 0xFFu));
+        buf.insert(buf.end(), z, z + z_len);
+        buf.insert(buf.end(), witness_hash, witness_hash + 32);
+
+        auto h = ethash::keccak256(buf.data(), buf.size());
+        if (std::memcmp(h.bytes, challenge, 32) != 0) return false;
+    }
+    return true;
+}
+
 }  // namespace quasar::gpu

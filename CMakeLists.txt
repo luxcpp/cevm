@@ -14,6 +14,20 @@ option(ASSERTIONS "Force enable the assertions in the code ignoring the CMAKE_BU
 option(CEVM_TESTING "Build tests and test tools" OFF)
 option(CEVM_FUZZING "Instrument libraries and build fuzzing tools" OFF)
 option(CEVM_CUDA "Enable CUDA backend (NVIDIA GPU acceleration)" OFF)
+
+# v0.45 build flags. Metal is auto-enabled on Apple; this option is accepted
+# (and asserted) so callers can pin it on/off without surprise. The two
+# kernel/pairing flags switch on the V2 EVM kernel and the GPU-batched
+# pairing path respectively. Off by default so v0.44 builds unchanged.
+option(LUX_CEVM_ENABLE_METAL    "Enable Apple Metal backend (auto on APPLE)" ON)
+option(LUX_EVM_KERNEL_V2        "Build the V2 32-threads/tx EVM kernel"       OFF)
+option(LUX_QUASAR_GPU_PAIRING   "Enable batched BLS/Groth16/Ringtail pairing" OFF)
+if(LUX_EVM_KERNEL_V2)
+    add_compile_definitions(LUX_EVM_KERNEL_V2=1)
+endif()
+if(LUX_QUASAR_GPU_PAIRING)
+    add_compile_definitions(LUX_QUASAR_GPU_PAIRING=1)
+endif()
 # luxcpp/evm targeted coverage. Distinct from -DCOVERAGE which instruments
 # every TU in the project; LUXCPP_EVM_COVERAGE only instruments the targets
 # that constitute the four-backend parity surface (evm, evm-gpu,
@@ -179,10 +193,10 @@ endif()
 
 set(include_dir ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+enable_testing()
 add_subdirectory(lib)
 
 if(CEVM_TESTING)
-    enable_testing()
     add_subdirectory(test)
 endif()
 

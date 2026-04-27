@@ -678,6 +678,66 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
+    # v0.45 — precompiles bench: BLS / Groth16 / Ringtail batched-vs-unbatched.
+    # Lives at the build root as `precompiles-bench` (matching the
+    # acceptance script `./build-bench/precompiles-bench`). Self-contained,
+    # no GoogleTest, no google-benchmark — same harness pattern as
+    # quasar-round-bench.
+    add_executable(precompiles-bench
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/precompiles_bench_v045.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_groth16_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp)
+    target_compile_features(precompiles-bench PRIVATE cxx_std_20)
+    target_link_libraries(precompiles-bench PRIVATE
+        blst::blst cevm::precompiles
+        "-framework Foundation")
+    target_include_directories(precompiles-bench PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+    set_target_properties(precompiles-bench PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+    # Mirror quasar-round-bench to the build root so the acceptance
+    # script's `./build-bench/quasar-round-bench` resolves directly.
+    if(TARGET quasar-round-bench)
+        set_target_properties(quasar-round-bench PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    endif()
+
+    # Register every Quasar / EVM kernel / parity test target with ctest so
+    # `ctest --test-dir build-bench --output-on-failure` runs them. Each
+    # test's command is the binary itself; they exit non-zero on failure
+    # via the per-suite EXPECT macros.
+    foreach(t IN ITEMS
+        quasar-bls-verifier-test
+        quasar-9chain-integration-test
+        quasar-gpu-engine-test
+        quasar-determinism-test
+        evm-test-opcodes
+        evm-test-pipeline
+        evm-test-modes
+        evm-test-host-bridge
+        evm-test-gpu-state
+        evm-parity-test
+        dispatch-test
+        refund-test
+        stack-depth-test
+        storage-overflow-test
+        kernel-edge-cases-test
+        access-list-test
+        cpu-interpreter-spec-test
+        evm-precompile-test
+        metal-host-test
+        v3-persistent-test
+        evm-unified-pipeline-test
+    )
+        if(TARGET ${t})
+            add_test(NAME ${t} COMMAND ${t})
+        endif()
+    endforeach()
 endif()
 
 # State layer: full Ethereum state (accounts, storage, journal) for cevm
