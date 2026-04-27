@@ -103,6 +103,22 @@ set_source_files_properties(vm.cpp PROPERTIES COMPILE_DEFINITIONS PROJECT_VERSIO
 add_standalone_library(evm)
 _luxcpp_evm_apply_coverage(evm)
 
+# LP-090 v0.50: ConflictSpec ABI — STM conflict declaration scaffold.
+# Five sources (AccessList > ABI > Historical > Precompile > Learned > Declared)
+# composed in fixed priority order. Consumed by Prism placement and
+# QuasarSTM validation; below threshold, validation falls back to today's
+# dynamic-discovery Block-STM (byte-equal to v0.47.x).
+add_library(evm-stm STATIC
+    stm/conflict_spec.cpp
+    stm/conflict_spec.hpp
+)
+target_compile_features(evm-stm PUBLIC cxx_std_20)
+target_include_directories(evm-stm PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${include_dir}>
+)
+_luxcpp_evm_apply_coverage(evm-stm)
+
 # luxcpp/gpu: unified GPU acceleration library
 set(LUXCPP_GPU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../gpu" CACHE PATH "Path to luxcpp/gpu")
 if(EXISTS "${LUXCPP_GPU_DIR}/CMakeLists.txt")
@@ -451,6 +467,18 @@ if(GTest_FOUND)
         evm-kernel evm evmc::evmc GTest::gtest GTest::gtest_main
     )
 endif()
+
+# LP-090 v0.50: STM ConflictSpec ABI regression suite. No GTest dependency
+# (plain main + EXPECT macros), so always builds. Exercises the 5 sources +
+# composer priority + reducer-lane semantics + repair_amplification bench.
+add_executable(stm-conflict-spec-test
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/stm_conflict_spec_test.cpp
+)
+target_compile_features(stm-conflict-spec-test PRIVATE cxx_std_20)
+target_include_directories(stm-conflict-spec-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${include_dir}
+)
+target_link_libraries(stm-conflict-spec-test PRIVATE evm-stm)
 
 # GPU EVM kernel interpreter (header-only library for CPU path)
 add_library(evm-kernel INTERFACE)
@@ -884,6 +912,7 @@ if(APPLE)
         evm-unified-pipeline-test
         precompile-service-test
         precompile-residency-test
+        stm-conflict-spec-test
     )
         if(TARGET ${t})
             add_test(NAME ${t} COMMAND ${t})

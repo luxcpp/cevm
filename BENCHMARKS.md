@@ -1,4 +1,86 @@
-# cevm benchmarks (v0.47.2)
+# cevm benchmarks (v0.50)
+
+## v0.50 row — ConflictSpec ABI (LP-090 STM declaration scaffold)
+
+The v0.50 patch lands the **ConflictSpec ABI** (`lib/evm/stm/`): a 28-byte
+POD per-tx descriptor declaring read / write / reducer lanes from five
+sources in fixed priority order:
+
+  1. **AccessList** (EIP-2930) — 50 LOC parser, confidence 200
+  2. **ABI selector** — 100 LOC table (ERC-20 transfer/transferFrom/approve,
+     UniV2 swap, UniV3 exactInputSingle, ERC-721 safeTransferFrom),
+     confidence 180
+  3. **Historical profile** — 80 LOC LRU keyed on (code_hash, selector),
+     confidence 150
+  4. **Precompile id** — 50 LOC table for 0x01..0x11, confidence 220
+  5. **Learned predictor** — interface stub returning Declared/0
+     (NOTIMPL — retire-plan documented; impl waits on offline-trained
+     int8-quantised network from lux/zen-train)
+
+Composer threshold: confidence >= 100 ⇒ QuasarSTM validation may skip
+dynamic discovery for that tx (declared spec is trusted). Below
+threshold ⇒ falls back to today's optimistic Block-STM path
+(byte-equal preserved).
+
+### `stm-conflict-spec-test` (Apple M1, build/lib/evm/, plain main)
+
+```
+[stm_conflict_spec_test] starting
+  ok  : struct_layout_byte_equal
+  ok  : compose_from_access_list
+  ok  : compose_from_abi_erc20
+  ok  : compose_from_historical_lru
+  ok  : compose_from_precompile
+  ok  : compose_from_learned_notimpl
+  ok  : composer_priority_order
+  ok  : reducer_lane_no_repair
+
+  bench: N=8192 txs, declared = AccessList(0)+ABI(1)+Hist(2)+Pre(3) > 100
+  bench: conflict=0.00%  zipf=0  declared_rate=1.0000  repair_amplification=1.0000
+  bench: conflict=0.00%  zipf=1  declared_rate=1.0000  repair_amplification=1.0000
+  bench: conflict=0.01%  zipf=0  declared_rate=1.0000  repair_amplification=1.0000
+  bench: conflict=0.01%  zipf=1  declared_rate=1.0000  repair_amplification=1.0000
+  bench: conflict=0.10%  zipf=0  declared_rate=1.0000  repair_amplification=1.0000
+  bench: conflict=0.10%  zipf=1  declared_rate=1.0000  repair_amplification=1.0000
+  bench: conflict=1.00%  zipf=0  declared_rate=1.0000  repair_amplification=1.0000
+  bench: conflict=1.00%  zipf=1  declared_rate=1.0000  repair_amplification=1.0000
+  bench: conflict=10.00% zipf=0  declared_rate=1.0000  repair_amplification=1.0000
+  bench: conflict=10.00% zipf=1  declared_rate=1.0000  repair_amplification=1.0000
+  ok  : repair_amplification_synthetic
+[stm_conflict_spec_test] passed=9 failed=0
+```
+
+### Determinism preserved
+
+`quasar-determinism-test` 6/6 sections still pass. `quasar-stm-red-review-test`
+8/8 sections still pass. The ConflictSpec library is built and tested but
+not yet wired into the runtime hot paths — that wiring follows once we
+measure end-to-end repair_amplification on a recorded mainnet block
+trace, in a separate PR. The scaffold lands first so downstream consumers
+(Prism placement, QuasarSTM validator, future Learned predictor impl)
+build against the stable ABI today.
+
+| Metric                     | Target  | v0.50 measured |
+|:---------------------------|:--------|---------------:|
+| ConflictSpec sizeof        | 28 B    | 28 B           |
+| ConflictLane sizeof        | 52 B    | 52 B           |
+| declared_rate (ABI mix)    | >0.99   | 1.0000         |
+| repair_amplification @0%   | <1.01   | 1.0000         |
+| repair_amplification @0.1% | <1.01   | 1.0000         |
+| repair_amplification @1%   | report  | 1.0000         |
+| AFT 2025 reference         | 1.75x seq, 1.33x PEVM | scaffold only |
+
+### Reproducing v0.50
+
+```
+cmake -S /Users/z/work/luxcpp/cevm -B build -DCMAKE_BUILD_TYPE=Release \
+  -DLUX_CEVM_ENABLE_METAL=ON
+cmake --build build --target stm-conflict-spec-test \
+  quasar-determinism-test quasar-stm-red-review-test -j 8
+./build/lib/evm/stm-conflict-spec-test         # 9/9 must pass
+./build/lib/evm/quasar-determinism-test        # 6/6 must pass
+./build/lib/evm/quasar-stm-red-review-test     # 8/8 must pass
+```
 
 ## v0.47.2 row — V2 EVM kernel SIMD fan-out (buffer-prep, M1 honest)
 
