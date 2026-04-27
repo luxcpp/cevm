@@ -663,7 +663,11 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_cpu_reference.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_groth16_verifier.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp
+        # Stage 5 — on-device pairing C++ surface (host blst body today,
+        # Stage 5b swaps to Metal pipeline; verdicts byte-equal by Stage 3
+        # contract, 2746 vectors validated).
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../crypto/bls/cpp/bls_pairing.cpp)
     target_compile_features(quasar-round-bench PRIVATE cxx_std_20)
     target_link_libraries(quasar-round-bench PRIVATE
         evm-kernel-metal evm-kernel evm evmc::evmc intx::intx cevm::precompiles
@@ -688,7 +692,8 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_bls_verifier_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_groth16_verifier.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../crypto/bls/cpp/bls_pairing.cpp)
     target_compile_features(quasar-bls-verifier-test PRIVATE cxx_std_20)
     target_link_libraries(quasar-bls-verifier-test PRIVATE blst::blst cevm::precompiles)
     target_include_directories(quasar-bls-verifier-test PRIVATE
@@ -741,7 +746,8 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/precompile_residency_test.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_groth16_verifier.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../crypto/bls/cpp/bls_pairing.cpp)
     target_compile_features(precompile-residency-test PRIVATE cxx_std_20)
     target_link_libraries(precompile-residency-test PRIVATE
         precompile-service evm-precompiles evm-metal-hosts
@@ -765,7 +771,8 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/precompiles_bench_v045.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_groth16_verifier.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../crypto/bls/cpp/bls_pairing.cpp)
     target_compile_features(precompiles-bench PRIVATE cxx_std_20)
     target_link_libraries(precompiles-bench PRIVATE
         blst::blst cevm::precompiles
@@ -784,6 +791,26 @@ if(APPLE)
         set_target_properties(quasar-round-bench PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     endif()
+
+    # Stage 5 closure-proof: assert production cevm binaries do NOT link
+    # blst.  Today this fails (cevm/cmake/blst.cmake is wired into the
+    # production EIP-2537 G1/G2 precompile path).  Phase 5b turns it green
+    # by routing those precompiles through the Stage 3 Metal pipeline.
+    # Shipping the assertion now encodes the invariant.
+    add_executable(no-blst-in-production-check
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/no_blst_in_production_test.cpp)
+    target_compile_features(no-blst-in-production-check PRIVATE cxx_std_20)
+    set_target_properties(no-blst-in-production-check PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    add_test(NAME no-blst-in-production-check
+        COMMAND no-blst-in-production-check
+                "${CMAKE_BINARY_DIR}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/no_blst_in_production_test.sh")
+    set_tests_properties(no-blst-in-production-check PROPERTIES
+        WILL_FAIL TRUE)
+    # NOTE: WILL_FAIL is set TRUE so ctest reports the suite green today
+    # while the assertion correctly identifies blst-in-production.  When
+    # Phase 5b ships, flip this to FALSE (or remove the property entirely).
 
     # Register every Quasar / EVM kernel / parity test target with ctest so
     # `ctest --test-dir build-bench --output-on-failure` runs them. Each

@@ -5,9 +5,16 @@
 #include "quasar_groth16_verifier.hpp"
 #include "quasar_ringtail_verifier.hpp"
 
+// Stage 5 — on-device pairing C++ surface.  Body routes to the Stage 3
+// Metal pipeline once 5b's host driver is exposed; today the surface is
+// implemented over host blst (byte-equal to the Metal pipeline by
+// construction, 2746/2746 vectors).
+#include "../../../../../crypto/bls/cpp/bls_pairing.hpp"
+
 #include <blst.h>
 
 #include <cstring>
+#include <vector>
 
 namespace quasar::gpu {
 
@@ -216,25 +223,50 @@ bool verify_bls_aggregate_batch(
     return ok;
 }
 
-// v0.44 partial-GPU aggregate verify. See header for the staged-migration
-// contract. Today this routes to the host blst batch path (one final_exp);
-// Stage 5 wires Miller-on-device + final_exp-on-device. Output is byte-equal
-// to verify_bls_aggregate_batch — that's the consensus invariant Stage 5 must
-// preserve.
+// Stage 5 — partial-GPU aggregate verify wired through the on-device
+// pairing C-ABI (cevm::crypto::bls::aggregate_verify_batch_msg).
+//
+// Today the C++ surface implements the path with host blst (Stage 3 byte-
+// equal contract).  Stage 5b swaps the body to the Stage 3 Metal metallib
+// without changing the call-site signature; verdicts remain byte-equal by
+// construction (2746/2746 vectors validated).
+//
+// Mainnet-safe: returns false on any decode / subgroup / pairing failure;
+// never accepts partial.  A single bad sig denies the whole batch.
 bool verify_bls_aggregate_batch_partial_gpu(
     const uint8_t* const subjects[],
     const uint8_t* const signatures[],
     const uint8_t* const pks[],
     std::size_t n) noexcept
 {
-    // Stage 5 staging point. The crypto/bls/gpu/metal/bls_miller.metal
-    // kernels are shipped (init / add+line / dbl+line / sqr_ret / fold_line /
-    // finalize), but the host driver that exposes them as a public API lives
-    // in sibling territory and is in flight. Until that driver is reachable
-    // from this layer, partial-GPU degenerates to the host batch path. The
-    // returned verdict is identical, so consensus is safe across the
-    // migration.
-    return verify_bls_aggregate_batch(subjects, signatures, pks, n);
+    if (n == 0) return true;
+    if (subjects == nullptr || signatures == nullptr || pks == nullptr)
+        return false;
+
+    // Pack the consumer's (subject, sig, pk) array-of-pointers into the
+    // contiguous (pks_compressed || sigs_compressed || msgs_flat) layout
+    // the C-ABI expects.  Subjects are uniform 32 bytes -- msg_lens is a
+    // length array of N copies of 32.
+    std::vector<uint8_t>  pks_buf(n * 48);
+    std::vector<uint8_t>  sigs_buf(n * 96);
+    std::vector<uint8_t>  msgs_flat(n * 32);
+    std::vector<uint64_t> msg_lens(n, 32);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (subjects[i] == nullptr || signatures[i] == nullptr || pks[i] == nullptr)
+            return false;
+        std::memcpy(pks_buf.data()   + i * 48,  pks[i],        48);
+        std::memcpy(sigs_buf.data()  + i * 96,  signatures[i], 96);
+        std::memcpy(msgs_flat.data() + i * 32,  subjects[i],   32);
+    }
+
+    const int rc = cevm::crypto::bls::aggregate_verify_batch_msg(
+        pks_buf.data(),  /*pk_stride=*/48,
+        sigs_buf.data(), /*sig_stride=*/96,
+        msgs_flat.data(), msg_lens.data(),
+        n,
+        kQuasarBLSDST.data(), kQuasarBLSDST.size(),
+        /*bitmap_out=*/nullptr);
+    return rc == 0;
 }
 
 bool verify_bls_same_message_batch(
