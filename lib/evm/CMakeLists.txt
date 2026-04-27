@@ -678,6 +678,40 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
+    # v0.43 — Precompile service ABI: PrecompileCall/PrecompileResult/
+    # PrecompileArtifact + per-precompile-id batched queues + fiber
+    # suspend/resume kernels. Per-precompile batched implementations land
+    # in v0.44; this is the dispatcher + queues + state machine.
+    add_library(precompile-service STATIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/precompile_service.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/precompile_service.mm)
+    target_compile_features(precompile-service PUBLIC cxx_std_20)
+    target_link_libraries(precompile-service
+        PUBLIC evm-precompiles cevm::precompiles
+        PUBLIC "-framework Metal" "-framework Foundation")
+    target_include_directories(precompile-service PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
+    add_executable(precompile-service-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/precompile_service_test.mm)
+    target_compile_features(precompile-service-test PRIVATE cxx_std_20)
+    target_link_libraries(precompile-service-test PRIVATE
+        precompile-service evm-precompiles evm-metal-hosts
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx
+        cevm::precompiles
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(precompile-service-test PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
     # v0.45 — precompiles bench: BLS / Groth16 / Ringtail batched-vs-unbatched.
     # Lives at the build root as `precompiles-bench` (matching the
     # acceptance script `./build-bench/precompiles-bench`). Self-contained,
@@ -733,6 +767,7 @@ if(APPLE)
         metal-host-test
         v3-persistent-test
         evm-unified-pipeline-test
+        precompile-service-test
     )
         if(TARGET ${t})
             add_test(NAME ${t} COMMAND ${t})
