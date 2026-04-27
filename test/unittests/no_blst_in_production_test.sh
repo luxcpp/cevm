@@ -1,12 +1,11 @@
 #!/bin/bash
 # CI assertion: production cevm binaries must not link blst.
 #
-# Stage 5 closure proof.  Today the cevm production library still links
-# blst (cevm/cmake/blst.cmake is wired into cevm-precompiles for the
-# EIP-2537 G1/G2 add/mul precompiles in cevm/lib/cevm_precompiles/bls.cpp).
-# Phase 5b drops that dependency by routing those precompiles through the
-# Stage 3 Metal pipeline.  This script encodes the invariant: when 5b
-# lands, this assertion passes.  Until then, it documents the gap.
+# Phase 5b closure proof.  cevm_precompiles' bls.cpp + kzg.cpp now call
+# the `bls12_381_*` and `bls12_381_kzg_verify_proof` extern "C" symbols
+# resolved by the canonical luxcpp/crypto adapter (cevm_bls_kzg_canonical_cpu).
+# That adapter links blst privately as a test-time oracle.  cevm's own
+# production static archives carry no blst symbol references.
 #
 # Usage: no_blst_in_production_test.sh [BUILD_DIR]
 #   BUILD_DIR defaults to "build".
@@ -55,11 +54,11 @@ fi
 
 if [[ "$EXIT_CODE" -ne 0 ]]; then
     echo ""
-    echo "Phase 5b cleanup pending: route cevm_precompiles/bls.cpp (EIP-2537 G1/G2"
-    echo "add/mul/msm) through the Stage 3 Metal pipeline + drop blst.cmake from"
-    echo "the production cevm library.  This assertion is the closure proof —"
-    echo "it ships today and passes once 5b lands.  Test binaries (quasar-bls-"
-    echo "verifier-test etc) are allowed to link blst as the test-time oracle."
+    echo "Production library carries blst symbol references.  Phase 5b's"
+    echo "invariant is: cevm_precompiles, evm-precompiles, evm-kernel-metal,"
+    echo "evm-gpu, evm-metal-hosts, precompile-service must all be blst-free."
+    echo "Test binaries (quasar-bls-verifier-test etc) link blst::oracle as the"
+    echo "test-time reference; that is allowed and not checked here."
     exit 1
 fi
 

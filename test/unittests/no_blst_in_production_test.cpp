@@ -1,20 +1,16 @@
 // Copyright (C) 2026, Lux Partners Limited. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Stage 5 closure-proof test runner.
+// Phase 5b closure-proof test runner.
 //
 // Spawns the no_blst_in_production_test.sh assertion against the build
 // directory the test was launched from.  Exits with the script's exit
 // code so ctest reports it as PASS/FAIL.
 //
-// Today this test is expected to FAIL because cevm/cmake/blst.cmake is
-// still wired into the production cevm library for the EIP-2537 G1/G2
-// precompiles (cevm/lib/cevm_precompiles/bls.cpp).  Phase 5b drops that
-// link by routing the precompiles through the Stage 3 Metal pipeline.
-//
-// The assertion ships now: it encodes the invariant Stage 5 establishes
-// (consumers no longer call blst directly) and turns green once Phase 5b
-// finishes the cleanup.
+// Phase 5b: cevm_precompiles' bls.cpp + kzg.cpp call extern "C" symbols
+// (`bls12_381_*`, `bls12_381_kzg_verify_proof`) defined by the canonical
+// luxcpp/crypto adapter (cevm_bls_kzg_canonical_cpu).  No production
+// static archive carries blst symbols; this test asserts that invariant.
 
 #include <cstdio>
 #include <cstdlib>

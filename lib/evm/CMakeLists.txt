@@ -671,7 +671,7 @@ if(APPLE)
     target_compile_features(quasar-round-bench PRIVATE cxx_std_20)
     target_link_libraries(quasar-round-bench PRIVATE
         evm-kernel-metal evm-kernel evm evmc::evmc intx::intx cevm::precompiles
-        blst::blst
+        blst::oracle
         "-framework Metal" "-framework Foundation"
     )
     target_include_directories(quasar-round-bench PRIVATE
@@ -695,7 +695,7 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../../../crypto/bls/cpp/bls_pairing.cpp)
     target_compile_features(quasar-bls-verifier-test PRIVATE cxx_std_20)
-    target_link_libraries(quasar-bls-verifier-test PRIVATE blst::blst cevm::precompiles)
+    target_link_libraries(quasar-bls-verifier-test PRIVATE blst::oracle cevm::precompiles)
     target_include_directories(quasar-bls-verifier-test PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
@@ -752,7 +752,7 @@ if(APPLE)
     target_link_libraries(precompile-residency-test PRIVATE
         precompile-service evm-precompiles evm-metal-hosts
         evm-kernel-metal evm-kernel evm evmc::evmc intx::intx
-        cevm::precompiles blst::blst
+        cevm::precompiles blst::oracle
         "-framework Metal" "-framework Foundation"
     )
     target_include_directories(precompile-residency-test PRIVATE
@@ -775,7 +775,7 @@ if(APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../../crypto/bls/cpp/bls_pairing.cpp)
     target_compile_features(precompiles-bench PRIVATE cxx_std_20)
     target_link_libraries(precompiles-bench PRIVATE
-        blst::blst cevm::precompiles
+        blst::oracle cevm::precompiles
         "-framework Foundation")
     target_include_directories(precompiles-bench PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -807,10 +807,12 @@ if(APPLE)
                 "${CMAKE_BINARY_DIR}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/no_blst_in_production_test.sh")
     set_tests_properties(no-blst-in-production-check PROPERTIES
-        WILL_FAIL TRUE)
-    # NOTE: WILL_FAIL is set TRUE so ctest reports the suite green today
-    # while the assertion correctly identifies blst-in-production.  When
-    # Phase 5b ships, flip this to FALSE (or remove the property entirely).
+        WILL_FAIL FALSE)
+    # Phase 5b complete: WILL_FAIL flipped to FALSE.  cevm_precompiles is
+    # blst-free in production -- bls.cpp/kzg.cpp call extern "C" symbols
+    # that resolve to the canonical luxcpp/crypto adapter
+    # (cevm_bls_kzg_canonical_cpu in lib/cevm_precompiles/CMakeLists.txt).
+    # blst lives only in test-time oracle binaries via blst::oracle.
 
     # Register every Quasar / EVM kernel / parity test target with ctest so
     # `ctest --test-dir build-bench --output-on-failure` runs them. Each
