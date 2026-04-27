@@ -1,19 +1,4 @@
-// cevm: Fast Ethereum Virtual Machine implementation
-// Copyright 2022 The Silkworm & cevm Authors.
-// SPDX-License-Identifier: Apache-2.0
+// Phase 5c: header forward to canonical luxcpp/crypto/sha256.
+// The single source of truth lives at luxcpp/crypto/sha256/cpp/sha256.hpp.
 #pragma once
-
-#include <cstddef>
-
-namespace cevm::crypto
-{
-/// The size (32 bytes) of the SHA256 message digest.
-static constexpr std::size_t SHA256_HASH_SIZE = 256 / 8;
-
-/// Computes the SHA256 hash function.
-///
-/// @param[out] hash  The result message digest is written to the provided memory.
-/// @param      data  The input data.
-/// @param      size  The size of the input data.
-void sha256(std::byte hash[SHA256_HASH_SIZE], const std::byte* data, size_t size);
-}  // namespace cevm::crypto
+#include "sha256/cpp/sha256.hpp"
