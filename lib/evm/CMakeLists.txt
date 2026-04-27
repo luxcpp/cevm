@@ -635,6 +635,29 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
+    # v0.44.1 — Quasar round wall-clock bench: Metal substrate vs CPU
+    # reference on the three deterministic workloads, plus per-call
+    # timings for the BLS / Groth16 / Ringtail host verifiers. Output is
+    # plain stdout consumed by BENCHMARKS.md.
+    add_executable(quasar-round-bench
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_round_bench.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_cpu_reference.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_groth16_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp)
+    target_compile_features(quasar-round-bench PRIVATE cxx_std_20)
+    target_link_libraries(quasar-round-bench PRIVATE
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx cevm::precompiles
+        blst::blst
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(quasar-round-bench PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
     # v0.41 — real BLS12-381 aggregate verifier tests (Quasar 4.0
     # activation 2026-02-14). Replaces the v0.38 keccak-stub on the BLS
     # lane. Verifier is platform-independent (host blst), so the test is
