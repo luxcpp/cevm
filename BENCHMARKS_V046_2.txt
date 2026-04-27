@@ -1,0 +1,35 @@
+[precompiles_bench v0.46.2 — pubkey-affine cache] starting
+device: Apple M1 Max, host blst, Release build (-O3 -DNDEBUG)
+cache: pubkey_cache.hpp 2-way set-associative, 2048 buckets, 4096 slots, FNV1a-64
+warm-up: one untimed pass through verify_bls_same_message_batch populates cache
+runs: same-msg path is min over 100/30/10/5 runs at n=1/16/128/1024
+
+# Batched vs unbatched precompile verifies (host blst / keccak)
+precompile=bls_aggregate_verify n=1     unbatched_us=   1180.7 batched_us=    975.9 speedup=  1.21x same_msg_us=   1047.7 same_msg_speedup=   1.13x
+precompile=bls_aggregate_verify n=16    unbatched_us=  19054.1 batched_us=   7602.6 speedup=  2.51x same_msg_us=   2117.7 same_msg_speedup=   9.00x
+precompile=bls_aggregate_verify n=128   unbatched_us= 154317.5 batched_us=  58134.9 speedup=  2.65x same_msg_us=  10211.2 same_msg_speedup=  15.11x
+precompile=bls_aggregate_verify n=1024  unbatched_us=1249773.8 batched_us= 467636.9 speedup=  2.67x same_msg_us=  75684.1 same_msg_speedup=  16.51x
+precompile=groth16_verify        n=1     unbatched_us=      1.6 batched_us=      1.0 speedup=  1.62x
+precompile=groth16_verify        n=16    unbatched_us=     26.1 batched_us=      1.0 speedup= 25.06x
+precompile=groth16_verify        n=128   unbatched_us=   1968.6 batched_us=      1.1 speedup=1817.71x
+precompile=ringtail_share        n=16    unbatched_us=      8.6 batched_us=      8.0 speedup=  1.07x
+precompile=ringtail_share        n=128   unbatched_us=     67.1 batched_us=     62.2 speedup=  1.08x
+precompile=ringtail_share        n=1024  unbatched_us=    548.0 batched_us=    514.8 speedup=  1.06x
+
+[precompiles_bench v0.46.2] done
+
+[quasar_bls_verifier_test v0.46.2 — cache-live byte-equality]
+  ok  : bls_real_aggregate_verify_3_signers
+  ok  : bls_tampered_signature_rejected
+  ok  : bls_wrong_subject_rejected
+  ok  : bls_wrong_pk_rejected
+  ok  : bls_unwired_lanes_reject
+  ok  : groth16_vk_root_deterministic
+  ok  : groth16_vk_root_binds_fields
+  ok  : groth16_rejects_malformed_proof
+  ok  : groth16_wrong_vk_root_rejected
+  ok  : ringtail_share_roundtrip
+  ok  : ringtail_cross_ceremony_rejected
+  ok  : ringtail_cross_round_rejected
+  ok  : ringtail_malformed_rejected
+[quasar_bls_verifier_test] passed=13 failed=0

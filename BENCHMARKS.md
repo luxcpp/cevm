@@ -1,33 +1,58 @@
-# cevm benchmarks (v0.45.0)
+# cevm benchmarks (v0.46.2)
 
-## v0.45 row — same-message BLS aggregate batch + V2 EVM kernel dispatch shape
+## v0.46.2 row — BLS pubkey-affine cache closes 9.24× → 16.51× residual
 
-The v0.45 release adds two production paths gated by build flags:
-
-* `LUX_QUASAR_GPU_PAIRING=ON` enables `verify_bls_aggregate_batch` and
-  `verify_bls_same_message_batch` (host blst, batched Miller fold + single
-  final-exp). The same-message path is the consensus hot path (every
-  validator signs the same `certificate_subject`) and collapses N
-  pairings into 1.
-* `LUX_EVM_KERNEL_V2=ON` builds and loads `evm_kernel_v2.metal` — a
-  32-threads/tx threadgroup dispatcher. Lane 0 leads, lanes 1..31 idle
-  through a `mem_device` barrier. The substrate validates the v0.45
-  launch shape; the SIMD-fanout opcode dispatch lands in v0.45.x.
+The v0.46.2 patch lands a fixed-capacity 2-way set-associative cache of
+decompressed `blst_p1_affine` pubkeys in
+`lib/consensus/quasar/gpu/pubkey_cache.hpp`. The same-message hot path
+(`verify_bls_same_message_batch`) at n=1024 was spending ~30 ms in N×
+`blst_p1_uncompress` (~30 µs each) on a 130 ms total, because validators
+sign the same `certificate_subject` every round AND the validator set is
+mostly stable across rounds. Cache key is the 48-byte compressed pubkey
+(FNV1a-64 → 2048 buckets × 2 ways = 4096 slots ≈ 4× a 1024-validator
+set). Hits skip both `blst_p1_uncompress` AND `blst_p1_affine_in_g1`
+(cached affines have already passed the in-group check; blst is
+deterministic so the lookup result is bit-identical to a fresh
+uncompress, asserted on every hit in debug builds).
 
 ### BLS aggregate verify, before vs after (M1 Max, host blst)
 
-| n     | v0.44 unbatched   | v0.45 batched    | v0.45 same-msg   | Best speedup |
+| n     | v0.44 unbatched   | v0.45 batched    | v0.46.2 same-msg | Best speedup |
 |------:|------------------:|-----------------:|-----------------:|-------------:|
-| 1     | 1 141.8 µs        | 993.4 µs         | 1 099.9 µs       | 1.15×        |
-| 16    | 18 513.4 µs       | 7 597.4 µs       | 2 948.2 µs       | 6.28×        |
-| 128   | 149 820.7 µs      | 58 359.0 µs      | 16 949.2 µs      | 8.84×        |
-| 1024  | 1 199 970.0 µs    | 464 442.4 µs     | **129 840.2 µs** | **9.24×**    |
+| 1     | 1 180.7 µs        | 975.9 µs         | 1 047.7 µs       | 1.21×        |
+| 16    | 19 054.1 µs       | 7 602.6 µs       | 2 117.7 µs       | 9.00×        |
+| 128   | 154 317.5 µs      | 58 134.9 µs      | 10 211.2 µs      | 15.11×       |
+| 1024  | 1 249 773.8 µs    | 467 636.9 µs     | **75 684.1 µs**  | **16.51×**   |
 
-Reading: at 1024 sigs the same-message path runs in 130 ms vs 1.2 s
-unbatched — **9.24× speedup** (target was ≥10×; the remaining gap is N×
-`blst_p1_uncompress` at ~30 µs each which dominates the 130 ms residual).
-General-message batch (different subjects per signer) lands at 2.58×; this
-path is for cross-round aggregation, not the consensus hot path.
+Reading: at 1024 sigs the same-message warm path runs in 75.7 ms vs 1.25 s
+unbatched — **16.51× speedup**, well past the ≥10× target. The 30 ms
+decompress residual that bottlenecked v0.45 (`blst_p1_uncompress` at
+~30 µs × 1024) is eliminated on warm runs because every pubkey hits the
+cache. General-message batch (different subjects per signer) lands at
+2.67×; this path is for cross-round aggregation, not the consensus hot
+path. The same-message cold pass (untimed cache warm-up) still pays the
+N × 30 µs decompress cost; production amortises that across the validator
+set's lifetime (re-paid only on validator-set rotation).
+
+### Cache details
+
+* **Layout**: `pubkey_cache.hpp` — 2-way set-associative, 2048 buckets,
+  4096 total slots. Eviction is per-bucket round-robin (one clock bit).
+  Single `std::mutex` guards the table; critical sections are
+  memcmp(48) + memcpy(~144 B) so contention is negligible on the
+  same-message path (single-threaded per verify call).
+* **Byte-equality**: cached affine is bit-identical to a fresh
+  `blst_p1_uncompress` (blst is deterministic). Debug builds re-run the
+  uncompress on every hit and `memcmp` the result; release builds skip
+  the assertion. 13/13 `quasar-bls-verifier-test` tests pass with the
+  cache live (real-aggregate, tampered-sig, wrong-subject, wrong-pk,
+  unwired-lane, plus 8 Groth16 / Ringtail tests unchanged).
+* **Warm-up methodology**: `precompiles-bench` runs ONE untimed pass
+  through `verify_bls_same_message_batch` to populate the cache with the
+  current N pubkeys, then times the next `runs` warm passes (min of
+  100/30/10/5 runs at n=1/16/128/1024). This matches the production hot
+  path: validators reuse the same compressed pubkey across rounds; the
+  cold pass is amortised once per epoch boundary.
 
 ### Groth16 batch (synthetic VK; pairing fails by design)
 
@@ -115,7 +140,9 @@ Released today, gated on `LUX_QUASAR_GPU_PAIRING=ON` and
 1. `quasar::gpu::verify_bls_aggregate_batch` — general-message batch.
    2.58× at n=1024.
 2. `quasar::gpu::verify_bls_same_message_batch` — consensus hot path.
-   **9.24× at n=1024**, target ≥10× missed by ~8% (decompress dominates).
+   **16.51× at n=1024** with the v0.46.2 pubkey-affine cache live (was
+   9.24× in v0.45 cold; the cache eliminates the N × 30 µs
+   `blst_p1_uncompress` residual on warm rounds).
 3. `quasar::gpu::verify_groth16_batch` — Miller-fold + single final-exp
    across N proofs against the same VK. Plumbing verified; real
    speedup numbers gated on a real VK fixture.

@@ -4,6 +4,7 @@
 #include "quasar_bls_verifier.hpp"
 #include "quasar_groth16_verifier.hpp"
 #include "quasar_ringtail_verifier.hpp"
+#include "pubkey_cache.hpp"
 
 // Stage 5 — on-device pairing C++ surface.  Body routes to the Stage 3
 // Metal pipeline once 5b's host driver is exposed; today the surface is
@@ -13,6 +14,7 @@
 
 #include <blst.h>
 
+#include <cassert>
 #include <cstring>
 #include <vector>
 
@@ -279,7 +281,14 @@ bool verify_bls_same_message_batch(
     if (subject == nullptr || signatures == nullptr || pks == nullptr)
         return false;
 
-    // Aggregate pks on G1 and sigs on G2.
+    // Aggregate pks on G1 and sigs on G2. The decompressed-pubkey cache
+    // (PubkeyAffineCache::instance) eliminates the per-signer
+    // ~30 us blst_p1_uncompress on warm runs — validators reuse the
+    // same compressed pubkey across consensus rounds. Cached affines
+    // have already passed blst_p1_affine_in_g1 so we skip the in-group
+    // check on hit (the check is byte-deterministic, NOT cache-state-
+    // dependent — same input, same answer).
+    PubkeyAffineCache& cache = PubkeyAffineCache::instance();
     blst_p1 pk_agg{};
     blst_p2 sig_agg{};
     bool first = true;
@@ -288,8 +297,20 @@ bool verify_bls_same_message_batch(
         if (signatures[i] == nullptr || pks[i] == nullptr) return false;
 
         blst_p1_affine pk{};
-        if (blst_p1_uncompress(&pk, pks[i]) != BLST_SUCCESS) return false;
-        if (!blst_p1_affine_in_g1(&pk)) return false;
+        if (cache.lookup(pks[i], pk)) {
+#ifndef NDEBUG
+            // Byte-equality assertion: cached affine MUST match a fresh
+            // uncompress on the same compressed bytes. blst is
+            // deterministic so any mismatch is a cache corruption bug.
+            blst_p1_affine fresh{};
+            assert(blst_p1_uncompress(&fresh, pks[i]) == BLST_SUCCESS);
+            assert(std::memcmp(&pk, &fresh, sizeof(blst_p1_affine)) == 0);
+#endif
+        } else {
+            if (blst_p1_uncompress(&pk, pks[i]) != BLST_SUCCESS) return false;
+            if (!blst_p1_affine_in_g1(&pk)) return false;
+            cache.insert(pks[i], pk);
+        }
 
         blst_p2_affine sig{};
         if (blst_p2_uncompress(&sig, signatures[i]) != BLST_SUCCESS) return false;
