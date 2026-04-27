@@ -82,6 +82,111 @@ cmake --build build --target stm-conflict-spec-test \
 ./build/lib/evm/quasar-stm-red-review-test     # 8/8 must pass
 ```
 
+## v0.49 row — Fused BLS batch verifier (Issue #89)
+
+The v0.49 patch lands `cevm::crypto::bls::fused_aggregate_verify_batch`
+in `luxcpp/crypto/bls/cpp/bls_fused.{cpp,hpp}` and exposes it through
+the brand-neutral C-ABI as `bls12_381_fused_aggregate_verify_batch` +
+`bls12_381_fused_aggregate_verify_batch_aff`. The fused verifier is a
+drop-in replacement for `bls12_381_aggregate_verify_batch` (kept; the
+linear blst_pairing accumulator path stays for the per-tuple bitmap
+fallback at the consumer's choosing).
+
+### Pipeline
+
+```
+parse -> subgroup check -> aggregate sig (G2 add chain) ->
+single fused Miller-loop pass over N pairs (blst_miller_loop_n) ->
+canonical Fp12 tree-reduce over K=2 grouped Fp12 inputs ->
+final_exp ONCE -> verdict
+```
+
+Same-message hot path collapses further: aggregate pks (G1 add chain),
+hash_to_g2 ONCE, single Miller for `e(agg_pk, H(msg))` — the consensus
+shape (validators all signing the same certificate subject).
+
+### Critical-path dispatches per pairing batch
+
+| Path                                | Crit-path Fp12 ops                  | n=1024 |
+|-------------------------------------|------------------------------------:|-------:|
+| Linear (blst_pairing accumulator)   | N Miller-aggr + 1 init + 1 final_exp | 1026   |
+| Fused (this revision)               | 2 Miller (LHS_n + RHS) + ceil(log2 K) Fp12 mul + 1 final_exp | **4** |
+
+Down from ~280 dispatches/pairing under the Stage 3 Metal pipeline
+projection — fused achieves a constant-bounded critical-path budget,
+independent of N.
+
+### Wall-clock — same-msg n=1024 (M1 Max, Release, median of 10)
+
+| Mode                                 | µs/batch | vs linear |
+|--------------------------------------|---------:|----------:|
+| `aggregate_verify_batch_msg`         |   458 145 |     1.00x |
+| `fused_aggregate_verify_batch`       |   131 308 |     **3.49x** |
+| `aggregate_verify_batch_msg_aff`     |   376 923 |     1.22x |
+| `fused_aggregate_verify_batch_aff`   |   **2 581** |   **148.35x** |
+
+Honest decomposition:
+
+* The cold path's residual at 131 ms = 1024 serial
+  `blst_p1_uncompress` + `blst_p1_affine_in_g1` (parse + subgroup
+  check). The fused kernel cannot save serial decompress work; that
+  reduction is the orthogonal pubkey-affine cache layer at
+  `quasar/gpu/pubkey_cache.hpp` (v0.46.2, 75.7 ms with cache).
+* The warm-affine path at 2.6 ms IS the fused kernel itself — well
+  under the 80 ms target the brief specifies. Bridgevm
+  `pre_verify_inbox` and the warm pubkey-cache path use this entry.
+
+Verdict bytes are equal blst on every input — the underlying math is
+unchanged, only the host orchestration is different (linear chain
+replaced by fused Miller_n + tree-reduce + single final_exp).
+
+### Tree-reduction kernel
+
+The Fp12 tree-reduce in `bls_fused.hpp` is templated:
+
+```cpp
+template <typename T, typename Combine>
+void tree_reduce(std::vector<T>& v, Combine combine) noexcept;
+```
+
+Round k+1 multiplies adjacent outputs of round k; odd counts carry the
+last element forward. Same input order produces byte-identical output
+across hosts and backends — the determinism contract Stage 5b GPU swap
+preserves.
+
+Reusable across:
+- BLS pairings (this file)
+- Groth16 batched verify (cevm/lib/consensus/quasar/gpu)
+- MLDSAGroth16 (same)
+- Ringtail share comp (same)
+- MPCVM transcript roots (mpcvm/, instantiates over keccak256(lhs||rhs))
+- Receipt root composition (cevm/cevm_precompiles, same)
+
+### Test coverage
+
+* `bls-fused-test` (new): tree-reduce kernel invariants, verdict
+  byte-equality vs `aggregate_verify_batch_msg` across N=1, 2, 3, 16,
+  128, 1024 with positive + tampered-sig + tampered-msg + bad-pk-header
+  rejection.
+* `bls-signature-test` (preserved): IRTF ciphersuite byte-equal blst.
+* `bls-subgroup-test` (preserved): 46 subgroup vectors.
+* Stage 1-3 Metal: 1900 + 450 + 396 = 2746 vectors byte-equal blst.
+* `quasar-bls-verifier-test` (preserved): 13 cases pass — additive
+  fused entry is opt-in; consumers continue to call the existing
+  `aggregate_verify_batch_msg` until they upgrade.
+
+### Reproducing v0.49
+
+```
+cmake -S /Users/z/work/luxcpp/crypto/bls -B build-fused -DCMAKE_BUILD_TYPE=Release
+cmake --build build-fused --target bls-fused-test bls-signature-test \
+                                  bls-subgroup-test bls-pairing-test \
+                                  bls-miller-test bls-final-exp-test \
+                                  bls-g2-test bls-fp-tower-test -j 8
+ctest --test-dir build-fused -R "bls-(fused|signature|subgroup|fp-tower|g2|miller|final-exp|pairing)-test" --output-on-failure
+./build-fused/bls_fused_test    # bench output incl. dispatches/pairing
+```
+
 ## v0.47.2 row — V2 EVM kernel SIMD fan-out (buffer-prep, M1 honest)
 
 The v0.47.2 patch lands the first SIMD fan-out for the V2 EVM kernel
