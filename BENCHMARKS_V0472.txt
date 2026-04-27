@@ -1,0 +1,27 @@
+GPU EVM Kernel Benchmark (V1 vs V2)
+====================================
+Transactions:   2000
+Loop iters:     50 per tx
+Total opcodes:  1108000
+Runs:           12
+
+Running CPU sequential...
+  CPU: 10.1 +/- 0.1 ms (min 10.0 ms) | 2000/2000 OK | 110.67 M ops/sec
+GPU device: Apple M1 Max
+
+Running GPU V1 (1 thread/tx)...
+  V1:  15.1 +/- 26.5 ms (min 5.8 ms) | 2000/2000 OK | 192.62 M ops/sec
+  Verifying V1 vs CPU...
+  V1 vs CPU: PASS (gas_used matches)
+
+Running GPU V2 (32 threads/tx SIMD)...
+  V2:  15.1 +/- 1.4 ms (min 13.7 ms) | 2000/2000 OK | 80.81 M ops/sec
+  Verifying V2 vs CPU...
+  V2 vs CPU: PASS (gas_used matches)
+
+Mode                | Time (ms)             | Ops/sec         | Speedup
+--------------------| ----------------------| ----------------| -------
+CPU Sequential      | 10.1 +/- 0.1 (min 10.0)| 110.67 M        | 1.0x
+GPU V1 (1 thr/tx)   | 4.6 +/- 0.1 (min 4.5) | 245.76 M        | 2.2x
+GPU V2 (32 thr/tx)  | 15.1 +/- 1.4 (min 13.7)| 80.81 M         | 0.7x
+

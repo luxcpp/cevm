@@ -208,20 +208,37 @@ RunStats compute_stats(const std::vector<double>& times_ms)
     return s;
 }
 
-/// Verify that V2 results match V1 results exactly.
+/// Verify that two result vectors are byte-equal across status, gas_used,
+/// gas_refund, output bytes, and log entries. Used to gate V2 against V1
+/// (byte-equality is the V2 contract).
 bool verify_results(const std::vector<TxResult>& v1, const std::vector<TxResult>& v2, uint32_t num_txs)
 {
     if (v1.size() != v2.size()) return false;
     uint32_t mismatches = 0;
-    for (size_t i = 0; i < v1.size(); ++i) {
-        if (v1[i].status != v2[i].status || v1[i].gas_used != v2[i].gas_used) {
-            if (mismatches < 5) {
-                std::printf("  MISMATCH tx %zu: V1 status=%d gas=%llu, V2 status=%d gas=%llu\n",
-                    i, (int)v1[i].status, (unsigned long long)v1[i].gas_used,
-                    (int)v2[i].status, (unsigned long long)v2[i].gas_used);
-            }
-            mismatches++;
+    auto report = [&](size_t i, const char* field) {
+        if (mismatches < 5) {
+            std::printf("  MISMATCH tx %zu (%s): V1 status=%d gas=%llu, V2 status=%d gas=%llu\n",
+                i, field,
+                (int)v1[i].status, (unsigned long long)v1[i].gas_used,
+                (int)v2[i].status, (unsigned long long)v2[i].gas_used);
         }
+    };
+    for (size_t i = 0; i < v1.size(); ++i) {
+        bool bad = false;
+        if (v1[i].status     != v2[i].status)     { bad = true; report(i, "status"); }
+        else if (v1[i].gas_used   != v2[i].gas_used)   { bad = true; report(i, "gas_used"); }
+        else if (v1[i].gas_refund != v2[i].gas_refund) { bad = true; report(i, "gas_refund"); }
+        else if (v1[i].output     != v2[i].output)     { bad = true; report(i, "output"); }
+        else if (v1[i].logs.size() != v2[i].logs.size()) { bad = true; report(i, "log_count"); }
+        else {
+            for (size_t k = 0; k < v1[i].logs.size(); ++k) {
+                if (v1[i].logs[k].topics != v2[i].logs[k].topics ||
+                    v1[i].logs[k].data   != v2[i].logs[k].data) {
+                    bad = true; report(i, "log_body"); break;
+                }
+            }
+        }
+        if (bad) mismatches++;
     }
     if (mismatches > 0)
         std::printf("  TOTAL MISMATCHES: %u / %u\n", mismatches, num_txs);

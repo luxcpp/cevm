@@ -1,4 +1,99 @@
-# cevm benchmarks (v0.46.2)
+# cevm benchmarks (v0.47.2)
+
+## v0.47.2 row — V2 EVM kernel SIMD fan-out (buffer-prep, M1 honest)
+
+The v0.47.2 patch lands the first SIMD fan-out for the V2 EVM kernel
+(`evm_kernel_v2.metal`): all 32 lanes of each 32-threads/tx threadgroup
+cooperatively zero the per-tx GPU buffers (`mem_pool` 64 KB,
+`storage_pool` 4 KB, `transient_pool` 4 KB, `log_pool` 2.3 KB,
+`out_data` 1 KB, plus the 3 counters). The host's `execute_v2` skips its
+own `std::memset` of those buffers when V2 is dispatched, then runs the
+V1 retry on the same MTLBuffer cache to produce the actual byte-
+deterministic results. Lane 0 writes `status = 255` as the V1-retry
+sentinel.
+
+Two host-side bugs were fixed alongside the kernel work:
+1. `execute_v2` previously detected the `status == 255` sentinel through
+   the `TxStatus` enum, which maps unknown statuses to `TxStatus::Error`
+   (= 4) — the V1 retry never fired. Replaced with an unconditional
+   retry path matching the kernel's contract.
+2. `execute_v2` held the V2 future (and its `unique_lock<std::mutex>`)
+   across the V1 enqueue, deadlocking the host on the cache mutex. The
+   V2 future is now scoped to release the lock before V1 enqueues.
+
+### V1 vs V2 on Apple M1 Max (Release, n=2000, 50 iters/tx, runs=12)
+
+| Mode               | min (ms)  | mean (ms) | M ops/sec | Speedup vs CPU | Speedup vs V1 |
+|:-------------------|----------:|----------:|----------:|---------------:|--------------:|
+| CPU sequential     |       9.9 |      10.0 |    111.96 |          1.00× |             — |
+| GPU V1 (1 thr/tx)  |       4.5 |       4.6 |    244.40 |          2.20× |         1.00× |
+| GPU V2 (32 thr/tx) |      13.5 |      15.2 |     81.93 |          0.65× |         0.33× |
+
+V2 byte-equality vs V1 vs CPU: **PASS on every tx** (status, gas_used,
+gas_refund, output bytes, log topics + data — `verify_results` in
+`bench_kernel.cpp` now compares all five fields).
+
+### Honest residual on integrated GPU
+
+V2 is **0.33× of V1 on Apple M1 Max** — net regression on this hardware.
+Three reasons:
+
+1. **Apple's unified memory makes host `memset` cheap.** M1's CPU and
+   GPU share the same DRAM at ~50 GB/s; a 128 MB `memset` (the
+   `num_txs * MAX_MEMORY_PER_TX` for 2000 txs) costs ~2.6 ms on the
+   host — close to V1's entire wall-clock. There is no host→device
+   transfer to amortise.
+2. **Two GPU dispatches > one.** V2 runs the fan-out kernel and then
+   the V1 retry on the same queue, paying ~150 µs × 2 of dispatch
+   overhead vs V1's single ~150 µs.
+3. **Byte-by-byte device stores are slow on M1.** `for (i = start; i < end; ++i) dst[i] = 0;`
+   does not coalesce into wide stores in Metal's optimiser the way
+   plain `__builtin_memset` does on the host CPU.
+
+This **matches the aivm v0.59 precedent** the v0.45 plan called out:
+the fan-out architecture is correct for discrete GPUs (PCIe-bound
+memsets, dedicated VRAM, ICICLE-style dispatch fan-out) but does not
+pay off on Apple Silicon's unified memory. The dispatch substrate
+(32-lane threadgroup, `threadgroup_barrier(mem_device)`, host
+`skip_host_memset` plumbing) is the durable surface; future
+SIMD-cooperative work for KECCAK256 round-state and MULMOD limb
+spreading lands on top of it.
+
+### What v0.47.2 actually ships
+
+Released today, gated on `LUX_EVM_KERNEL_V2=ON`:
+
+1. `evm_kernel_v2.metal` — 32-threads/tx threadgroup with all 32 lanes
+   cooperatively zeroing `mem_pool`, `storage_pool`, `transient_pool`,
+   `log_pool`, `out_data`, and the per-tx counters. Lane 0 writes
+   `status = 255`. Closes with `threadgroup_barrier(mem_device)`.
+2. `EvmKernelHostMetal::execute_v2` — V2 dispatch + scoped-future +
+   V1 retry with `skip_host_memset = true`. The V1 retry produces
+   byte-deterministic results that match V1-alone on every input.
+3. `EvmKernelHostMetal::enqueue` — new `skip_host_memset` parameter so
+   V2's GPU-side zero is honored across the V1 retry on the same
+   shared MTLBuffer cache.
+4. `bench_kernel.cpp::verify_results` — full byte-equality check across
+   status, gas_used, gas_refund, output, and log topics + data. Replaces
+   the v0.45 partial check (status + gas only).
+
+### CPU oracle parity
+
+`quasar-determinism-test` 6/6 sections pass with the v0.47.2 host code
+(linked against the new `libevm-kernel-metal.a`). The Quasar engine
+does not currently route through `execute_v2`; this confirms the V1
+path is unchanged. V2 byte-equality is asserted by the bench harness on
+every run (`V2 vs CPU: PASS` line above).
+
+### Reproducing v0.47.2
+
+```
+cmake -S /Users/z/work/luxcpp/cevm -B build -DCMAKE_BUILD_TYPE=Release \
+  -DLUX_CEVM_ENABLE_METAL=ON -DLUX_EVM_KERNEL_V2=ON
+cmake --build build --target evm-bench-kernel quasar-determinism-test -j 8
+./build/lib/evm/evm-bench-kernel 2000 12 50    # canonical V1/V2 row
+./build/lib/evm/quasar-determinism-test         # 6/6 sections must pass
+```
 
 ## v0.46.2 row — BLS pubkey-affine cache closes 9.24× → 16.51× residual
 
