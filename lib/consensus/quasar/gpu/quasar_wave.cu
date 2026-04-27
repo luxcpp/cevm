@@ -250,10 +250,10 @@ struct __align__(16) QuasarRoundResult {
     uint32_t fibers_suspended;
     uint32_t fibers_resumed;
     uint32_t quorum_status_bls;
-    uint32_t quorum_status_mldsa;
+    uint32_t quorum_status_mldsa_groth16;   ///< MLDSAGroth16 cert lane
     uint32_t quorum_status_rt;
     uint32_t quorum_stake_bls;
-    uint32_t quorum_stake_mldsa;
+    uint32_t quorum_stake_mldsa_groth16;
     uint32_t quorum_stake_rt;
     uint32_t mode;
     uint8_t  block_hash[32];
@@ -889,7 +889,7 @@ __device__ static uint32_t drain_vote(
         uint32_t* status_acc = nullptr;
         if (v.sig_kind == 0u)      { stake_acc = &result->quorum_stake_bls;    status_acc = &result->quorum_status_bls; }
         else if (v.sig_kind == 1u) { stake_acc = &result->quorum_stake_rt;     status_acc = &result->quorum_status_rt; }
-        else                       { stake_acc = &result->quorum_stake_mldsa;  status_acc = &result->quorum_status_mldsa; }
+        else                       { stake_acc = &result->quorum_stake_mldsa_groth16; status_acc = &result->quorum_status_mldsa_groth16; }
         uint32_t prev_stake = atomicAdd(stake_acc, v.stake_weight);
         uint32_t new_stake  = prev_stake + v.stake_weight;
         uint32_t threshold  = uint32_t((desc->base_fee * 2ull) / 3ull);

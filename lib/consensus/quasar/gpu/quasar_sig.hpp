@@ -127,21 +127,73 @@ inline std::vector<uint8_t> sign(uint32_t sig_kind,
     return sig;
 }
 
-// Compute desc->certificate_subject per CERT-003 / v0.44 spec. Both kernel
+// =============================================================================
+// v0.42 cert ABI — three cert lanes + three cert modes
+// =============================================================================
+//
+// `QuasarCertLane` is the cert ABI taxonomy: BLS aggregate, Ringtail threshold,
+// and Groth16-over-ML-DSA. The third lane is `MLDSAGroth16`, NEVER raw `MLDSA`
+// — the lane verifies a Groth16 SNARK that proves verification of N ML-DSA-65
+// votes, then outputs a 192-byte proof. Raw ML-DSA-65 signing still happens on
+// each vote (see `QuasarSigKind::MLDSA`); the Groth16 wrapper is what the cert
+// lane ABI exposes.
+//
+// `QuasarCertMode` selects the round's lane policy:
+//   * FastClassical   — only BLS aggregate runs (sub-second finality).
+//   * HybridPQAsync   — BLS gates final cert; PQ lanes follow asynchronously
+//                       and feed the next round's input.
+//   * FullPQBlocking  — final cert blocks on all three lanes.
+enum class QuasarCertLane : uint8_t {
+    BLSAggregate      = 0,   ///< 48-byte aggregate sig + N-validator bitmap
+    RingtailThreshold = 1,   ///< Ring-LWE threshold proof + ceremony root
+    MLDSAGroth16      = 2,   ///< 192-byte Groth16 proof + N-validator bitmap
+                              ///< (proves verification of N ML-DSA-65 sigs).
+                              ///< Never refer to this lane as raw `MLDSA` —
+                              ///< raw ML-DSA-65 signing lives on per-vote
+                              ///< `QuasarSigKind::MLDSA` and feeds into
+                              ///< this Groth16-wrapped cert lane.
+};
+
+enum class QuasarCertMode : uint8_t {
+    FastClassical   = 0,   ///< BLS only — fast finality path
+    HybridPQAsync   = 1,   ///< BLS now, PQ lanes follow async (non-blocking)
+    FullPQBlocking  = 2,   ///< All required lanes pass before cert emits
+};
+
+// CertArtifact — per-lane proof envelope. The bytes live in a host-managed
+// arena (artifact_offset + artifact_len); the verifier resolves them by
+// offset. public_inputs_hash is the keccak digest of the lane's public
+// inputs (chain roots, attestation_root, …) — the cert binds it so a
+// downstream re-verification cannot substitute a different input set.
+struct CertArtifact {
+    QuasarCertLane lane;
+    uint8_t  subject[32];           ///< == desc->certificate_subject
+    uint64_t artifact_offset;       ///< arena offset where the proof lives
+    uint32_t artifact_len;          ///< proof bytes (48|192|variable)
+    uint8_t  public_inputs_hash[32];///< keccak of the public inputs
+};
+
+// Compute desc->certificate_subject per CERT-003 / v0.42 spec. Both kernel
 // and host MUST agree byte-for-byte. The 9-chain canonical order is fixed:
 // P, C, X, Q, Z, A, B, M, F. C reuses parent_block_hash because the cevm
 // round IS the C-chain advance.
 //
 // Hash input (LE everywhere):
-//   chain_id(8) || epoch(8) || round(8) || mode(4)
+//   chain_id(8) || epoch(8) || round(8) || mode(4) || cert_mode(1)
 //     || P(32) || C(32) || X(32) || Q(32) || Z(32)
 //     || A(32) || B(32) || M(32) || F(32)
+//     || attestation_root(32)
 //     || parent_state_root(32) || parent_execution_root(32)
 //     || gas_limit(8) || base_fee(8)
 //
-// Total:  8+8+8+4 + 32*11 + 8+8 = 396 bytes.
+// Total:  8+8+8+4+1 + 32*9 + 32 + 32+32 + 8+8 = 429 bytes.
+//
+// cert_mode + attestation_root are bound into the subject so a tampered
+// descriptor (different mode or different CPU/GPU TEE measurement root)
+// produces a different cert subject — even when every chain root matches.
 inline std::array<uint8_t, 32> compute_certificate_subject(
     uint64_t chain_id, uint64_t epoch, uint64_t round, uint32_t mode,
+    QuasarCertMode cert_mode,
     const uint8_t pchain_validator_root[32],   ///< P
     const uint8_t cchain_block_root[32],       ///< C — parent_block_hash
     const uint8_t xchain_execution_root[32],   ///< X
@@ -151,11 +203,12 @@ inline std::array<uint8_t, 32> compute_certificate_subject(
     const uint8_t bchain_state_root[32],       ///< B
     const uint8_t mchain_state_root[32],       ///< M
     const uint8_t fchain_state_root[32],       ///< F
+    const uint8_t attestation_root[32],        ///< CPU+GPU TEE measurement
     const uint8_t parent_state_root[32],
     const uint8_t parent_execution_root[32],
     uint64_t gas_limit, uint64_t base_fee)
 {
-    uint8_t buf[8 + 8 + 8 + 4 + 32 * 11 + 8 + 8];
+    uint8_t buf[8 + 8 + 8 + 4 + 1 + 32 * 9 + 32 + 32 + 32 + 8 + 8];
     size_t off = 0;
     auto put_le64 = [&](uint64_t v) {
         for (size_t k = 0; k < 8; ++k) buf[off + k] = uint8_t((v >> (k * 8u)) & 0xFFu);
@@ -165,6 +218,10 @@ inline std::array<uint8_t, 32> compute_certificate_subject(
         for (size_t k = 0; k < 4; ++k) buf[off + k] = uint8_t((v >> (k * 8u)) & 0xFFu);
         off += 4;
     };
+    auto put_u8 = [&](uint8_t v) {
+        buf[off] = v;
+        off += 1;
+    };
     auto put_32 = [&](const uint8_t* p) {
         std::memcpy(buf + off, p, 32);
         off += 32;
@@ -173,6 +230,7 @@ inline std::array<uint8_t, 32> compute_certificate_subject(
     put_le64(epoch);
     put_le64(round);
     put_le32(mode);
+    put_u8(static_cast<uint8_t>(cert_mode));
     // Canonical 9-chain order: P, C, X, Q, Z, A, B, M, F.
     put_32(pchain_validator_root);
     put_32(cchain_block_root);
@@ -183,6 +241,7 @@ inline std::array<uint8_t, 32> compute_certificate_subject(
     put_32(bchain_state_root);
     put_32(mchain_state_root);
     put_32(fchain_state_root);
+    put_32(attestation_root);
     put_32(parent_state_root);
     put_32(parent_execution_root);
     put_le64(gas_limit);

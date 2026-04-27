@@ -178,7 +178,7 @@ void test_bls_unwired_lanes_reject()
     uint8_t sig[96]{};
     uint8_t pk[48]{};
     EXPECT("unwired.rt",     !verify_lane(1u, subject, sig, pk));
-    EXPECT("unwired.mldsa",  !verify_lane(2u, subject, sig, pk));
+    EXPECT("unwired.mldsa_groth16",  !verify_lane(2u, subject, sig, pk));
     EXPECT("unwired.unknown",!verify_lane(99u, subject, sig, pk));
     PASS("bls_unwired_lanes_reject");
 }

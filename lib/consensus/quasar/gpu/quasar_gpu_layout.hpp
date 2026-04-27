@@ -341,10 +341,17 @@ enum class QuasarMode : uint8_t {
 // QuasarCert (protocol/quasar/types.go:40). VoteIngress::sig_kind picks
 // the verifier for that lane; the substrate aggregates each lane
 // independently.
+//
+// `MLDSA` here is the raw FIPS 204 ML-DSA-65 vote-signing kind. The third
+// CERT LANE that aggregates these votes is a Groth16 SNARK
+// (QuasarCertLane::MLDSAGroth16 in quasar_sig.hpp). Never call the cert
+// lane raw "MLDSA"; the lane verifies a Groth16 proof, not the underlying
+// ML-DSA-65 signatures directly.
 enum class QuasarSigKind : uint8_t {
     BLS12_381 = 0,   ///< BLS12-381 aggregate (classical fast path)
     Ringtail  = 1,   ///< Ring-LWE 2-round threshold (PQ threshold)
-    MLDSA     = 2,   ///< ML-DSA-65 identity sig (Z-Chain rolls into Groth16)
+    MLDSA     = 2,   ///< ML-DSA-65 (FIPS 204) — raw signing kind that
+                     ///< feeds the MLDSAGroth16 cert lane
 };
 
 // CERT-021/006/007 (v0.42): round + stake widened to uint64; stake_weight
@@ -438,8 +445,24 @@ struct alignas(16) QuasarRoundDescriptor {
     uint8_t  bchain_state_root[32];       ///< BridgeVM v0.59.x  (B-Chain)
     uint8_t  mchain_state_root[32];       ///< MPCVM v0.60.x     (M-Chain)
     uint8_t  fchain_state_root[32];       ///< FHEVM             (F-Chain)
+    // v0.42 cert ABI hardening — attestation_root + cert_mode.
+    //
+    //  attestation_root: keccak commitment over the round's CPU TEE +
+    //   GPU TEE measurement + any other attestation witnesses. Bound into
+    //   certificate_subject in canonical position (see
+    //   compute_certificate_subject in quasar_sig.hpp). A tampered TEE
+    //   measurement → different cert subject → verifier rejects.
+    //
+    //  cert_mode: QuasarCertMode discriminant — chooses whether this round
+    //   runs the BLS-only fast path, BLS-now-PQ-async, or full PQ-blocking
+    //   policy. Bound into certificate_subject so flipping the mode forces
+    //   a fresh subject (cannot replay a fast-classical cert as a full-PQ
+    //   cert and vice versa).
+    uint8_t  attestation_root[32];
+    uint8_t  cert_mode;                    ///< QuasarCertMode
+    uint8_t  _pad_cert_mode[23];           ///< explicit pad to next 16B boundary
 };
-static_assert(sizeof(QuasarRoundDescriptor) == 480,
+static_assert(sizeof(QuasarRoundDescriptor) == 528,
               "QuasarRoundDescriptor layout drift");
 
 // =============================================================================
@@ -453,8 +476,9 @@ static_assert(sizeof(QuasarRoundDescriptor) == 480,
 // CERT-004 (v0.42): per-validator dedup bitmap on QuasarRoundResult.
 // Bound by VALIDATOR_BITMAP_BITS — covers up to that many validator indices
 // per lane; CERT-023 enforces validator_index < desc->validator_count, which
-// itself must be <= VALIDATOR_BITMAP_BITS. Three lanes (BLS / Ringtail /
-// MLDSA) get independent bitmaps so a validator may sign each lane once.
+// itself must be <= VALIDATOR_BITMAP_BITS. Three cert lanes
+// (BLSAggregate / RingtailThreshold / MLDSAGroth16) get independent bitmaps
+// so a validator may sign each lane once.
 inline constexpr uint32_t kValidatorBitmapBits = 256u;        ///< 256 validators
 inline constexpr uint32_t kValidatorBitmapWords = kValidatorBitmapBits / 32u;
 
@@ -468,14 +492,16 @@ struct alignas(16) QuasarRoundResult {
     uint32_t repair_count;       ///< re-executions performed
     uint32_t fibers_suspended;
     uint32_t fibers_resumed;
-    uint32_t quorum_status_bls;  ///< 0=incomplete, 1=quorum, 2=conflict
-    uint32_t quorum_status_mldsa;
+    // Cert-lane aggregator state. Names follow QuasarCertLane in
+    // quasar_sig.hpp — third lane is `mldsa_groth16`, never raw `mldsa`.
+    uint32_t quorum_status_bls;          ///< 0=incomplete, 1=quorum, 2=conflict
+    uint32_t quorum_status_mldsa_groth16;///< MLDSAGroth16 lane (third cert lane)
     uint32_t quorum_status_rt;
     // CERT-007 (v0.42): uint64 stake split lo/hi (matches gas_used).
     uint32_t quorum_stake_bls_lo;
     uint32_t quorum_stake_bls_hi;
-    uint32_t quorum_stake_mldsa_lo;
-    uint32_t quorum_stake_mldsa_hi;
+    uint32_t quorum_stake_mldsa_groth16_lo;
+    uint32_t quorum_stake_mldsa_groth16_hi;
     uint32_t quorum_stake_rt_lo;
     uint32_t quorum_stake_rt_hi;
     uint32_t mode;               ///< QuasarMode
@@ -516,8 +542,9 @@ struct alignas(16) QuasarRoundResult {
     uint64_t quorum_stake_rt() const {
         return (uint64_t(quorum_stake_rt_hi) << 32) | uint64_t(quorum_stake_rt_lo);
     }
-    uint64_t quorum_stake_mldsa() const {
-        return (uint64_t(quorum_stake_mldsa_hi) << 32) | uint64_t(quorum_stake_mldsa_lo);
+    uint64_t quorum_stake_mldsa_groth16() const {
+        return (uint64_t(quorum_stake_mldsa_groth16_hi) << 32)
+             | uint64_t(quorum_stake_mldsa_groth16_lo);
     }
 };
 // v0.44 — layout: 64 atomic counters + 32 (mode/subject/dedup/repair counters

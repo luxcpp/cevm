@@ -288,11 +288,15 @@ struct alignas(16) QuasarRoundDescriptor {
     uchar bchain_state_root[32];
     uchar mchain_state_root[32];
     uchar fchain_state_root[32];
+    // v0.42 cert ABI hardening — TEE attestation_root + cert_mode.
+    uchar attestation_root[32];
+    uchar cert_mode;                       ///< QuasarCertMode: 0=Fast,1=HybridPQAsync,2=FullPQBlocking
+    uchar _pad_cert_mode[23];              ///< explicit pad to 528-byte boundary
 };
 
 // CERT-007/004/022 (v0.42): uint64-split stake counters, per-validator
-// dedup bitmaps (BLS / Ringtail / MLDSA). MUST match QuasarRoundResult in
-// quasar_gpu_layout.hpp byte-for-byte.
+// dedup bitmaps (BLSAggregate / RingtailThreshold / MLDSAGroth16). MUST
+// match QuasarRoundResult in quasar_gpu_layout.hpp byte-for-byte.
 #define QUASAR_VALIDATOR_BITMAP_BITS  256
 #define QUASAR_VALIDATOR_BITMAP_WORDS 8
 constant uint kValidatorBitmapBits  = QUASAR_VALIDATOR_BITMAP_BITS;
@@ -309,12 +313,12 @@ struct alignas(16) QuasarRoundResult {
     atomic_uint fibers_suspended;
     atomic_uint fibers_resumed;
     atomic_uint quorum_status_bls;
-    atomic_uint quorum_status_mldsa;
+    atomic_uint quorum_status_mldsa_groth16;
     atomic_uint quorum_status_rt;
     atomic_uint quorum_stake_bls_lo;
     atomic_uint quorum_stake_bls_hi;
-    atomic_uint quorum_stake_mldsa_lo;
-    atomic_uint quorum_stake_mldsa_hi;
+    atomic_uint quorum_stake_mldsa_groth16_lo;
+    atomic_uint quorum_stake_mldsa_groth16_hi;
     atomic_uint quorum_stake_rt_lo;
     atomic_uint quorum_stake_rt_hi;
     uint        mode;
@@ -2375,6 +2379,20 @@ static inline uint drain_vote(
         uint lane = v.sig_kind;
         if (lane > 2u) { ++processed; continue; }
 
+        // v0.42 cert ABI — cert_mode gates which cert lanes drain. In
+        // FastClassical mode (cert_mode=0) only BLSAggregate runs; PQ lanes
+        // are dropped here so they cannot accumulate stake. HybridPQAsync
+        // (cert_mode=1) and FullPQBlocking (cert_mode=2) drain all three
+        // lanes; the difference between those two is host-side gating of
+        // the final composite cert (see HostQuorumCert consumer in
+        // quasar_gpu_engine.mm). Late-round deadline priority is therefore
+        // a substrate-level invariant: BLS always drains, PQ lanes drain
+        // only when the round opted in.
+        if (desc->cert_mode == 0u && lane != 0u) {
+            ++processed;
+            continue;
+        }
+
         // CERT-004 — per-validator dedup. atomic_fetch_or test-and-set on
         // a flat [3*WORDS] bitmap (linear lane*WORDS + word_idx).
         uint word_idx = lane * uint(QUASAR_VALIDATOR_BITMAP_WORDS) + (vi >> 5u);
@@ -2391,6 +2409,8 @@ static inline uint drain_vote(
         }
 
         // CERT-007 — uint64-split stake accumulator with carry.
+        // Lane index maps to QuasarCertLane in quasar_sig.hpp:
+        //   0 = BLSAggregate, 1 = RingtailThreshold, 2 = MLDSAGroth16.
         device atomic_uint* stake_lo = &result->quorum_stake_bls_lo;
         device atomic_uint* stake_hi = &result->quorum_stake_bls_hi;
         device atomic_uint* status_acc = &result->quorum_status_bls;
@@ -2399,9 +2419,9 @@ static inline uint drain_vote(
             stake_hi = &result->quorum_stake_rt_hi;
             status_acc = &result->quorum_status_rt;
         } else if (lane == 2u) {
-            stake_lo = &result->quorum_stake_mldsa_lo;
-            stake_hi = &result->quorum_stake_mldsa_hi;
-            status_acc = &result->quorum_status_mldsa;
+            stake_lo = &result->quorum_stake_mldsa_groth16_lo;
+            stake_hi = &result->quorum_stake_mldsa_groth16_hi;
+            status_acc = &result->quorum_status_mldsa_groth16;
         }
         uint sw_lo = uint(v.stake_weight & 0xFFFFFFFFul);
         uint sw_hi = uint((v.stake_weight >> 32u) & 0xFFFFFFFFul);

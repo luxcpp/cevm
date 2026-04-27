@@ -94,16 +94,22 @@ QuasarRoundDescriptor make_9chain_desc(uint64_t round)
     fill(d.fchain_state_root,       0x99);   // F
     fill(d.parent_state_root,       0xAA);
     fill(d.parent_execution_root,   0xBB);
+    // v0.42 cert ABI — distinct pattern so the 9chain reference also
+    // exercises attestation_root binding + cert_mode = HybridPQAsync.
+    fill(d.attestation_root,        0xCC);
+    d.cert_mode = static_cast<uint8_t>(
+        quasar::gpu::sig::QuasarCertMode::HybridPQAsync);
     return d;
 }
 
 // Inline reference: assemble the exact subject keccak input the goal spec
-// requires (canonical order P, C, X, Q, Z, A, B, M, F) and hash it. Compare
-// byte-for-byte against compute_certificate_subject. If this matches, the
-// 9-chain canonical order is the one the substrate actually computes.
+// requires (canonical order P, C, X, Q, Z, A, B, M, F + attestation_root)
+// and hash it. Compare byte-for-byte against compute_certificate_subject.
+// If this matches, the 9-chain canonical order + cert ABI binding is the
+// one the substrate actually computes.
 std::array<uint8_t, 32> reference_9chain_subject(const QuasarRoundDescriptor& d)
 {
-    uint8_t buf[8 + 8 + 8 + 4 + 32 * 11 + 8 + 8];
+    uint8_t buf[8 + 8 + 8 + 4 + 1 + 32 * 9 + 32 + 32 + 32 + 8 + 8];
     size_t off = 0;
     auto put_le64 = [&](uint64_t v) {
         for (size_t k = 0; k < 8; ++k) buf[off + k] = uint8_t((v >> (k * 8u)) & 0xFFu);
@@ -113,6 +119,7 @@ std::array<uint8_t, 32> reference_9chain_subject(const QuasarRoundDescriptor& d)
         for (size_t k = 0; k < 4; ++k) buf[off + k] = uint8_t((v >> (k * 8u)) & 0xFFu);
         off += 4;
     };
+    auto put_u8 = [&](uint8_t v) { buf[off++] = v; };
     auto put_32 = [&](const uint8_t* p) {
         std::memcpy(buf + off, p, 32);
         off += 32;
@@ -121,6 +128,7 @@ std::array<uint8_t, 32> reference_9chain_subject(const QuasarRoundDescriptor& d)
     put_le64(d.epoch);
     put_le64(d.round);
     put_le32(d.mode);
+    put_u8(d.cert_mode);
     // Canonical 9-chain order: P, C, X, Q, Z, A, B, M, F.
     put_32(d.pchain_validator_root);     // P
     put_32(d.parent_block_hash);         // C
@@ -131,6 +139,7 @@ std::array<uint8_t, 32> reference_9chain_subject(const QuasarRoundDescriptor& d)
     put_32(d.bchain_state_root);         // B
     put_32(d.mchain_state_root);         // M
     put_32(d.fchain_state_root);         // F
+    put_32(d.attestation_root);
     put_32(d.parent_state_root);
     put_32(d.parent_execution_root);
     put_le64(d.gas_limit);
@@ -169,10 +178,11 @@ void test_service_id_enum_extended()
 }
 
 // 2. Descriptor + result sizes are stable. Catches any silent layout drift
-//    between agent edits.
+//    between agent edits. v0.42 cert ABI added attestation_root[32] +
+//    cert_mode + 15-byte align padding → 480 + 48 = 528 bytes.
 void test_descriptor_result_sizes()
 {
-    EXPECT("size.desc_480",  sizeof(QuasarRoundDescriptor) == 480u);
+    EXPECT("size.desc_528",  sizeof(QuasarRoundDescriptor) == 528u);
     // 64 atomics + 32 misc + 32*5 existing roots + 32*10 echoes
     // + 3 lanes * 8 words * 4 bytes = 64+32+160+320+96 = 672 bytes.
     EXPECT("size.result_672", sizeof(QuasarRoundResult) == 672u);
@@ -188,6 +198,7 @@ void test_subject_canonical_order()
     auto reference = reference_9chain_subject(d);
     auto actual = quasar::gpu::sig::compute_certificate_subject(
         d.chain_id, d.epoch, d.round, d.mode,
+        static_cast<quasar::gpu::sig::QuasarCertMode>(d.cert_mode),
         d.pchain_validator_root,    // P
         d.parent_block_hash,        // C
         d.xchain_execution_root,    // X
@@ -197,6 +208,7 @@ void test_subject_canonical_order()
         d.bchain_state_root,        // B
         d.mchain_state_root,        // M
         d.fchain_state_root,        // F
+        d.attestation_root,
         d.parent_state_root, d.parent_execution_root,
         d.gas_limit, d.base_fee);
 
@@ -214,11 +226,13 @@ void test_subject_binds_every_chain_root()
     auto base = make_9chain_desc(101u);
     auto h0 = quasar::gpu::sig::compute_certificate_subject(
         base.chain_id, base.epoch, base.round, base.mode,
+        static_cast<quasar::gpu::sig::QuasarCertMode>(base.cert_mode),
         base.pchain_validator_root, base.parent_block_hash,
         base.xchain_execution_root, base.qchain_ceremony_root,
         base.zchain_vk_root, base.achain_state_root,
         base.bchain_state_root, base.mchain_state_root,
-        base.fchain_state_root, base.parent_state_root,
+        base.fchain_state_root, base.attestation_root,
+        base.parent_state_root,
         base.parent_execution_root, base.gas_limit, base.base_fee);
 
     struct Mutator { const char* name; uint8_t* (*get)(QuasarRoundDescriptor&); };
@@ -239,11 +253,13 @@ void test_subject_binds_every_chain_root()
         mut.get(d)[0] ^= 0x01;   // flip lowest bit of byte 0
         auto h = quasar::gpu::sig::compute_certificate_subject(
             d.chain_id, d.epoch, d.round, d.mode,
+            static_cast<quasar::gpu::sig::QuasarCertMode>(d.cert_mode),
             d.pchain_validator_root, d.parent_block_hash,
             d.xchain_execution_root, d.qchain_ceremony_root,
             d.zchain_vk_root, d.achain_state_root,
             d.bchain_state_root, d.mchain_state_root,
-            d.fchain_state_root, d.parent_state_root,
+            d.fchain_state_root, d.attestation_root,
+            d.parent_state_root,
             d.parent_execution_root, d.gas_limit, d.base_fee);
         if (std::memcmp(h0.data(), h.data(), 32) == 0) {
             std::printf("  FAIL[bind.%s]: subject unchanged after bit flip\n", mut.name);
@@ -261,24 +277,27 @@ void test_subject_binds_every_chain_root()
 void test_subject_order_matters()
 {
     auto d = make_9chain_desc(102u);
+    const auto cm = static_cast<quasar::gpu::sig::QuasarCertMode>(d.cert_mode);
     auto h_orig = quasar::gpu::sig::compute_certificate_subject(
-        d.chain_id, d.epoch, d.round, d.mode,
+        d.chain_id, d.epoch, d.round, d.mode, cm,
         d.pchain_validator_root, d.parent_block_hash,
         d.xchain_execution_root, d.qchain_ceremony_root,
         d.zchain_vk_root, d.achain_state_root,
         d.bchain_state_root, d.mchain_state_root,
-        d.fchain_state_root, d.parent_state_root,
+        d.fchain_state_root, d.attestation_root,
+        d.parent_state_root,
         d.parent_execution_root, d.gas_limit, d.base_fee);
 
     // Swap A and B contents (not the slots; the function arguments).
     auto h_swapped = quasar::gpu::sig::compute_certificate_subject(
-        d.chain_id, d.epoch, d.round, d.mode,
+        d.chain_id, d.epoch, d.round, d.mode, cm,
         d.pchain_validator_root, d.parent_block_hash,
         d.xchain_execution_root, d.qchain_ceremony_root,
         d.zchain_vk_root,
         d.bchain_state_root,                // A slot fed B's bytes
         d.achain_state_root,                // B slot fed A's bytes
         d.mchain_state_root, d.fchain_state_root,
+        d.attestation_root,
         d.parent_state_root, d.parent_execution_root,
         d.gas_limit, d.base_fee);
 

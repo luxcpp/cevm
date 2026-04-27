@@ -83,6 +83,12 @@ QuasarRoundDescriptor make_desc(uint64_t round, uint32_t mode = 0)
         d.qchain_ceremony_root[i]  = uint8_t(0x55 + i);
         d.zchain_vk_root[i]        = uint8_t(0x66 + i);
     }
+    // v0.42 cert ABI — default to HybridPQAsync so all three cert lanes
+    // (BLSAggregate, RingtailThreshold, MLDSAGroth16) drain. Existing
+    // multi-lane tests (test_quasar_quorum_round_trip) rely on this.
+    // attestation_root left zero — explicit init in zero-value struct.
+    d.cert_mode = static_cast<uint8_t>(
+        quasar::gpu::sig::QuasarCertMode::HybridPQAsync);
     return d;
 }
 
@@ -390,6 +396,7 @@ void test_quasar_quorum_round_trip()
     // descriptor — canonical 9-chain order P, C, X, Q, Z, A, B, M, F.
     auto subj_arr = quasar::gpu::sig::compute_certificate_subject(
         desc.chain_id, desc.epoch, desc.round, desc.mode,
+        static_cast<quasar::gpu::sig::QuasarCertMode>(desc.cert_mode),
         desc.pchain_validator_root,    // P
         desc.parent_block_hash,        // C
         desc.xchain_execution_root,    // X
@@ -399,6 +406,7 @@ void test_quasar_quorum_round_trip()
         desc.bchain_state_root,        // B
         desc.mchain_state_root,        // M
         desc.fchain_state_root,        // F
+        desc.attestation_root,
         desc.parent_state_root, desc.parent_execution_root,
         desc.gas_limit, desc.base_fee);
     uint8_t subject[32];
@@ -437,17 +445,20 @@ void test_quasar_quorum_round_trip()
     auto r2 = e->run_epoch(h);
     auto certs = e->poll_quorum_certs(h);
 
-    std::printf("  q.stake bls=%llu rt=%llu mldsa=%llu certs=%zu\n",
+    std::printf("  q.stake bls=%llu rt=%llu mldsa_groth16=%llu certs=%zu\n",
                 (unsigned long long)r2.quorum_stake_bls(),
                 (unsigned long long)r2.quorum_stake_rt(),
-                (unsigned long long)r2.quorum_stake_mldsa(), certs.size());
+                (unsigned long long)r2.quorum_stake_mldsa_groth16(),
+                certs.size());
 
     EXPECT("q.bls_quorum",   r2.quorum_status_bls   == 1u);
     EXPECT("q.bls_stake_excludes_tamper", r2.quorum_stake_bls() == 90ull);
     EXPECT("q.rt_quorum",    r2.quorum_status_rt    == 1u);
     EXPECT("q.rt_stake",     r2.quorum_stake_rt()   == 60ull);
-    EXPECT("q.mldsa_no_q",   r2.quorum_status_mldsa == 0u);
-    EXPECT("q.mldsa_stake_excludes_replay", r2.quorum_stake_mldsa() == 10ull);
+    EXPECT("q.mldsa_groth16_no_q",
+           r2.quorum_status_mldsa_groth16 == 0u);
+    EXPECT("q.mldsa_groth16_stake_excludes_replay",
+           r2.quorum_stake_mldsa_groth16() == 10ull);
     EXPECT("q.certs_count",  certs.size() == 2u);
     e->end_round(h);
     PASS("quasar_quorum_round_trip");
@@ -920,10 +931,12 @@ QuasarRoundDescriptor make_v42_desc(uint64_t round, uint64_t epoch = 1u)
 
 std::array<uint8_t, 32> v42_subject(const QuasarRoundDescriptor& d)
 {
-    // v0.44 — canonical 9-chain order P, C, X, Q, Z, A, B, M, F. C reuses
-    // parent_block_hash because the cevm round IS the C-chain advance.
+    // v0.42 cert ABI — canonical 9-chain order P, C, X, Q, Z, A, B, M, F
+    // + attestation_root + cert_mode. C reuses parent_block_hash because
+    // the cevm round IS the C-chain advance.
     return quasar::gpu::sig::compute_certificate_subject(
         d.chain_id, d.epoch, d.round, d.mode,
+        static_cast<quasar::gpu::sig::QuasarCertMode>(d.cert_mode),
         d.pchain_validator_root,    // P
         d.parent_block_hash,        // C
         d.xchain_execution_root,    // X
@@ -933,6 +946,7 @@ std::array<uint8_t, 32> v42_subject(const QuasarRoundDescriptor& d)
         d.bchain_state_root,        // B
         d.mchain_state_root,        // M
         d.fchain_state_root,        // F
+        d.attestation_root,
         d.parent_state_root, d.parent_execution_root,
         d.gas_limit, d.base_fee);
 }

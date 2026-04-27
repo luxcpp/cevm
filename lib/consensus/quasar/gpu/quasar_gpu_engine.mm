@@ -237,15 +237,18 @@ public:
             || !round_.cert_master_secret_buf)
             return QuasarRoundHandle{0};
 
-        // CERT-003 / v0.44: compute certificate_subject host-side and write
-        // into desc. Both kernel and host MUST agree byte-for-byte; the
+        // CERT-003 / v0.42 cert ABI: compute certificate_subject host-side and
+        // write into desc. Both kernel and host MUST agree byte-for-byte; the
         // verifier compares v.subject == desc->certificate_subject and
         // rejects mismatch. v0.44 binds all 9 LP-134 chain roots in canonical
-        // P, C, X, Q, Z, A, B, M, F order so cross-chain replay protection
-        // covers the entire substrate.
+        // P, C, X, Q, Z, A, B, M, F order; v0.42 cert ABI further binds
+        // attestation_root + cert_mode so a tampered TEE measurement or a
+        // forged cert-mode forces a different cert subject.
+        const auto cert_mode_enum =
+            static_cast<quasar::gpu::sig::QuasarCertMode>(round_.desc.cert_mode);
         auto subj = quasar::gpu::sig::compute_certificate_subject(
             round_.desc.chain_id, round_.desc.epoch, round_.desc.round,
-            round_.desc.mode,
+            round_.desc.mode, cert_mode_enum,
             round_.desc.pchain_validator_root,    // P
             round_.desc.parent_block_hash,        // C — this round's parent
             round_.desc.xchain_execution_root,    // X
@@ -255,6 +258,7 @@ public:
             round_.desc.bchain_state_root,        // B
             round_.desc.mchain_state_root,        // M
             round_.desc.fchain_state_root,        // F
+            round_.desc.attestation_root,
             round_.desc.parent_state_root,
             round_.desc.parent_execution_root,
             round_.desc.gas_limit, round_.desc.base_fee);

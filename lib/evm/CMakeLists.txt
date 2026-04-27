@@ -635,6 +635,25 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
+    # v0.42 cert ABI hardening — three cert lanes (BLSAggregate,
+    # RingtailThreshold, MLDSAGroth16) × three cert modes (FastClassical,
+    # HybridPQAsync, FullPQBlocking). Validates attestation_root + cert_mode
+    # are bound into certificate_subject and cert lane scheduling honours
+    # cert_mode. Same Metal-only pattern as quasar-9chain-integration-test.
+    add_executable(quasar-cert-abi-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_cert_abi_test.mm)
+    target_compile_features(quasar-cert-abi-test PRIVATE cxx_std_20)
+    target_link_libraries(quasar-cert-abi-test PRIVATE
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx cevm::precompiles
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(quasar-cert-abi-test PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
     # v0.44.1 — Quasar round wall-clock bench: Metal substrate vs CPU
     # reference on the three deterministic workloads, plus per-call
     # timings for the BLS / Groth16 / Ringtail host verifiers. Output is
@@ -750,6 +769,7 @@ if(APPLE)
         quasar-9chain-integration-test
         quasar-gpu-engine-test
         quasar-determinism-test
+        quasar-cert-abi-test
         evm-test-opcodes
         evm-test-pipeline
         evm-test-modes
