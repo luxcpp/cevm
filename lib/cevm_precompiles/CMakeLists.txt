@@ -47,6 +47,10 @@ target_include_directories(cevm_bls_kzg_canonical_cpu
         $<BUILD_INTERFACE:${_LUX_CRYPTO_DIR}/sha256/cpp>
         $<BUILD_INTERFACE:${_LUX_CRYPTO_DIR}/c-abi>
         $<BUILD_INTERFACE:${_LUX_CRYPTO_DIR}/include>
+        # lux_crypto.h transitively pulls lux/crypto/attestation/attestation.h
+        # via the umbrella surface. Expose attestation/include so the
+        # canonical adapter compiles.
+        $<BUILD_INTERFACE:${_LUX_CRYPTO_DIR}/attestation/include>
 )
 target_link_libraries(cevm_bls_kzg_canonical_cpu PRIVATE intx::intx blst::oracle)
 add_library(cevm::bls_kzg_canonical_cpu ALIAS cevm_bls_kzg_canonical_cpu)
