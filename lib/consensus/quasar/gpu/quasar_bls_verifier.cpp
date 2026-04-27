@@ -216,6 +216,27 @@ bool verify_bls_aggregate_batch(
     return ok;
 }
 
+// v0.44 partial-GPU aggregate verify. See header for the staged-migration
+// contract. Today this routes to the host blst batch path (one final_exp);
+// Stage 5 wires Miller-on-device + final_exp-on-device. Output is byte-equal
+// to verify_bls_aggregate_batch — that's the consensus invariant Stage 5 must
+// preserve.
+bool verify_bls_aggregate_batch_partial_gpu(
+    const uint8_t* const subjects[],
+    const uint8_t* const signatures[],
+    const uint8_t* const pks[],
+    std::size_t n) noexcept
+{
+    // Stage 5 staging point. The crypto/bls/gpu/metal/bls_miller.metal
+    // kernels are shipped (init / add+line / dbl+line / sqr_ret / fold_line /
+    // finalize), but the host driver that exposes them as a public API lives
+    // in sibling territory and is in flight. Until that driver is reachable
+    // from this layer, partial-GPU degenerates to the host batch path. The
+    // returned verdict is identical, so consensus is safe across the
+    // migration.
+    return verify_bls_aggregate_batch(subjects, signatures, pks, n);
+}
+
 bool verify_bls_same_message_batch(
     const uint8_t subject[32],
     const uint8_t* const signatures[],

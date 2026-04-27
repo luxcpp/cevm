@@ -336,19 +336,27 @@ public:
 
 private:
     uint32_t drain_locked() {
-        // Step 1: execute every pending call via the dispatcher (which already
-        // routes to GPU lanes per id). This is the per-id "service" run.
+        // Step 1: per-id batched execute. v0.44 — collect every pending
+        // record per id, then run execute_batch_for_id once per id. The
+        // per-id batch is the hook for ecrecover Stage A batch inv, BLS
+        // Miller-on-device, KZG batched pairing. Output bytes and gas
+        // accounting are unchanged from v0.43; this is a structural refactor.
         uint32_t drained = 0;
         std::vector<PrecompileResult> ready_results;
         std::vector<uint16_t> ready_ids;
         std::vector<uint32_t> ready_request_ids;
         for (auto& [id, q] : queues_) {
-            for (auto& rec : q.records) {
-                if (rec.drained) continue;
-                execute_one(rec);
-                ready_results.push_back(rec.result);
+            std::vector<size_t> pending;
+            pending.reserve(q.records.size());
+            for (size_t i = 0; i < q.records.size(); ++i) {
+                if (!q.records[i].drained) pending.push_back(i);
+            }
+            if (pending.empty()) continue;
+            execute_batch_for_id(id, q.records, pending);
+            for (size_t idx : pending) {
+                ready_results.push_back(q.records[idx].result);
                 ready_ids.push_back(id);
-                ready_request_ids.push_back(rec.request_id);
+                ready_request_ids.push_back(q.records[idx].request_id);
                 ++drained;
             }
         }
@@ -422,6 +430,17 @@ private:
         }
 
         return drained;
+    }
+
+    // v0.44 entry point. Same role as the CPU twin: one decision point per
+    // id where future kernel-launch amortization (e.g. one Metal command
+    // buffer per id, one ecrecover batch_inv pass per id) plugs in without
+    // touching any caller. Today this is a per-call loop because the
+    // underlying dispatcher API is per-call; output bytes are unchanged.
+    void execute_batch_for_id(uint16_t /*id*/,
+                              std::vector<CallRecord>& records,
+                              const std::vector<size_t>& pending) {
+        for (size_t idx : pending) execute_one(records[idx]);
     }
 
     void execute_one(CallRecord& rec) {

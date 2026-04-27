@@ -268,18 +268,43 @@ public:
     const char* device_name() const override { return "cpu"; }
 
 private:
-    // Drain every queue once. Returns the number of newly-drained calls.
+    // v0.44 — per-id batched drain. We collect every undrained record for
+    // each id first, then call execute_batch_for_id once per id. This is the
+    // hook the v0.44 pipelines latch onto (ecrecover Stage A batch inv, BLS
+    // Miller-on-device, KZG batched-pairing). Today the per-call dispatcher
+    // already routes to the right backend; the batch grouping here gives the
+    // service one decision point per id where future kernel-launch
+    // amortization plugs in without changing call sites.
     uint32_t drain_locked() {
         uint32_t drained = 0;
         for (auto& [id, q] : queues_) {
-            for (auto& rec : q.records) {
-                if (rec.drained) continue;
-                execute_one(rec);
-                wake_fibers_for(id, rec.request_id, rec.result);
+            // Collect indices of pending records for this id.
+            std::vector<size_t> pending;
+            pending.reserve(q.records.size());
+            for (size_t i = 0; i < q.records.size(); ++i) {
+                if (!q.records[i].drained) pending.push_back(i);
+            }
+            if (pending.empty()) continue;
+            execute_batch_for_id(id, q.records, pending);
+            for (size_t idx : pending) {
+                wake_fibers_for(id, q.records[idx].request_id,
+                                q.records[idx].result);
                 ++drained;
             }
         }
         return drained;
+    }
+
+    // v0.44 entry point. The batch path is currently a per-call loop because
+    // the underlying dispatcher API is per-call; structuring the loop here
+    // means future kernel-launch amortization (e.g. one Metal command buffer
+    // per id, one ecrecover batch_inv pass per id) plugs in without touching
+    // any caller. Per-id artifact rooting reads the same records, so this is
+    // a pure dispatch refactor — output bytes and gas accounting unchanged.
+    void execute_batch_for_id(uint16_t /*id*/,
+                              std::vector<CallRecord>& records,
+                              const std::vector<size_t>& pending) {
+        for (size_t idx : pending) execute_one(records[idx]);
     }
 
     void execute_one(CallRecord& rec) {

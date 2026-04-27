@@ -140,4 +140,29 @@ struct BLSPublicKey { std::array<uint8_t, 48> bytes{}; };
     const uint8_t* const pks[],        ///< n × 48-byte compressed G1
     std::size_t n) noexcept;
 
+// =============================================================================
+// v0.44 — partial-GPU aggregate verify (Stage 5 staging point).
+//
+// The full GPU BLS path is still in flight (BLS Stage 3+ — pairing on device).
+// What ships today is the *partial* path: the on-device Miller loop is the
+// existing crypto/bls/gpu/metal/bls_miller.metal kernel set; final_exp stays
+// on host blst because Stage 4 (final_exp on Metal) hasn't landed yet. The
+// goal of this entry point is the API contract: callers wire to this name and
+// don't change when Stage 5 swaps `blst_final_exp(...)` for
+// `lux_bls12_381_final_exp_metal(...)`.
+//
+// Behaviour today: byte-equal to verify_bls_aggregate_batch above. The
+// "partial GPU" claim becomes operative once the bls_miller driver from
+// crypto/bls is exposed to this layer. Documented as Honest Gap in the v0.44
+// release notes — Stage 5 wire-back is a one-line change here.
+//
+// Mainnet-safe: returns false on any decode / subgroup / pairing failure;
+// never accepts partial. A single bad sig denies the whole batch.
+// =============================================================================
+[[nodiscard]] bool verify_bls_aggregate_batch_partial_gpu(
+    const uint8_t* const subjects[],
+    const uint8_t* const signatures[],
+    const uint8_t* const pks[],
+    std::size_t n) noexcept;
+
 }  // namespace quasar::gpu

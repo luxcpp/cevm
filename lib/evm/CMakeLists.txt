@@ -731,6 +731,31 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
+    # v0.44 — crypto precompile residency: ecrecover GPU-only batched
+    # (Stage A inv via the v0.63 pipeline), BLS partial-GPU aggregate verify
+    # (Miller-on-device + final_exp-host; Stage 5 wire-back lands when the
+    # bls_miller driver is exposed publicly), Keccak residency dedup
+    # (KeccakJobKind round-cache + in-batch table). PrecompileArtifact
+    # roots flow into execution_root unchanged.
+    add_executable(precompile-residency-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/precompile_residency_test.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_groth16_verifier.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp)
+    target_compile_features(precompile-residency-test PRIVATE cxx_std_20)
+    target_link_libraries(precompile-residency-test PRIVATE
+        precompile-service evm-precompiles evm-metal-hosts
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx
+        cevm::precompiles blst::blst
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(precompile-residency-test PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
     # v0.45 — precompiles bench: BLS / Groth16 / Ringtail batched-vs-unbatched.
     # Lives at the build root as `precompiles-bench` (matching the
     # acceptance script `./build-bench/precompiles-bench`). Self-contained,
@@ -788,6 +813,7 @@ if(APPLE)
         v3-persistent-test
         evm-unified-pipeline-test
         precompile-service-test
+        precompile-residency-test
     )
         if(TARGET ${t})
             add_test(NAME ${t} COMMAND ${t})
