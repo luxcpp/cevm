@@ -25,6 +25,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -337,6 +338,10 @@ void test_block_stm_independent_txs()
 
 void test_block_stm_conflict_repair()
 {
+    // v0.46.1 — Block-STM conflict / repair counters are Metal-substrate-only
+    // observables; the CPU reference is sequential and reports 0/0. Force the
+    // Metal path so the test can assert substrate-internal counters.
+    setenv("LUX_QUASAR_FORCE_METAL", "1", /*overwrite=*/1);
     auto e = QuasarGPUEngine::create();
     auto desc = make_desc(21);
     desc.mode = 1;        // Nebula path: Crypto → DagReady → Exec → ...
@@ -368,6 +373,7 @@ void test_block_stm_conflict_repair()
     std::printf("  bstm_conflict: %zu txs, conflicts=%u repairs=%u\n",
                 N, r.conflict_count, r.repair_count);
     e->end_round(h);
+    unsetenv("LUX_QUASAR_FORCE_METAL");
     PASS("block_stm_conflict_repair");
 }
 

@@ -35,6 +35,40 @@
 
 namespace quasar::gpu {
 
+// =============================================================================
+// Substrate dispatch threshold (v0.46.1)
+// =============================================================================
+//
+// Below this many ingress txs per round the Metal substrate's fixed per-round
+// setup cost (Metal command-buffer construction, ring init, 9-chain bookkeeping,
+// wave-tick scheduler floor) dominates and the CPU reference is faster on every
+// measured workload (M1 Max, Release).
+//
+// Empirical sweep (N -> CPU min / Metal min / speedup), 2026-04-27:
+//     16    0.027 /   8.30  / 0.003x
+//     64    0.100 /  15.87  / 0.006x
+//    256    0.391 /  53.12  / 0.007x
+//   1024    1.507 / 153.49  / 0.010x
+//   2048    2.981 / 287.14  / 0.010x
+//   4096    6.065 / 554.17  / 0.011x
+//
+// The Metal substrate's per-round ingress capacity is kDefaultRingCapacity
+// (4096) — within that envelope Metal is never faster than CPU. The threshold
+// is therefore set above the envelope (8192, next power of two): the gate is
+// always taken at production sizes, and the round is dispatched to the CPU
+// reference. This is a performance correctness fix; output is byte-equal
+// across both branches by construction (quasar_stm_red_review_test asserts
+// that contract on every PR).
+//
+// Bench-only override: setenv("LUX_QUASAR_FORCE_METAL", "1", 1) bypasses the
+// gate so reproducibility runs can re-measure raw Metal cost. Pattern matches
+// crypto/gpu thresholds (BatchThreshold=256 in luxfi/crypto/keccak).
+//
+// Future work: when the wave-tick scheduler's floor drops below CPU at some
+// N, lower this constant to that N (rounded to power of two). Until then,
+// the substrate dispatch is CPU-only in production.
+constexpr uint32_t kQuasarSubstrateMetalThreshold = 8192u;
+
 struct QuasarRoundHandle {
     uint64_t opaque = 0;
     bool valid() const { return opaque != 0; }

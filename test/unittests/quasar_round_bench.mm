@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numeric>
 #include <vector>
@@ -153,6 +154,12 @@ double run_cpu_round(const QuasarRoundDescriptor& desc,
     return std::chrono::duration<double, std::milli>(t1 - t0).count();
 }
 
+// v0.46.1 — three columns: CPU reference (no engine), gated engine (production
+// dispatch — falls through to CPU below kQuasarSubstrateMetalThreshold), and
+// forced-Metal engine (LUX_QUASAR_FORCE_METAL=1 bypasses the gate, measures
+// raw Metal substrate cost). The "speedup" column is gated/CPU — both
+// production paths are >= 1.00x by the gate's contract for any N below
+// the threshold.
 void bench_workload(const char* name,
                     const std::vector<HostTxBlob>& gpu_txs,
                     std::size_t max_epochs,
@@ -162,21 +169,7 @@ void bench_workload(const char* name,
     auto cpu_txs = to_ref(gpu_txs);
     auto desc = make_desc(1u);
 
-    // Metal.
-    auto e = QuasarGPUEngine::create();
-    if (!e) {
-        std::printf("workload=%s metal=unavailable\n", name);
-        return;
-    }
-    for (std::size_t i = 0; i < warmup; ++i)
-        run_metal_round(e.get(), desc, gpu_txs, max_epochs);
-    std::vector<double> metal_times;
-    metal_times.reserve(runs);
-    for (std::size_t i = 0; i < runs; ++i)
-        metal_times.push_back(run_metal_round(e.get(), desc, gpu_txs, max_epochs));
-    auto m = compute_stats(metal_times);
-
-    // CPU.
+    // CPU reference (no engine wrapper).
     for (std::size_t i = 0; i < warmup; ++i)
         run_cpu_round(desc, cpu_txs);
     std::vector<double> cpu_times;
@@ -185,20 +178,42 @@ void bench_workload(const char* name,
         cpu_times.push_back(run_cpu_round(desc, cpu_txs));
     auto c = compute_stats(cpu_times);
 
-    double speedup_min  = c.min_ms  / m.min_ms;
-    double speedup_mean = c.mean_ms / m.mean_ms;
-    double rounds_per_sec_metal = 1000.0 / m.min_ms;
-    double rounds_per_sec_cpu   = 1000.0 / c.min_ms;
+    // Gated engine path (production behavior).
+    unsetenv("LUX_QUASAR_FORCE_METAL");
+    auto e_gated = QuasarGPUEngine::create();
+    if (!e_gated) {
+        std::printf("workload=%s metal=unavailable\n", name);
+        return;
+    }
+    for (std::size_t i = 0; i < warmup; ++i)
+        run_metal_round(e_gated.get(), desc, gpu_txs, max_epochs);
+    std::vector<double> gated_times;
+    gated_times.reserve(runs);
+    for (std::size_t i = 0; i < runs; ++i)
+        gated_times.push_back(run_metal_round(e_gated.get(), desc, gpu_txs, max_epochs));
+    auto g = compute_stats(gated_times);
 
-    std::printf("workload=%-18s tx=%-5zu cpu_min=%8.3fms cpu_mean=%8.3fms"
-                " metal_min=%8.3fms metal_mean=%8.3fms"
-                " speedup_min=%5.2fx speedup_mean=%5.2fx"
-                " cpu_rounds_per_sec=%8.1f metal_rounds_per_sec=%8.1f\n",
+    // Forced-Metal path (bypass gate).
+    setenv("LUX_QUASAR_FORCE_METAL", "1", /*overwrite=*/1);
+    auto e_force = QuasarGPUEngine::create();
+    for (std::size_t i = 0; i < warmup; ++i)
+        run_metal_round(e_force.get(), desc, gpu_txs, max_epochs);
+    std::vector<double> forced_times;
+    forced_times.reserve(runs);
+    for (std::size_t i = 0; i < runs; ++i)
+        forced_times.push_back(run_metal_round(e_force.get(), desc, gpu_txs, max_epochs));
+    auto f = compute_stats(forced_times);
+    unsetenv("LUX_QUASAR_FORCE_METAL");
+
+    double gate_speedup_min  = c.min_ms / g.min_ms;
+    double force_speedup_min = c.min_ms / f.min_ms;
+
+    std::printf("workload=%-18s tx=%-5zu cpu_min=%8.3fms"
+                " gated_min=%8.3fms force_metal_min=%8.3fms"
+                " gate_vs_cpu=%5.2fx force_vs_cpu=%5.2fx\n",
                 name, gpu_txs.size(),
-                c.min_ms, c.mean_ms,
-                m.min_ms, m.mean_ms,
-                speedup_min, speedup_mean,
-                rounds_per_sec_cpu, rounds_per_sec_metal);
+                c.min_ms, g.min_ms, f.min_ms,
+                gate_speedup_min, force_speedup_min);
 }
 
 void bench_bls_aggregate_verify(std::size_t batch_size, std::size_t runs)

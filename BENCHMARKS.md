@@ -58,24 +58,54 @@ buffer instead of allocating per call yields 6-12% on host. The full
 `luxcpp/{cuda,metal}/kernels/crypto/keccak256.{cu,metal}` rings already
 exist; wiring them is the v0.45.1 patch).
 
-### Quasar full-round wall-clock (Metal substrate vs CPU reference)
+### Quasar full-round wall-clock (substrate gate, v0.46.1)
 
-| Workload    | CPU min   | Metal min (v0.45) | Speedup vs CPU |
-|-------------|----------:|------------------:|---------------:|
-| fast.1024   | 1.49 ms   | 359.50 ms         | 0.00× (Metal slower)  |
-| same_key.16 | 0.027 ms  | 18.19 ms          | 0.00× (Metal slower)  |
-| nebula.100  | 0.15 ms   | 373.06 ms         | 0.00× (Metal slower)  |
+#### (a) Cutover threshold sweep (`quasar-threshold-sweep`)
 
-**Honesty gap (v0.45)**: the full-round Metal substrate is *still*
-slower than the CPU reference at the workload sizes we test. The
-substrate is engineered for hundreds of thousands of txs per round; at
-1024 txs the round setup + rings + 9-chain bookkeeping dominates the
-fixed work. The v0.45 BLS / Groth16 / Ringtail batched paths land at
-the verifier layer (replacing host blst per-signature with a single
-batched final_exp); they do NOT yet flow through the
-QuasarGPUEngine wave-tick scheduler. That integration is the v0.45.1
-deliverable, after which the full-round path picks up the same ≥9×
-that the verifier benches show today.
+Forced-Metal vs CPU reference, M1 Max, Release, median of 7-9 runs:
+
+| N    | CPU min   | Metal min (forced) | Speedup vs CPU |
+|------|----------:|-------------------:|---------------:|
+| 16   | 0.027 ms  |   7.88 ms          | 0.003×         |
+| 64   | 0.100 ms  |  15.59 ms          | 0.006×         |
+| 256  | 0.392 ms  |  53.07 ms          | 0.007×         |
+| 1024 | 1.496 ms  | 153.10 ms          | 0.010×         |
+| 2048 | 2.956 ms  | 287.00 ms          | 0.010×         |
+| 4096 | 6.083 ms  | 554.01 ms          | 0.011×         |
+
+Metal does not beat CPU at any N within the substrate's per-round
+ingress capacity (`kDefaultRingCapacity = 4096`). The Metal path's
+plateau at ~554 ms is the wave-tick scheduler floor (256 epochs ×
+~2 ms each on M1). N\_threshold\_substrate is therefore set above the
+envelope: `kQuasarSubstrateMetalThreshold = 8192` in
+`lib/consensus/quasar/gpu/quasar_gpu_engine.hpp`. The gate is taken on
+every production-sized round; `run_until_done` falls through to the
+CPU reference, which produces byte-equal output (asserted by
+`quasar-stm-red-review-test::cross_backend_determinism_*`).
+
+#### (b) Post-cutover wall-clock (`quasar-round-bench`)
+
+Three columns: direct CPU reference; gated engine path (production
+behavior — gate routes to CPU); forced-Metal path
+(`LUX_QUASAR_FORCE_METAL=1` bypasses the gate, measures raw Metal cost).
+
+| Workload    | CPU min   | Gated min | Forced-Metal min | Gate vs CPU | Force vs CPU |
+|-------------|----------:|----------:|-----------------:|------------:|-------------:|
+| fast.1024   | 1.496 ms  | 1.481 ms  | 152.98 ms        | 1.01×       | 0.01×        |
+| same_key.16 | 0.027 ms  | 0.028 ms  |  19.48 ms        | 0.96×       | 0.00×        |
+| nebula.100  | 0.151 ms  | 0.157 ms  |  24.19 ms        | 0.97×       | 0.01×        |
+
+The gated path is byte-equal to direct CPU (tautology — engine routes
+to `quasar::gpu::ref::run_reference`) and within ~3% of pure-CPU
+wall-clock; the engine wrapper cost on the gated path is sub-100 µs
+because Metal buffer allocation is deferred to `init_metal_locked` and
+only paid when the gate falls through to Metal.
+
+**Reproducibility**: `LUX_QUASAR_FORCE_METAL=1` on the bench process
+bypasses the threshold gate so reproducibility runs can re-measure raw
+Metal cost. Pattern matches `BatchThreshold` in
+`luxfi/crypto/keccak/keccak.go:23` and `Threshold*` constants in
+`luxfi/crypto/gpu/zk.go`.
 
 ### What v0.45 actually ships
 
@@ -211,67 +241,63 @@ thread-pool dispatch cost. This is expected; the parallel path wins on
 real EVM bytecode (see kernel bench above) and on the QuasarGPUEngine's
 Block-STM inside a round.
 
-## Quasar round wall-clock (`quasar-round-bench`)
+## Quasar round wall-clock (`quasar-round-bench`, v0.46.1 substrate gate)
 
-This is the bench specifically requested by the task: a single full
-consensus round on the Metal QuasarGPUEngine vs the CPU reference
-(`quasar_cpu_reference.run_reference`), on the three deterministic
-workloads pinned by the determinism harness.
+A single full consensus round on the QuasarGPUEngine vs the CPU
+reference (`quasar_cpu_reference.run_reference`), on the three
+deterministic workloads pinned by the determinism harness. The
+v0.46.1 substrate gate (`kQuasarSubstrateMetalThreshold = 8192` in
+`lib/consensus/quasar/gpu/quasar_gpu_engine.hpp`) routes small N to
+the CPU reference; production-sized rounds (N below the substrate's
+per-round ingress capacity of 4096) always take the gate.
 
 ```
 device: Apple M1 Max
 
 # Quasar full-round wall clock (Metal vs CPU reference)
-workload=fast.1024     tx=1024 cpu_min=  1.561ms cpu_mean=  1.606ms metal_min=153.845ms metal_mean=643.909ms
-workload=same_key.16   tx=16   cpu_min=  0.028ms cpu_mean=  0.028ms metal_min= 23.747ms metal_mean=8325.322ms
-workload=nebula.100    tx=100  cpu_min=  0.156ms cpu_mean=  0.157ms metal_min= 24.953ms metal_mean= 25.304ms
+workload=fast.1024     tx=1024 cpu_min=  1.496ms gated_min=  1.481ms force_metal_min=152.98ms gate_vs_cpu= 1.01x force_vs_cpu=0.01x
+workload=same_key.16   tx=16   cpu_min=  0.027ms gated_min=  0.028ms force_metal_min= 19.48ms gate_vs_cpu= 0.96x force_vs_cpu=0.00x
+workload=nebula.100    tx=100  cpu_min=  0.151ms gated_min=  0.157ms force_metal_min= 24.19ms gate_vs_cpu= 0.97x force_vs_cpu=0.01x
 ```
 
-| Workload      | CPU ref min | CPU ref mean | Metal min | Metal mean | Min speedup | Mean speedup |
-|---------------|------------:|-------------:|----------:|-----------:|------------:|-------------:|
-| fast.1024     | 1.561 ms    | 1.606 ms     | 153.85 ms | 643.91 ms  | 0.01×       | 0.00×        |
-| same_key.16   | 0.028 ms    | 0.028 ms     | 23.75 ms  | 8 325 ms   | 0.00×       | 0.00×        |
-| nebula.100    | 0.156 ms    | 0.157 ms     | 24.95 ms  | 25.30 ms   | 0.01×       | 0.01×        |
+| Workload    | CPU min   | Gated min | Force-Metal min | Gate vs CPU | Force vs CPU |
+|-------------|----------:|----------:|----------------:|------------:|-------------:|
+| fast.1024   | 1.496 ms  | 1.481 ms  | 152.98 ms       | 1.01×       | 0.01×        |
+| same_key.16 | 0.027 ms  | 0.028 ms  |  19.48 ms       | 0.96×       | 0.00×        |
+| nebula.100  | 0.151 ms  | 0.157 ms  |  24.19 ms       | 0.97×       | 0.01×        |
 
 Reading these numbers:
 
-The **CPU reference does substantially less work than the Metal
-engine**. The CPU reference is a deterministic oracle: it runs Block-STM
-scheduling + commit chain + the keccak roots needed to assert
-byte-identical roots vs the Metal backend
-(`test/unittests/quasar_determinism_test.mm`). The Metal engine
-additionally runs:
+The **gated path is byte-equal to direct CPU** (tautology — the gate
+routes `run_until_done` to `quasar::gpu::ref::run_reference`). The
+remaining ~3% engine wrapper cost is `begin_round` host-side state
+setup + the cert-subject keccak. Metal buffer allocation is deferred
+to `init_metal_locked` and only paid when the gate falls through to
+Metal. The forced-Metal column shows the structural cost of the Metal
+substrate: ring-buffer Service-ID enqueue/dequeue across 17 services,
+atomic counters, predicted-access-set DAG construction, 9-chain root
+echoes, and the wave-tick scheduler floor (256 epochs minimum).
 
-- ring-buffer Service-ID enqueue/dequeue across 17 services
-- atomic counters for stake aggregation, dedup bitmaps, gas accounting
-- predicted-access-set DAG construction (Nebula mode)
-- vote ingestion through three sig lanes (BLS / Ringtail / ML-DSA)
-- cold-state page-fault rings + state-page writeback
-- 9-chain canonical root echo + certificate subject keccak
+The `same_key.16` mean is contaminated when `LUX_QUASAR_FORCE_METAL=1`
+hits the macOS GPU "Impacting Interactivity" watchdog (≈8 s pause).
+The `min` column is the relevant signal; the gated path is unaffected
+because no Metal kernel is dispatched.
 
-…on the device. So the right framing of these numbers is: **at this
-workload size, the round setup + tear-down on the GPU dominates the
-fixed work; the substrate is engineered for hundreds of thousands of
-txs per round, not 16.**
+**Reproducibility**:
 
-The `same_key.16` mean is contaminated by one run that hit the macOS
-GPU "Impacting Interactivity" watchdog (≈8 s pause). The `min` column
-is the relevant signal across all rows; the `mean` column shows
-real-world variance under macOS preemption. CUDA on a Hopper / Ada
-server will not have this preemption.
+```
+LUX_QUASAR_FORCE_METAL=1 ./build/quasar-round-bench
+```
 
-The headline outcome of this bench today is **determinism + correctness
-parity, not raw speedup**. The Metal substrate produces the same
-`block_hash`, `state_root`, `receipts_root`, `execution_root`, and
-`mode_root` as the CPU reference on every workload (verified by
-`quasar-determinism-test`, 6/6 ok). That parity is the gating release
-criterion for Quasar 4.0 (2026-02-14 activation); the GPU-vs-CPU
-wall-clock crossover lands when:
-
-- the v2 32-threads/tx EVM kernel ships (currently `has_v2()` is false)
-- the BLS / Groth16 / Ringtail pairings move from host blst to device
-  (v0.45 per `quasar_bls_verifier.hpp` line 23)
-- workload size grows past the round setup cost (≈16 ms on M1)
+bypasses the threshold gate so reproducibility runs can re-measure
+raw Metal cost. The `quasar-threshold-sweep` binary (output above)
+walks N over {16, 64, 256, 1024, 2048, 4096} with the env var set
+in-process to find the cutover; on M1 Max there is no cutover within
+the substrate's envelope, so the gate is taken at every production
+size. Honest residual gap: the Metal substrate dispatch is structurally
+slower than the CPU reference for substrate-only workloads at every
+sampled N; recommend deprecating `force_metal` paths in favour of CPU
+dispatch until the wave-tick scheduler floor drops below CPU at some N.
 
 ## Precompile per-call (`quasar-round-bench`, host CPU via blst / keccak)
 

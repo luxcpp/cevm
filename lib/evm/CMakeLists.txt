@@ -470,6 +470,10 @@ if(APPLE)
         gpu/kernel/v3_persistent_host.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_gpu_engine.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_gpu_runtime.cpp
+        # v0.46.1 — substrate-threshold gate dispatches small N to the CPU
+        # reference (byte-equal to Metal). Linked into the engine library so
+        # every consumer of QuasarGPUEngine gets the gate transparently.
+        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_cpu_reference.cpp
     )
     target_include_directories(evm-kernel-metal PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../>
@@ -615,6 +619,24 @@ if(APPLE)
         $<BUILD_INTERFACE:${include_dir}>
     )
 
+    # STM-004 cross-backend determinism + v0.46.1 substrate gate regression.
+    # Asserts Metal output is byte-equal to the CPU reference at small N
+    # (gated path) and at force-Metal path. See quasar_stm_red_review_test.mm
+    # — sections "stm-004", "v0.46.1 gate".
+    add_executable(quasar-stm-red-review-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_stm_red_review_test.mm)
+    target_compile_features(quasar-stm-red-review-test PRIVATE cxx_std_20)
+    target_link_libraries(quasar-stm-red-review-test PRIVATE
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx cevm::precompiles
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(quasar-stm-red-review-test PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
     # v0.44 — Quasar 9-chain integration. Validates the substrate wires
     # every LP-134 chain's transition root into QuasarRoundDescriptor and
     # the certificate_subject keccak in canonical P, C, X, Q, Z, A, B, M, F
@@ -660,7 +682,7 @@ if(APPLE)
     # plain stdout consumed by BENCHMARKS.md.
     add_executable(quasar-round-bench
         ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_round_bench.mm
-        ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_cpu_reference.cpp
+        # quasar_cpu_reference.cpp comes via evm-kernel-metal (v0.46.1 — substrate gate).
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_bls_verifier.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_groth16_verifier.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../consensus/quasar/gpu/quasar_ringtail_verifier.cpp
@@ -675,6 +697,24 @@ if(APPLE)
         "-framework Metal" "-framework Foundation"
     )
     target_include_directories(quasar-round-bench PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${include_dir}>
+    )
+
+    # v0.46 — Metal-vs-CPU substrate cutover sweep. Measures wall-clock at
+    # each N and reports the smallest N where Metal beats CPU. Drives the
+    # kQuasarSubstrateMetalThreshold constant in quasar_gpu_engine.hpp.
+    add_executable(quasar-threshold-sweep
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../test/unittests/quasar_threshold_sweep.mm)
+    # quasar_cpu_reference.cpp comes via evm-kernel-metal (v0.46.1 — substrate gate).
+    target_compile_features(quasar-threshold-sweep PRIVATE cxx_std_20)
+    target_link_libraries(quasar-threshold-sweep PRIVATE
+        evm-kernel-metal evm-kernel evm evmc::evmc intx::intx cevm::precompiles
+        "-framework Metal" "-framework Foundation"
+    )
+    target_include_directories(quasar-threshold-sweep PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpu>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
@@ -823,6 +863,7 @@ if(APPLE)
         quasar-9chain-integration-test
         quasar-gpu-engine-test
         quasar-determinism-test
+        quasar-stm-red-review-test
         quasar-cert-abi-test
         evm-test-opcodes
         evm-test-pipeline

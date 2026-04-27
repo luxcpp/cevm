@@ -14,6 +14,7 @@
 ///   5. test_cross_backend_determinism_contended— STM-004 (same-key flood)
 ///   6. test_atomic_release_acquire_dag         — STM-005 (Nebula DAG order)
 ///   7. test_mvcc_arena_zeroed_per_round        — STM-013
+///   8. test_substrate_threshold_gate_byte_equal — v0.46.1 substrate gate
 
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
@@ -23,6 +24,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -356,6 +358,73 @@ void test_mvcc_arena_zeroed_per_round() {
     PASS("mvcc_arena_zeroed_per_round");
 }
 
+// =============================================================================
+// 8. v0.46.1 substrate-threshold gate: the gate routes small N to the CPU
+//    reference. This test asserts:
+//    (a) gated path output is byte-equal to direct CPU reference
+//        (tautology: both run quasar::gpu::ref::run_reference);
+//    (b) forced-Metal path (LUX_QUASAR_FORCE_METAL=1) finalizes with the
+//        same tx_count and gas_used (deterministic invariants both
+//        backends honor; the cross_backend_determinism_* tests cover the
+//        root-level Metal-vs-CPU contract at production N=1024).
+// =============================================================================
+void test_substrate_threshold_gate_byte_equal() {
+    auto desc = make_desc(700);
+
+    constexpr int N = 16;
+    std::vector<HostTxBlob> txs;
+    for (int i = 0; i < N; ++i) {
+        auto t = make_exec_tx(uint64_t(0x70000) + uint64_t(i), uint32_t(i));
+        txs.push_back(t);
+    }
+
+    // Branch A: gated path (default — gate fires at this N).
+    unsetenv("LUX_QUASAR_FORCE_METAL");
+    auto e_gated = QuasarGPUEngine::create();
+    EXPECT("gate.create_gated", e_gated != nullptr);
+    auto h_gated = e_gated->begin_round(desc);
+    e_gated->push_txs(h_gated, txs);
+    e_gated->request_close(h_gated);
+    auto r_gated = e_gated->run_until_done(h_gated, 64);
+    e_gated->end_round(h_gated);
+
+    // Direct CPU reference — byte-equal to gated by tautology.
+    std::vector<quasar::gpu::ref::HostInputTx> cpu_txs;
+    for (const auto& t : txs) cpu_txs.push_back(mirror_for_cpu(t));
+    auto cpu_r = quasar::gpu::ref::run_reference(desc, cpu_txs);
+
+    EXPECT("gate.gated_finalized", r_gated.status == 1u);
+    EXPECT("gate.cpu_finalized",   cpu_r.status   == 1u);
+    EXPECT("gate.tx_count_eq",     r_gated.tx_count == cpu_r.tx_count);
+    EXPECT("gate.gas_used_eq",     r_gated.gas_used() == cpu_r.gas_used);
+    EXPECT("gate.bh_eq",           eq32(r_gated.block_hash,     cpu_r.block_hash));
+    EXPECT("gate.rr_eq",           eq32(r_gated.receipts_root,  cpu_r.receipts_root));
+    EXPECT("gate.er_eq",           eq32(r_gated.execution_root, cpu_r.execution_root));
+
+    // Branch B: forced-Metal path. Asserts the engine still drives Metal
+    // when the env is set; we don't compare roots vs CPU here (the
+    // existing cross_backend_determinism_disjoint at N=1024 covers that
+    // contract; at N=16 the substrate's commit ordering may differ from
+    // the strict tx_index-order CPU reference).
+    setenv("LUX_QUASAR_FORCE_METAL", "1", /*overwrite=*/1);
+    auto e_metal = QuasarGPUEngine::create();
+    EXPECT("gate.create_metal", e_metal != nullptr);
+    auto h_metal = e_metal->begin_round(desc);
+    e_metal->push_txs(h_metal, txs);
+    e_metal->request_close(h_metal);
+    auto r_metal = e_metal->run_until_done(h_metal, 256);
+    e_metal->end_round(h_metal);
+    unsetenv("LUX_QUASAR_FORCE_METAL");
+
+    EXPECT("gate.metal_finalized", r_metal.status == 1u);
+    EXPECT("gate.metal_tx_count",  r_metal.tx_count == r_gated.tx_count);
+    EXPECT("gate.metal_gas_used",  r_metal.gas_used() == r_gated.gas_used());
+
+    std::printf("  gate: tx=%u gas=%llu (gated==cpu byte-equal; metal finalized)\n",
+                r_gated.tx_count, (unsigned long long)r_gated.gas_used());
+    PASS("substrate_threshold_gate_byte_equal");
+}
+
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/) {
@@ -370,6 +439,7 @@ int main(int /*argc*/, char** /*argv*/) {
         test_cross_backend_determinism_contended();
         test_atomic_release_acquire_dag();
         test_mvcc_arena_zeroed_per_round();
+        test_substrate_threshold_gate_byte_equal();
         std::printf("[quasar_stm_red_review_test] passed=%d failed=%d\n",
                     g_passed, g_failed);
         std::fflush(stdout);

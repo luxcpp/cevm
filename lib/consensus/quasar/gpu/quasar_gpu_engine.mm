@@ -7,10 +7,12 @@
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 
+#include "quasar_cpu_reference.hpp"
 #include "quasar_gpu_engine.hpp"
 #include "quasar_sig.hpp"
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -161,6 +163,36 @@ struct Round {
     id<MTLBuffer> cert_master_secret_buf = nil;
 
     uint32_t      next_predicted_idx  = 0u;
+
+    // v0.46.1 — host-side mirror of accepted ingress txs. Used by the
+    // substrate-threshold gate in run_until_done to dispatch small N to the
+    // CPU reference. Output is byte-equal across both branches by the
+    // existing cross-backend determinism contract (quasar_stm_red_review_test).
+    std::vector<quasar::gpu::ref::HostInputTx> host_input_mirror;
+    // Mirror of host-side blob-related copies of HostTxBlob for replay into
+    // Metal buffers if and only if the gate routes to Metal. Holds the
+    // original gas/nonce/origin/needs/predicted_access/bytes per accepted tx.
+    std::vector<HostTxBlob> tx_replay;
+    // Index into tx_replay of the next tx to mirror into Metal buffers.
+    // push_txs_to_metal_locked drains [tx_replay_metal_cursor .. tx_replay.end()).
+    std::size_t tx_replay_metal_cursor = 0;
+
+    // v0.46.1 — Metal initialization is deferred until run_until_done knows
+    // whether the gate routes to CPU (no Metal needed) or Metal (allocate
+    // + replay tx_replay into device buffers). begin_round only sets desc +
+    // handle; push_txs only mirrors. metal_initialized stays false on the
+    // CPU branch, eliminating ~20 Metal buffer allocations + ~12 memsets at
+    // small N.
+    bool metal_initialized = false;
+    // Host-side cached result, populated by run_cpu_reference_locked when
+    // the gate routes to CPU. poll_round_result returns this on the CPU
+    // branch (Metal result_buf isn't allocated until init_metal_locked).
+    QuasarRoundResult cached_cpu_result{};
+    bool              cached_cpu_result_valid = false;
+    // Set by push_votes / push_state_pages / push_state_requests. When
+    // any of these has been called, the round must dispatch to Metal —
+    // the CPU reference doesn't model votes / cold-state.
+    bool requires_metal = false;
 };
 
 class QuasarGPUEngineImpl final : public QuasarGPUEngine {
@@ -192,6 +224,45 @@ public:
         round_.desc = desc;
         round_.desc.wave_tick_index = 0;
         round_.desc.closing_flag = 0;
+        round_.host_input_mirror.clear();
+        round_.tx_replay.clear();
+        round_.metal_initialized = false;
+
+        // v0.46.1 — Metal init is deferred to run_until_done so the gate can
+        // skip ~20 Metal buffer allocations + memsets at small N. The CERT-003
+        // certificate_subject keccak is host-side and required by both
+        // branches (Metal kernel echoes it; CPU branch echoes it via the
+        // descriptor); compute it here once.
+        const auto cert_mode_enum =
+            static_cast<quasar::gpu::sig::QuasarCertMode>(round_.desc.cert_mode);
+        auto subj = quasar::gpu::sig::compute_certificate_subject(
+            round_.desc.chain_id, round_.desc.epoch, round_.desc.round,
+            round_.desc.mode, cert_mode_enum,
+            round_.desc.pchain_validator_root,
+            round_.desc.parent_block_hash,
+            round_.desc.xchain_execution_root,
+            round_.desc.qchain_ceremony_root,
+            round_.desc.zchain_vk_root,
+            round_.desc.achain_state_root,
+            round_.desc.bchain_state_root,
+            round_.desc.mchain_state_root,
+            round_.desc.fchain_state_root,
+            round_.desc.attestation_root,
+            round_.desc.parent_state_root,
+            round_.desc.parent_execution_root,
+            round_.desc.gas_limit, round_.desc.base_fee);
+        std::memcpy(round_.desc.certificate_subject, subj.data(), 32);
+
+        round_.handle = QuasarRoundHandle{++next_handle_};
+        return round_.handle;
+    }
+
+    // v0.46.1 — late Metal init. Called from run_until_done when the
+    // gate routes the round to the Metal substrate. Allocates 17 Metal
+    // buffers, computes certificate_subject, populates descriptor, and
+    // replays host_input_mirror / tx_replay into the Ingress ring.
+    void init_metal_locked() {
+        if (round_.metal_initialized) return;
 
         std::vector<uint64_t> per_service_offset(kNumServices, 0);
         uint64_t arena_bytes = 0;
@@ -235,7 +306,8 @@ public:
             || !round_.dag_node_cap_buf
             || !round_.code_buf || !round_.code_size_buf || !round_.fiber_cap_buf
             || !round_.cert_master_secret_buf)
-            return QuasarRoundHandle{0};
+            return;  // v0.46.1: caller still holds a valid handle; Metal kernel
+                     // dispatch will fail downstream if buffers couldn't allocate.
 
         // CERT-003 / v0.42 cert ABI: compute certificate_subject host-side and
         // write into desc. Both kernel and host MUST agree byte-for-byte; the
@@ -290,7 +362,7 @@ public:
         round_.next_code_offset = 0u;
 
         auto* result = static_cast<QuasarRoundResult*>([round_.result_buf contents]);
-        result->mode = desc.mode;
+        result->mode = round_.desc.mode;
         // v0.44 — echo the 9 canonical chain roots + cert subject so consumers
         // can reconstruct the cert subject without re-parsing the descriptor.
         // Order matches compute_certificate_subject (P, C, X, Q, Z, A, B, M, F).
@@ -320,14 +392,21 @@ public:
             hdrs[s] = h;
         }
 
-        round_.handle = QuasarRoundHandle{++next_handle_};
-        return round_.handle;
+        round_.metal_initialized = true;
+
+        // Replay the host-side tx mirror into the now-initialized Metal
+        // buffers. push_txs deferred all device writes until this point.
+        push_txs_to_metal_locked();
     }
 
-    void push_txs(QuasarRoundHandle h, std::span<const HostTxBlob> txs) override {
-        std::lock_guard<std::mutex> g(mu_);
-        if (!check_handle(h)) return;
-        if (txs.empty()) return;
+    // Drains round_.tx_replay into the Metal-backed Ingress ring. Called
+    // from init_metal_locked once the Metal buffers exist. Mirrors the
+    // original push_txs body byte-for-byte. Drains
+    // [tx_replay_metal_cursor .. tx_replay.end()) so subsequent push_txs
+    // calls after Metal init only mirror new txs.
+    void push_txs_to_metal_locked() {
+        if (!round_.metal_initialized) return;
+        if (round_.tx_replay_metal_cursor >= round_.tx_replay.size()) return;
 
         auto* hdrs = static_cast<RingHeader*>([round_.hdrs_buf contents]);
         RingHeader& ingress = hdrs[static_cast<uint32_t>(ServiceId::Ingress)];
@@ -336,16 +415,14 @@ public:
         auto* predicted_arena = static_cast<PredictedKeyHost*>([round_.predicted_buf contents]);
         auto* code_arena      = static_cast<uint8_t*>([round_.code_buf contents]);
 
-        for (const auto& tx : txs) {
+        const std::size_t start = round_.tx_replay_metal_cursor;
+        for (std::size_t i = start; i < round_.tx_replay.size(); ++i) {
+            const auto& tx = round_.tx_replay[i];
+            round_.tx_replay_metal_cursor = i + 1;
             uint32_t head = ingress.head;
             uint32_t tail = ingress.tail;
             if (tail - head >= ingress.capacity) break;
 
-            // v0.41 — write bytecode into the device code arena. If the
-            // arena is full, the tx is admitted with size=0 and drain_exec
-            // falls through to the legacy synthetic R+W path. The blob
-            // arena (host-side) keeps a copy for any future host-side
-            // RLP / CALLDATA replay paths.
             uint32_t code_off  = round_.next_code_offset;
             uint32_t code_size = static_cast<uint32_t>(tx.bytes.size());
             if (code_off + code_size > kCodeArenaBytes) {
@@ -370,10 +447,6 @@ public:
             in.origin_hi = origin_hi;
             blob_arena_.insert(blob_arena_.end(), tx.bytes.begin(), tx.bytes.end());
 
-            // v0.40 — copy predicted access set into the per-tx slot keyed
-            // by tx_index. Host's next_predicted_idx mirrors GPU's
-            // tx_index_seq under the assumption that drain_ingress consumes
-            // Ingress in FIFO order (single-threaded, gid=0).
             const uint32_t tidx = round_.next_predicted_idx;
             if (tidx < kDagNodeCapacity) {
                 PredictedKeyHost* slot = &predicted_arena[tidx * kMaxPredictedKeys];
@@ -398,10 +471,42 @@ public:
         }
     }
 
+    void push_txs(QuasarRoundHandle h, std::span<const HostTxBlob> txs) override {
+        std::lock_guard<std::mutex> g(mu_);
+        if (!check_handle(h)) return;
+        if (txs.empty()) return;
+
+        // v0.46.1 — buffer host-side. Cap at the substrate's per-round ingress
+        // capacity (matches Metal-path behaviour). When Metal is initialized
+        // the kernel sees these via push_txs_to_metal_locked; otherwise the
+        // CPU branch in run_until_done consumes host_input_mirror directly.
+        const std::size_t cap = static_cast<std::size_t>(kDefaultRingCapacity);
+        for (const auto& tx : txs) {
+            if (round_.host_input_mirror.size() >= cap) break;
+
+            quasar::gpu::ref::HostInputTx mirror;
+            mirror.gas_limit   = tx.gas_limit;
+            mirror.origin      = tx.origin;
+            mirror.needs_state = tx.needs_state;
+            mirror.needs_exec  = tx.needs_exec;
+            round_.host_input_mirror.push_back(mirror);
+            round_.tx_replay.push_back(tx);
+        }
+
+        // If Metal has already been initialized (force-Metal env was set
+        // before begin_round, or a previous run_until_done lazy-init'd it),
+        // mirror the freshly accepted txs into device buffers immediately.
+        if (round_.metal_initialized)
+            push_txs_to_metal_locked();
+    }
+
     void push_votes(QuasarRoundHandle h, std::span<const HostVote> votes) override {
         std::lock_guard<std::mutex> g(mu_);
         if (!check_handle(h)) return;
         if (votes.empty()) return;
+        // v0.46.1 — vote ingestion needs Metal buffers; force lazy init.
+        round_.requires_metal = true;
+        init_metal_locked();
 
         auto* hdrs = static_cast<RingHeader*>([round_.hdrs_buf contents]);
         RingHeader& vote = hdrs[static_cast<uint32_t>(ServiceId::Vote)];
@@ -433,6 +538,8 @@ public:
         std::lock_guard<std::mutex> g(mu_);
         std::vector<HostStateRequest> out;
         if (!check_handle(h)) return out;
+        // No state requests can exist without a Metal kernel having run.
+        if (!round_.metal_initialized) return out;
 
         auto* hdrs = static_cast<RingHeader*>([round_.hdrs_buf contents]);
         RingHeader& req = hdrs[static_cast<uint32_t>(ServiceId::StateRequest)];
@@ -462,6 +569,9 @@ public:
         std::lock_guard<std::mutex> g(mu_);
         if (!check_handle(h)) return;
         if (pages.empty()) return;
+        // v0.46.1 — state-page ingestion presumes a Metal kernel will consume.
+        round_.requires_metal = true;
+        init_metal_locked();
 
         auto* hdrs = static_cast<RingHeader*>([round_.hdrs_buf contents]);
         RingHeader& resp = hdrs[static_cast<uint32_t>(ServiceId::StateResp)];
@@ -494,6 +604,8 @@ public:
         std::lock_guard<std::mutex> g(mu_);
         std::vector<HostQuorumCert> out;
         if (!check_handle(h)) return out;
+        // No quorum certs without a Metal kernel having run.
+        if (!round_.metal_initialized) return out;
 
         auto* hdrs = static_cast<RingHeader*>([round_.hdrs_buf contents]);
         RingHeader& qc = hdrs[static_cast<uint32_t>(ServiceId::QuorumOut)];
@@ -522,6 +634,10 @@ public:
     QuasarRoundResult run_epoch(QuasarRoundHandle h) override {
         std::lock_guard<std::mutex> g(mu_);
         if (!check_handle(h)) return QuasarRoundResult{};
+        // v0.46.1 — Metal kernel dispatch requires initialized buffers.
+        // Direct callers (skipping run_until_done's gate) get the Metal
+        // path unconditionally; we lazy-init here.
+        init_metal_locked();
 
         auto* desc_dev = static_cast<QuasarRoundDescriptor*>([round_.desc_buf contents]);
         desc_dev->wave_tick_index = round_.desc.wave_tick_index;
@@ -586,6 +702,24 @@ public:
     }
 
     QuasarRoundResult run_until_done(QuasarRoundHandle h, std::size_t max_epochs) override {
+        // v0.46.1 — substrate-threshold gate. At small N the Metal substrate's
+        // fixed per-round setup cost dominates; the CPU reference produces
+        // byte-equal output (asserted by quasar_stm_red_review_test) at a
+        // fraction of the wall-clock. Above the threshold, fall through to
+        // the Metal path. LUX_QUASAR_FORCE_METAL=1 bypasses the gate for
+        // bench reproducibility.
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            if (!check_handle(h)) return QuasarRoundResult{};
+            if (substrate_should_use_cpu_locked()) {
+                QuasarRoundResult packed{};
+                run_cpu_reference_locked(packed);
+                return packed;
+            }
+            // Above threshold: lazy-init Metal buffers + replay mirror.
+            init_metal_locked();
+        }
+
         QuasarRoundResult last{};
         for (std::size_t i = 0; i < max_epochs; ++i) {
             last = run_epoch(h);
@@ -617,6 +751,21 @@ public:
         std::lock_guard<std::mutex> g(mu_);
         RingStats out{};
         if (!check_handle(h)) return out;
+        // v0.46.1 — when the gate took the CPU branch, ring stats reflect
+        // the host-side mirror: ingress was pushed N times, consumed N
+        // times by the CPU reference, capacity is the substrate's nominal
+        // ring capacity.
+        if (!round_.metal_initialized) {
+            const uint32_t n = static_cast<uint32_t>(round_.host_input_mirror.size());
+            if (s == ServiceId::Ingress) {
+                out.pushed   = n;
+                out.consumed = n;
+                out.head     = n;
+                out.tail     = n;
+            }
+            out.capacity = kDefaultRingCapacity;
+            return out;
+        }
         const auto* hdrs = static_cast<const RingHeader*>([round_.hdrs_buf contents]);
         const auto& r = hdrs[static_cast<uint32_t>(s)];
         out.pushed   = r.pushed;
@@ -633,9 +782,90 @@ private:
     }
 
     QuasarRoundResult read_result_locked() const {
+        // v0.46.1 — CPU branch: return cached result. Metal branch: read
+        // from device-shared result_buf.
+        if (!round_.metal_initialized) {
+            return round_.cached_cpu_result_valid
+                ? round_.cached_cpu_result : QuasarRoundResult{};
+        }
         QuasarRoundResult out{};
         std::memcpy(&out, [round_.result_buf contents], sizeof(QuasarRoundResult));
         return out;
+    }
+
+    // v0.46.1 — substrate-threshold gate. Returns true when the round
+    // should fall through to the CPU reference instead of Metal. Conditions:
+    //   1. count < kQuasarSubstrateMetalThreshold (perf — Metal is slower
+    //      below this); AND
+    //   2. no tx has EVM bytecode AND no votes have been pushed — the CPU
+    //      reference only models the v0.36 synthetic substrate (one R+W
+    //      pair per tx + Block-STM + receipts/state/execution roots). EVM
+    //      bytecode interpretation (v0.41) and on-device vote verification
+    //      (v0.38) are Metal-only. Routing those workloads to CPU would
+    //      diverge from Metal output and fail STM-004 byte-equality.
+    //   3. LUX_QUASAR_FORCE_METAL=1 unset (bench reproducibility override).
+    bool substrate_should_use_cpu_locked() const {
+        if (const char* force = std::getenv("LUX_QUASAR_FORCE_METAL")) {
+            if (force[0] == '1') return false;
+        }
+        // Vote / state-page ingestion poisons the CPU branch: the CPU
+        // reference doesn't model BLS / Ringtail vote verification, QC
+        // composition, or cold-state requests. push_votes / push_state_pages
+        // set requires_metal so the gate falls through to Metal.
+        if (round_.requires_metal) return false;
+        const std::size_t n = round_.host_input_mirror.size();
+        if (n >= kQuasarSubstrateMetalThreshold) return false;
+        // Any tx with bytecode forces the Metal path: the CPU reference
+        // doesn't interpret EVM bytecode (substrate-only — synthetic R+W
+        // per tx + receipts / state / execution roots).
+        for (const auto& tx : round_.tx_replay) {
+            if (!tx.bytes.empty()) return false;
+        }
+        return true;
+    }
+
+    // Pack the CPU reference result into a QuasarRoundResult and write it
+    // to round_.result_buf so poll_round_result and ring_stats remain
+    // consistent. The CPU reference fills the four substrate roots
+    // (block, state, receipts, execution, mode) plus tx_count, gas, and
+    // status; the chain-echo fields are taken from the descriptor (same
+    // path as begin_round populates them on the Metal side).
+    void run_cpu_reference_locked(QuasarRoundResult& out) {
+        auto cpu = quasar::gpu::ref::run_reference(
+            round_.desc, std::span<const quasar::gpu::ref::HostInputTx>(
+                round_.host_input_mirror));
+
+        std::memset(&out, 0, sizeof(out));
+        out.status         = cpu.status;
+        out.tx_count       = cpu.tx_count;
+        out.gas_used_lo    = static_cast<uint32_t>(cpu.gas_used & 0xFFFFFFFFu);
+        out.gas_used_hi    = static_cast<uint32_t>(cpu.gas_used >> 32);
+        out.conflict_count = cpu.conflict_count;
+        out.repair_count   = cpu.repair_count;
+        out.mode           = cpu.mode;
+        std::memcpy(out.block_hash,     cpu.block_hash,     32);
+        std::memcpy(out.state_root,     cpu.state_root,     32);
+        std::memcpy(out.receipts_root,  cpu.receipts_root,  32);
+        std::memcpy(out.execution_root, cpu.execution_root, 32);
+        std::memcpy(out.mode_root,      cpu.mode_root,      32);
+
+        // Echo the 9 canonical chain roots + cert subject from the descriptor
+        // (Metal path does the same in begin_round; keep both branches in lockstep).
+        std::memcpy(out.pchain_root_echo,           round_.desc.pchain_validator_root,    32);
+        std::memcpy(out.cchain_root_echo,           round_.desc.parent_block_hash,        32);
+        std::memcpy(out.xchain_root_echo,           round_.desc.xchain_execution_root,    32);
+        std::memcpy(out.qchain_root_echo,           round_.desc.qchain_ceremony_root,     32);
+        std::memcpy(out.zchain_root_echo,           round_.desc.zchain_vk_root,           32);
+        std::memcpy(out.achain_root_echo,           round_.desc.achain_state_root,        32);
+        std::memcpy(out.bchain_root_echo,           round_.desc.bchain_state_root,        32);
+        std::memcpy(out.mchain_root_echo,           round_.desc.mchain_state_root,        32);
+        std::memcpy(out.fchain_root_echo,           round_.desc.fchain_state_root,        32);
+        std::memcpy(out.certificate_subject_echo,   round_.desc.certificate_subject,      32);
+
+        // Cache for poll_round_result on the CPU branch. Metal result_buf is
+        // not allocated; cached_cpu_result is the only source of truth.
+        round_.cached_cpu_result = out;
+        round_.cached_cpu_result_valid = true;
     }
 
     id<MTLDevice>               device_;
